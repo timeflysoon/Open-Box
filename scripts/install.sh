@@ -26,7 +26,7 @@ set -eu
 # uhttpd / rpcd 读到,LuCI 的 status.js 曾因此变成 600 而 403(GitHub #103 #106 #110)
 umask 022
 
-REPO="liandu2024/Open-Box"
+REPO="timeflysoon/Open-Box"
 INSTALL_ROOT="/opt/open-box"
 # OpenWrt 的 /tmp 通常是 tmpfs，会把下载包直接计入运行内存。完整安装包约
 # 106MB，低内存路由器在面板/内核已经运行时下载它可能触发 OOM，表现为“死机”。
@@ -414,7 +414,7 @@ check_existing_install() {
     fi
     # 光说"请使用 update.sh"没用:用户照着敲 update.sh 只会得到 not found(真机反馈)。给完整命令。
     die "$INSTALL_ROOT 已存在且包含完整安装。如需升级,请复制下面这条命令运行:
-       curl -fsSL https://raw.githubusercontent.com/liandu2024/Open-Box/main/scripts/update.sh | sh -s -- --mirror
+       curl -fsSL https://raw.githubusercontent.com/timeflysoon/Open-Box/main/scripts/update.sh | sh -s -- --mirror
      (也可以在面板或 LuCI → 服务 → Open-Box 页面里点升级。)"
   fi
   info "检测到保留的 $INSTALL_ROOT/data(此前卸载时选择了保留数据),安装将复用它。"
@@ -658,7 +658,7 @@ fetch_to_file() {
 }
 
 # 镜像通道把整条 URL(含协议头)拼在前缀后面,例如:
-#   https://<前缀>/https://github.com/liandu2024/Open-Box/releases/...
+#   https://<前缀>/https://github.com/timeflysoon/Open-Box/releases/...
 # 这与设计文档给出的 raw.githubusercontent 加速示例是同一种拼法,直连/api/release 三类
 # URL 统一走这条规则,方便镜像服务按同一套反代规则处理。
 build_url() {
