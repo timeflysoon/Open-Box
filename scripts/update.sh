@@ -1,5 +1,6 @@
 #!/bin/sh
-# Open-Box 升级脚本(POSIX sh,兼容 OpenWrt ash)。
+# Open-Box 升级脚本(POSIX sh,兼容 OpenWrt ash 与 Debian dash)。OpenWrt 与 Debian / Ubuntu(systemd)都用它,
+# 系统相关的分叉见 detect_platform。
 #
 # 用法:
 #   sh update.sh                    # 沿用安装时选择的通道(记录在 data/channel)
@@ -10,7 +11,7 @@
 #   sh update.sh --detach           # 派生一个后台子进程去真正执行升级,自己立即返回;
 #                                    # 输出被子进程重定向到 ${TMPDIR:-/tmp}/openbox-update.log。
 #                                    # 供 LuCI 兜底页一键升级调用——rpcd 的 fs.exec 有超时,
-#                                    # 而升级要下载约 78MB,同步调用必然中途超时;详见下方
+#                                    # 而升级要下载约 106MB,同步调用必然中途超时;详见下方
 #                                    # 自迁移小节的说明。可以和 --direct/--mirror 组合,
 #                                    # 例如 sh update.sh --detach --mirror。
 #   sh update.sh --cancel           # 请求取消一次正在运行的 --detach 升级。协作式:
@@ -36,25 +37,35 @@
 #                                    # 页面侧对每个渠道各发起一次 fs.exec——rpcd 的
 #                                    # fs.exec 有超时,一次 exec 里探测全部渠道有拖到
 #                                    # 超时的风险,所以改成"一次 exec 只探测一个"。
+#   sh update.sh --rollback --direct       # 从 GitHub 重新下载当前版本的上一个正式 Release 装回去
+#   sh update.sh --rollback --mirror <前缀> # 同上,安装包经镜像下载(GitHub API 仍先直连)
+#                                    # 本机不保留旧版备份,回退依赖能访问 GitHub;数据目录不动
 #
 # 不带 --direct/--mirror 时沿用安装时选择的下载通道(记录在 data/channel),这是
-# 保持向后兼容的默认行为。下载(到 /tmp)与 SHA256 校验都在临时目录完成;只有
-# 校验通过后,才把包解到 $INSTALL_ROOT 所在文件系统的暂存目录(不是 /tmp——/tmp
-# 常是 tmpfs,512MB 机器装不下解包后的体积,见 Important 3),再停服务、换文件。
+# 保持向后兼容的默认行为。下载与 SHA256 校验都在持久化分区的临时目录完成;只有
+# 校验通过后,才把包解到 $INSTALL_ROOT 所在文件系统的暂存目录,再停服务、换文件。
 # 任何一步失败都直接退出且不触碰现有安装。
 # 保留 data/(用户数据)与 etc/(部署出的运行配置),只替换 node/ panel/ bin/
 # openwrt/ 与 meta.json。内核和 Geo 数据按发布清单校验，相同版本复用，不重复下载。
 # 升级完成后重新生成配置并恢复原先运行的内核。
 
 set -eu
+# 调用方(rpcd 的 fs.exec、面板进程、curl | sh)的 umask 不一定是 022;解包和拷贝出来的文件要能被
+# uhttpd / rpcd 读到,LuCI 的 status.js 曾因此变成 600 而 403(GitHub #103 #106 #110)
+umask 022
 
 REPO="liandu2024/Open-Box"
 INSTALL_ROOT="/opt/open-box"
+# /tmp 是 tmpfs，升级包当前约 106MB；在内核和面板运行时把它下载到 /tmp
+# 会额外消耗同等大小的运行内存，512MB 设备可能被 OOM killer 杀掉。默认改用
+# /opt 所在持久化分区，仍可通过 OPENBOX_TMPDIR 指定外接存储等其它目录。
+# TMP_PARENT 在下面用 openbox_pick_tmp_parent 现挑(见那一段的说明),这里先留空
+TMP_PARENT=""
 # 升级要在安装目录所在分区暂存一份新的(两阶段换文件,新旧并存才能原子切换),装好的一份
 # 约 213MB,所以升级本身只需要约 213MB 空闲——不是安装那个 512MB(那是"装完还要留得下
 # 以后升级"的总量)。以前照抄 512MB 把只剩 495MB 的用户挡在升级门外(GitHub #11)。
 MIN_FREE_KB=$((300 * 1024))
-# /tmp 通常是 tmpfs(内存),这里只放下载下来的压缩包(实测约 78MB),留出安全余量;
+# 临时目录默认在持久化分区,这里只放下载下来的压缩包(实测约 106MB);
 # 解包目标不在这里(见下方 Important 3),所以这个阈值不需要覆盖解包后的体积。
 MIN_TMP_DOWNLOAD_KB=$((100 * 1024))
 
@@ -73,9 +84,222 @@ STATUS_PID=""
 
 info() { echo "[open-box] $*"; }
 warn() { echo "[open-box] 警告:$*" >&2; }
+# curl | sh 的时候,脚本本身是从 stdin 读进来的:我们一 exit,管道读端就关了,curl 还在写剩下的
+# 内容就吃一个 EPIPE,于是用户在我们那句中文错误下面又看到一行莫名其妙的
+# `curl: (23) Failure writing output to destination`(真机截图里就是这样,很容易被当成"下载失败")。
+# 退出前把 stdin 剩下的内容读完,curl 就能正常写完、安静退出。只在 stdin 不是终端时做 ——
+# 交互式跑 `sh install.sh` 时 stdin 是终端,cat 会一直等输入,那就真卡死了。
+# ---- openbox-env-report:start ----
+# 这一段在 install.sh / update.sh / uninstall.sh 三份里**一模一样**,由
+# panel/server/system/script-parity.test.mjs 守着逐字相同。
+#
+# 装不上 / 升不上时把环境摊开来打一遍。起因是 GitHub #191:用户只看到一句「无法创建临时目录」,
+# 我这边既不知道 /opt 为什么写不了,也没法让他一次就把该给的信息给全,来回问了好几轮还是靠猜。
+# 这里的每一行都是排查时真会问的东西,而且全部容错——诊断信息自己出错绝不能把退出流程再搞砸。
+openbox_env_report() {
+  [ "${ENV_REPORT_ON:-0}" = "1" ] || return 0
+  _er_root_parent=$(dirname -- "$INSTALL_ROOT")
+  {
+    echo ""
+    echo "---- 环境信息(反馈问题时请连同上面的错误一起贴出来)----"
+    echo "固件: $(sed -n 's/^DISTRIB_DESCRIPTION=//p' /etc/openwrt_release 2>/dev/null | tr -d "\"'" | head -n 1)"
+    echo "系统: $(sed -n 's/^PRETTY_NAME=//p' /etc/os-release 2>/dev/null | tr -d "\"'" | head -n 1)  服务管理: $([ -d /run/systemd/system ] && echo systemd || echo procd)"
+    echo "内核: $(uname -r 2>/dev/null)  架构: $(uname -m 2>/dev/null)"
+    echo "安装目录: $INSTALL_ROOT"
+    echo "$_er_root_parent 所在文件系统: $(awk -v d="$_er_root_parent" '{ mp=$2; if (mp=="/" || index(d"/", mp"/")==1) { if (length(mp) > bl) { bl=length(mp); best=$1" 挂在 "mp" ("$3", "$4")" } } } END { print best }' /proc/mounts 2>/dev/null)"
+    echo "$_er_root_parent 空间: $(df -Pk "$_er_root_parent" 2>/dev/null | awk 'END {printf "%s MB 可用 / 共 %s MB", int($4/1024), int($2/1024)}')"
+    echo "$_er_root_parent 属性: $(ls -ld "$_er_root_parent" 2>&1 | head -n 1)"
+    # 逐个试候选临时目录:这是 #191 那类故障最直接的证据
+    for _er_c in ${OPENBOX_TMPDIR:+"$OPENBOX_TMPDIR"} "$_er_root_parent" /var/tmp /root /tmp; do
+      [ -n "$_er_c" ] || continue
+      _er_probe="$_er_c/.open-box-wtest.$$"
+      rm -rf "$_er_probe" 2>/dev/null
+      if _er_err=$( ( umask 077; mkdir -p "$_er_probe" ) 2>&1 ); then
+        rmdir "$_er_probe" 2>/dev/null
+        echo "可写检查 $_er_c: 可以建目录"
+      else
+        echo "可写检查 $_er_c: $_er_err"
+      fi
+    done
+    echo "内存: $(awk '/^MemAvailable:/ {printf "%d MB 可用", $2/1024}' /proc/meminfo 2>/dev/null)"
+    # 必需的只有 tar、gzip 和 curl / wget 其中一个;其余要么有退路(mktemp、ss / netstat),要么只在特定平台用(uci、nft)。
+    # 以前一律写「缺少的命令」,好几个人把「ss」当成了安装失败的原因(GitHub #248 #250 #255)
+    _er_need=""
+    _er_opt=""
+    for _er_t in tar gzip; do
+      command -v "$_er_t" >/dev/null 2>&1 || _er_need="$_er_need $_er_t"
+    done
+    command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1 || _er_need="$_er_need curl/wget"
+    for _er_t in mktemp ss netstat uci nft; do
+      command -v "$_er_t" >/dev/null 2>&1 || _er_opt="$_er_opt $_er_t"
+    done
+    [ -n "$_er_need" ] && echo "缺少必需的命令:$_er_need"
+    [ -n "$_er_opt" ] && echo "未安装的可选命令(不影响安装):$_er_opt"
+    echo "----------------------------------------------------"
+  } >&2
+  return 0
+}
+# ---- openbox-env-report:end ----
+
+# ---- openbox-glibc-node:start ----
+# 这一段在 install.sh / update.sh 两份里**一模一样**,由 panel/server/system/script-parity.test.mjs 守着逐字相同。
+#
+# Debian / Ubuntu:发布包里的 Node 是 OpenWrt 用的 musl 版,glibc 系统上根本起不来(没有 musl 的加载器)。
+# 按 meta.json 里的 nodeVersion 从 nodejs.org(不通就换 npmmirror)取同一版本的官方 glibc 二进制,对着
+# SHASUMS256.txt 校验后只换 node/bin/node,再删掉 node/lib/(musl 版 libstdc++,glibc 的 Node 装上它会崩)。
+# 换过的目录留一个 node/.flavor 标记(glibc <版本>):已经是这个版本的 glibc Node 就什么都不做——升级时
+# 运行时组件没变,组件更新会把原来的 node/ 原样带过来。
+openbox_glibc_node() {
+  _gn_root="$1"
+  _gn_ver=$(sed -n 's/.*"nodeVersion" *: *"\([^"]*\)".*/\1/p' "$_gn_root/meta.json" 2>/dev/null | head -n 1)
+  _gn_arch=$(sed -n 's/.*"arch" *: *"\([^"]*\)".*/\1/p' "$_gn_root/meta.json" 2>/dev/null | head -n 1)
+  [ -n "$_gn_ver" ] && [ -n "$_gn_arch" ] || { echo "meta.json 里没有 nodeVersion / arch"; return 1; }
+  if [ -x "$_gn_root/node/bin/node" ] && [ "$(cat "$_gn_root/node/.flavor" 2>/dev/null)" = "glibc $_gn_ver" ]; then
+    return 0
+  fi
+  # 升级时复用的运行时在暂存目录里是指向现有安装的链接:在这里替换就直接改到了还没提交的现有安装
+  if [ -L "$_gn_root/node" ]; then echo "node 是指向现有安装的链接,不在这里替换"; return 1; fi
+  _gn_name="node-v$_gn_ver-linux-$_gn_arch"
+  _gn_tmp="$_gn_root/.node-glibc.$$"
+  rm -rf "$_gn_tmp"
+  mkdir -p "$_gn_tmp" || { echo "无法创建 $_gn_tmp"; return 1; }
+  _gn_ok=""
+  for _gn_base in "https://nodejs.org/dist/v$_gn_ver" "https://npmmirror.com/mirrors/node/v$_gn_ver"; do
+    echo "  从 $_gn_base 下载 $_gn_name.tar.xz ..." >&2
+    rm -f "$_gn_tmp/SHASUMS256.txt" "$_gn_tmp/$_gn_name.tar.xz"
+    fetch_to_file "$_gn_base/SHASUMS256.txt" "$_gn_tmp/SHASUMS256.txt" 2>/dev/null || continue
+    fetch_to_file "$_gn_base/$_gn_name.tar.xz" "$_gn_tmp/$_gn_name.tar.xz" 2>/dev/null || continue
+    _gn_want=$(grep " $_gn_name\.tar\.xz\$" "$_gn_tmp/SHASUMS256.txt" 2>/dev/null | awk '{print $1}' | head -n 1)
+    _gn_have=$(sha256sum "$_gn_tmp/$_gn_name.tar.xz" 2>/dev/null | awk '{print $1}')
+    if [ -n "$_gn_want" ] && [ "$_gn_want" = "$_gn_have" ]; then _gn_ok=1; break; fi
+    echo "  校验不符,换一个源" >&2
+  done
+  [ -n "$_gn_ok" ] || { rm -rf "$_gn_tmp"; echo "下载 glibc 版 Node $_gn_ver 失败(nodejs.org 与 npmmirror 都没拿到)"; return 1; }
+  if ! tar -xJf "$_gn_tmp/$_gn_name.tar.xz" -C "$_gn_tmp" "$_gn_name/bin/node"; then
+    rm -rf "$_gn_tmp"
+    echo "解包 $_gn_name.tar.xz 失败(缺 xz?)"
+    return 1
+  fi
+  mkdir -p "$_gn_root/node/bin"
+  mv -f "$_gn_tmp/$_gn_name/bin/node" "$_gn_root/node/bin/node" || { rm -rf "$_gn_tmp"; echo "替换 node/bin/node 失败"; return 1; }
+  chmod +x "$_gn_root/node/bin/node"
+  rm -rf "$_gn_root/node/lib" "$_gn_tmp"
+  printf 'glibc %s\n' "$_gn_ver" > "$_gn_root/node/.flavor"
+  return 0
+}
+# ---- openbox-glibc-node:end ----
+
+# ---- openbox-node-smoke:start ----
+# 随包的 Node 真的能在这台机器上跑起来吗?(GitHub #145)
+# `node -v` 不算数 —— 打版本号在解析参数阶段就返回了,V8 还没初始化;真正跑一句脚本才会暴露
+# 「Check failed: 0 == ret.」这类启动即崩(页大小 / 地址空间 / 内存限制对不上)。不做这一步的话,
+# Node 起不来的机器上安装脚本照样打印"安装完成",用户只看到面板打不开、status 还显示 running
+# (procd 每 5 秒重拉一次),排查要绕一大圈。
+#
+# 内核缺 madvise 的设备(GitHub #290 #293:QWRT 等厂商固件编内核时关掉了 CONFIG_ADVISE_SYSCALLS):V8 一启动就
+# 「Check failed: 0 == ret.」。随包带了一个只接管 madvise 的兼容库(openwrt/bin/compat/,源码 scripts/node-compat/):
+# 直接跑不起来时带上它(LD_PRELOAD)再试一次,能跑就把库的路径记进 data/node-preload——面板服务、open-box 命令、
+# 升级脚本启动 Node 时照着带上;直接就能跑的删掉这个文件(换了固件的机器不再带)。
+#
+# 升级时在换入之前先试暂存目录里的新 Node($1 = 那份的根目录,不给就是安装目录):起不来就在动现有安装之前中止,
+# 不再等旧版本删掉之后才发现(审查第八项)。兼容库的路径按正式安装目录记,换入之后面板服务从那里加载。
+openbox_node_try() {
+  # $1:Node 所在的根目录;$2:要预加载的库,空 = 不带(显式清掉:面板发起的升级会从面板进程继承 LD_PRELOAD)
+  # OPENSSL_CONF=/dev/null:不读系统的 OpenSSL 配置,有的固件那份写法随包 Node 解析不了(GitHub #265);面板服务也这样起
+  LD_PRELOAD="$2" OPENSSL_CONF=/dev/null LD_LIBRARY_PATH="$1/node/lib" "$1/node/bin/node" -e 'process.stdout.write("ok")' 2>&1
+}
+openbox_node_smoke() {
+  _ob_root="${1:-$INSTALL_ROOT}"
+  _ob_preload_file="$INSTALL_ROOT/data/node-preload"
+  [ -x "$_ob_root/node/bin/node" ] || { echo "缺少 $_ob_root/node/bin/node"; return 1; }
+  _ob_out=$(openbox_node_try "$_ob_root" "")
+  if [ "$_ob_out" = "ok" ]; then
+    rm -f "$_ob_preload_file"
+    return 0
+  fi
+  case "$(uname -m 2>/dev/null)" in
+    aarch64|arm64) _ob_lib="libobmadvise-aarch64.so" ;;
+    x86_64|amd64) _ob_lib="libobmadvise-x86_64.so" ;;
+    *) _ob_lib="" ;;
+  esac
+  if [ -n "$_ob_lib" ] && [ -f "$_ob_root/openwrt/bin/compat/$_ob_lib" ] && [ "$(openbox_node_try "$_ob_root" "$_ob_root/openwrt/bin/compat/$_ob_lib")" = "ok" ]; then
+    if mkdir -p "$INSTALL_ROOT/data" && printf '%s\n' "$INSTALL_ROOT/openwrt/bin/compat/$_ob_lib" > "$_ob_preload_file"; then
+      echo "[open-box] 这台设备的内核没有 madvise 系统调用,随包 Node 改用兼容库运行($INSTALL_ROOT/openwrt/bin/compat/$_ob_lib)。" >&2
+      return 0
+    fi
+    echo "无法写入 $_ob_preload_file"
+  fi
+  echo "$_ob_out" | head -n 5
+  # 动态链接器报缺符号 = 固件的 musl C 库太老(OpenWrt 21.02 及更早是 1.1.x,没有 pthread_getname_np 等),
+  # 随包 Node 要 musl 1.2.3 以上;顺手把系统的版本号打出来,调用处据此提示升级固件
+  case "$_ob_out" in
+    *"symbol not found"*)
+      for _ob_ld in /lib/ld-musl-*.so.1; do
+        [ -x "$_ob_ld" ] && "$_ob_ld" 2>&1 | sed -n 's/^Version /系统的 musl C 库版本:/p'
+        break
+      done
+      ;;
+  esac
+  return 1
+}
+# ---- openbox-node-smoke:end ----
+
+# ---- openbox-tmp-parent:start ----
+# 这一段在 install.sh / update.sh / uninstall.sh 三份里**一模一样**(三个脚本各自单独 curl 下来跑,
+# 没法共用文件),由 panel/server/system/script-parity.test.mjs 守着逐字相同。
+#
+# 临时目录默认放在安装目录所在的持久化分区(/opt):下载包上百 MB,塞进 /tmp 的 tmpfs 会吃光内存。
+# 但不是每台机器的 /opt 都能写 —— iStoreOS 25.12.5 上就建不了目录,老版本直接 die「无法创建临时
+# 目录」,用户连装都装不上(GitHub #191)。所以按顺序试几个位置,挑第一个真能创建目录的;
+# 一个都不行才报错,并且把最后一次的真实报错带出来,不再只甩一句"无法创建"。
+openbox_tmp_probe_err=""
+openbox_pick_tmp_parent() {
+  _optp_install_parent=$(dirname -- "$INSTALL_ROOT")
+  openbox_tmp_probe_err=""
+  for _optp in ${OPENBOX_TMPDIR:+"$OPENBOX_TMPDIR"} "$_optp_install_parent" /var/tmp /root /tmp; do
+    [ -n "$_optp" ] || continue
+    mkdir -p "$_optp" 2>/dev/null || continue
+    _optp_probe="$_optp/.open-box-wtest.$$"
+    rm -rf "$_optp_probe" 2>/dev/null
+    openbox_tmp_probe_err=$( ( umask 077; mkdir "$_optp_probe" ) 2>&1 ) || continue
+    rmdir "$_optp_probe" 2>/dev/null
+    printf '%s\n' "$_optp"
+    return 0
+  done
+  return 1
+}
+# ---- openbox-tmp-parent:end ----
+
+# 真要用临时目录时才挑一次(挑不到就带着真实原因退出)。挑好后各处复用同一个 TMP_PARENT。
+ensure_tmp_parent() {
+  [ -n "$TMP_PARENT" ] && return 0
+  TMP_PARENT=$(openbox_pick_tmp_parent) || die "找不到可写的临时目录(依次试过 ${OPENBOX_TMPDIR:+${OPENBOX_TMPDIR}、}$(dirname -- "$INSTALL_ROOT")、/var/tmp、/root、/tmp)。最后一次的错误:${openbox_tmp_probe_err:-未知}。可用 OPENBOX_TMPDIR=<某个可写目录> 指定。"
+  case "$TMP_PARENT" in
+    /tmp|/tmp/*) warn "$(dirname -- "$INSTALL_ROOT") 写不了,改用 $TMP_PARENT(它通常是内存盘,上百 MB 的包可能放不下;不行就用 OPENBOX_TMPDIR 指到一块有空间的磁盘)。" ;;
+  esac
+  return 0
+}
+
+drain_stdin() {
+  [ -t 0 ] && return 0
+  # 必须有时间上限:stdin 是一个"开着但永远不来数据也不关"的管道时(从别的脚本里调、
+  # 某些自动化环境),无限制的 cat 会把脚本挂死——本地实测就卡住过。curl | sh 的场景里
+  # 剩下的脚本内容早就排在管道里了,几秒足够读完。
+  if command -v timeout >/dev/null 2>&1; then
+    timeout 3 cat >/dev/null 2>&1
+    return 0
+  fi
+  # 没有 timeout 就退回 read -t(busybox ash 支持;dash 不支持会立刻失败,那就干脆不排空:
+  # 顶多是 curl 再报一次 23,总比挂死强)
+  while IFS= read -r -t 1 _ds_line 2>/dev/null; do :; done
+  return 0
+}
+
 die() {
   echo "[open-box] 错误:$*" >&2
   write_status failed "" "" "$*"
+  openbox_env_report
+  drain_stdin
   exit 1
 }
 
@@ -132,6 +356,28 @@ safe_rm_rf() {
   rm -rf -- "$target"
 }
 
+# 解包:装了 GNU tar 的固件(LibWrt 等)在 overlayfs 上解 pnpm 的目录结构会报
+# "Directory renamed before its status could be extracted"(GitHub #140);busybox 自带的 tar 没这个毛病,
+# 系统 tar 失败就换它重试一次(已经解出来的文件直接覆盖)。随包的 update-components.sh 也用它。
+extract_tgz() {
+  tar -xzf "$1" -C "$2" && return 0
+  # 不先查 busybox --list:有的 busybox 编译时不带 --list,查不到也能用(GitHub #264);没有 tar 小程序时这一步只是再失败一次
+  if command -v busybox >/dev/null 2>&1; then
+    warn "系统 tar 解包失败,改用 busybox tar 重试..."
+    busybox tar -xzf "$1" -C "$2" && return 0
+  fi
+  return 1
+}
+
+# 建临时目录:个别固件的 mktemp 不能执行(GitHub #165:sh: mktemp: Permission denied),退回 mkdir。
+# 目录名带进程号和时间,mkdir 不带 -p:已存在就失败,不会踩到别人的目录。
+make_tmp_dir() {
+  _mt_dir=$(mktemp -d "$1.XXXXXX" 2>/dev/null) && [ -d "$_mt_dir" ] && { echo "$_mt_dir"; return 0; }
+  _mt_dir="$1.$$.$(date +%s 2>/dev/null || echo 0)"
+  ( umask 077; mkdir "$_mt_dir" ) 2>/dev/null || return 1
+  echo "$_mt_dir"
+}
+
 # 供 --probe 计时用,毫秒。首选 /proc/uptime:第一列是开机以来的秒数、带两位小数
 # (10ms 精度),任何 Linux 都有,busybox awk 就能算,不依赖 date 的实现。
 # 以前只用 date +%s%N:OpenWrt 自带的 busybox date 不支持 %N,而且不是原样输出
@@ -174,8 +420,8 @@ detect_downloader() {
 
 fetch_to_stdout() {
   case "$DOWNLOADER" in
-    curl) curl -fsSL "$1" ;;
-    wget) wget -qO- "$1" ;;
+    curl) curl -fsSL --connect-timeout 15 --max-time 60 "$1" ;;
+    wget) wget -q --timeout=60 -O - "$1" ;;
   esac
 }
 
@@ -199,13 +445,34 @@ build_url() {
 }
 
 # 探测专用的下载函数:比 fetch_to_file 多加连接/总时长上限,避免探测阶段卡在一个
-# 已经死掉、只是不返回错误而是一直不响应的加速站上——真正下载 78MB 正文时仍用不
+# 已经死掉、只是不返回错误而是一直不响应的加速站上——真正下载 106MB 正文时仍用不
 # 限时的 fetch_to_file,不希望网络慢的用户被这里的短超时误伤。
 fetch_to_file_probe() {
   case "$DOWNLOADER" in
     curl) curl -fsSL --connect-timeout 8 --max-time 20 -o "$2" "$1" ;;
     wget) wget -q --timeout=20 -O "$2" "$1" ;;
   esac
+}
+
+# 校验文件(.sha256、组件清单,几十字节到几 KB)先直连 GitHub 取,取不到才走镜像:正文走镜像没关系,只要校验和
+# 来自 GitHub 本身,镜像就没法同时换掉正文和校验和(以前两样都从同一个镜像拿,审查第七项)。直连一次不通就记下来,
+# 后面的小文件不再先试直连,免得每个都白等一次超时。$1 是 GitHub 原始地址(不带镜像前缀);$3 可选,给了就按它
+# 核对内容格式(sha = 一行 64 位十六进制哈希),不像样的当没取到(有的网络对直连回一页 HTML)
+TRUSTED_DIRECT_BROKEN=0
+fetch_to_file_trusted() {
+  if [ "$CHANNEL" = "mirror" ] && [ "$TRUSTED_DIRECT_BROKEN" = "0" ]; then
+    if fetch_to_file_probe "$1" "$2" 2>/dev/null && { [ "${3:-}" != "sha" ] || valid_sha_file "$2"; }; then
+      return 0
+    fi
+    TRUSTED_DIRECT_BROKEN=1
+  fi
+  fetch_to_file "$(build_url "$1")" "$2"
+}
+valid_sha_file() {
+  _vs_hash=$(awk 'NR==1{print $1}' "$1" 2>/dev/null)
+  [ "${#_vs_hash}" = 64 ] || return 1
+  case "$_vs_hash" in *[!0-9a-fA-F]*) return 1 ;; esac
+  return 0
 }
 
 # 探测目标 URL 的 Content-Length(HEAD 请求,带超时,不下载正文),供下载进度的
@@ -233,21 +500,46 @@ probe_content_length() {
 # 带进度上报、可取消的下载:把真正的下载子进程(curl/wget 本体,不是套一层
 # subshell——这样 $! 拿到的就是它自己的 PID,kill 才打得准)放到后台,前台每秒
 # 醒一次,拿正在写的目标文件当前大小去更新状态文件(bytes/total),同时检查取消
-# 标志。这个循环是"下载阶段响应取消"的唯一实现——78MB 在慢网络上要跑很久,不能
+# 标志。这个循环是"下载阶段响应取消"的唯一实现——106MB 在慢网络上要跑很久,不能
 # 等它整个 fetch_to_file() 跑完才有机会检查取消。
 #
 # 参数:$1 = URL,$2 = 目标文件路径,$3 = 总字节数(可能是空字符串,即未知)。
 # 返回:下载成功且未被取消 → 0;下载命令本身失败(网络错误等)→ 透传其退出码,
 # 调用方按老逻辑 die();被取消 → 直接 write_status cancelled 并 exit 0,不返回
 # (与 check_cancel_and_abort() 一致的收尾方式,复用同一个 cleanup() trap)。
+# 下载失败时换来源再试(openbox_download_sources)。组件升级走的是装着的老 update-components.sh,传进来的地址已经拼好
+# 镜像前缀,所以先还原成原始地址再排来源;第一个就是刚才失败的那个,跳过。成功的来源留给后面的下载
 download_with_progress() {
+  download_with_progress_once "$1" "$2" "$3" && return 0
+  _dwf_orig=$(openbox_unmirror_url "$1")
+  if [ "$CHANNEL" = "mirror" ] && [ -n "$MIRROR_PREFIX" ]; then _dwf_prev=$(openbox_source_label "$MIRROR_PREFIX"); else _dwf_prev=$(openbox_source_label direct); fi
+  _dwf_ifs=$IFS
+  IFS='
+'
+  for _dwf_line in $(openbox_download_sources "$_dwf_orig"); do
+    IFS=$_dwf_ifs
+    _dwf_src=${_dwf_line%% *}
+    _dwf_full=${_dwf_line#* }
+    [ "$_dwf_full" = "$1" ] && continue
+    warn "从 ${_dwf_prev} 下载失败,换 $(openbox_source_label "$_dwf_src") 再试..."
+    if download_with_progress_once "$_dwf_full" "$2" "$3"; then
+      openbox_adopt_source "$_dwf_src"
+      return 0
+    fi
+    _dwf_prev=$(openbox_source_label "$_dwf_src")
+  done
+  IFS=$_dwf_ifs
+  return 1
+}
+download_with_progress_once() {
   _dwp_url="$1"
   _dwp_out="$2"
   _dwp_total="$3"
   rm -f "$_dwp_out"
+  # 同 install.sh 的 fetch_to_file:不限总时长,卡住不动 60 秒就失败(以前会一直挂在「下载中」)
   case "$DOWNLOADER" in
-    curl) curl -fsSL -o "$_dwp_out" "$_dwp_url" & ;;
-    wget) wget -q -O "$_dwp_out" "$_dwp_url" & ;;
+    curl) curl -fsSL --connect-timeout 15 --speed-limit 1024 --speed-time 60 -o "$_dwp_out" "$_dwp_url" & ;;
+    wget) wget -q --timeout=60 -O "$_dwp_out" "$_dwp_url" & ;;
   esac
   _dwp_pid=$!
   write_status downloading 0 "$_dwp_total" ""
@@ -297,7 +589,7 @@ download_with_progress() {
 }
 
 # 探测单个"渠道"是否真的可用:candidate 为 "direct" 时探测 GitHub 直连,其它值当
-# 镜像前缀探测。请求发布资产的 .sha256 文件(几十字节,不是 78MB 正文),并连内容
+# 镜像前缀探测。请求发布资产的 .sha256 文件(几十字节,不是 106MB 正文),并连内容
 # 一起校验格式(64 位十六进制哈希 + 空白 + 资产名)——失效的加速站经常返回 200
 # 状态的 HTML 错误页而不是网络层错误,只看 curl/wget 的退出码不够,必须验证内容,
 # 否则会把"死了但仍应答"的镜像误判为可用。
@@ -337,18 +629,18 @@ probe_mirror_prefix() {
 # 要把 node/ panel/ bin/ openwrt/ 整棵目录树连同 meta.json 一起换掉,而本脚本自己
 # 现在也活在这棵目录树里——busybox ash 是边读边执行脚本文件的,自己在跑的时候被
 # 自己即将执行的替换逻辑动到,属于自找麻烦(与 uninstall.sh 同一个坑,解法照抄:
-# 发现自己在安装目录里,先复制到 /tmp 再从那里重新执行;原地那份和目录一起被替换
+# 发现自己在安装目录里,先复制到安装目录所在持久化分区的临时目录再重新执行;原地那份和目录一起被替换
 # 掉即可)。
 #
 # 这里比 uninstall.sh 多一层:--detach 会再 fork 一次真正干活的子进程(见下方),
-# 所以"跑完删除 /tmp 副本"这件事不能在这里的 case 分支里一次性做完——挪到下面与
+# 所以"跑完删除临时副本"这件事不能在这里的 case 分支里一次性做完——挪到下面与
 # STAGE_DIR/TMP_DL 共用的 cleanup() trap 里,只在真正执行升级逻辑的那个进程(前台
 # 同步调用,或者 --detach 派生出的后台子进程)退出时才删除,派发进程本身提前退出、
 # 不动这个文件,避免删掉后台子进程还在读的脚本。
 #
 # --probe 与 --cancel 都是"只读/一次性副作用"的快速分支(--probe 不改动任何文件;
 # --cancel 至多创建一个标志文件),不会替换脚本自身或安装目录下的任何文件,不需要
-# 走这套自迁移逻辑——走了反而会在 /tmp 留下一份从不清理的脚本拷贝:自迁移拷贝的
+# 走这套自迁移逻辑——走了反而会留下一份从不清理的脚本拷贝:自迁移拷贝的
 # 清理挂在"真正执行升级逻辑"的 cleanup() trap 里,这两个分支用的都是自己更早的
 # exit 路径,够不到那个 trap。这里先对 "$@" 做一次极简预扫描(不消费参数,不影响
 # 下面正式的参数解析),扫到 --probe 或 --cancel 就跳过自迁移。
@@ -367,8 +659,9 @@ done
 if [ "$_probe_or_cancel_scan" != "1" ] && [ "${OPENBOX_UPDATE_RELOCATED:-0}" != "1" ]; then
   case "$0" in
     "$INSTALL_ROOT"/*)
-      _self_copy="/tmp/openbox-update.$$.sh"
-      cp -f -- "$0" "$_self_copy" || die "无法把升级脚本复制到 /tmp,请改用:wget -O- <脚本地址> | sh"
+      ensure_tmp_parent
+      _self_copy="$TMP_PARENT/.openbox-update.$$.sh"
+      cp -f -- "$0" "$_self_copy" || die "无法把升级脚本复制到临时目录:$TMP_PARENT,请改用:wget -O- <脚本地址> | sh"
       chmod +x "$_self_copy" 2>/dev/null || true
       OPENBOX_UPDATE_RELOCATED=1
       export OPENBOX_UPDATE_RELOCATED
@@ -384,6 +677,7 @@ fi
 # 两两互斥;--detach 与 --probe/--cancel 也互斥(探测、取消都是同步的一次性调用,
 # 不存在"派生到后台"的意义)。
 DETACH=0
+ROLLBACK_MODE=0
 # 期望装到的版本(tag)。面板发起升级时会把它探到的最新 tag 传进来(--expect),
 # 派生到后台的子进程通过环境变量接力。有它就下载带版本号的资产
 # (releases/download/<tag>/open-box-<tag>-linux-<arch>.tar.gz):每个版本 URL 唯一,
@@ -437,6 +731,14 @@ while [ $# -gt 0 ]; do
       [ -z "$PROBE_CHANNEL" ] || die "--detach 不能与 --probe 同时使用。"
       [ "$CANCEL_MODE" = "0" ] || die "--detach 不能与 --cancel 同时使用。"
       DETACH=1
+      shift
+      ;;
+    --rollback)
+      [ "$DETACH" = "0" ] || die "--rollback 不能与 --detach 同时使用。"
+      [ "$CANCEL_MODE" = "0" ] || die "--rollback 不能与 --cancel 同时使用。"
+      [ -z "$PROBE_CHANNEL" ] || die "--rollback 不能与 --probe 同时使用。"
+      [ "$ROLLBACK_MODE" = "0" ] || die "--rollback 只能指定一次。"
+      ROLLBACK_MODE=1
       shift
       ;;
     --cancel)
@@ -501,7 +803,7 @@ while [ $# -gt 0 ]; do
       shift
       ;;
     *)
-      die "未知参数:$1(可用参数:--detach、--direct、--mirror [前缀]、--probe <渠道>、--cancel)"
+      die "未知参数:$1(可用参数:--detach、--rollback、--direct、--mirror [前缀]、--probe <渠道>、--cancel)"
       ;;
   esac
 done
@@ -521,7 +823,7 @@ done
 # 匹配的资产名)的判定逻辑,而不是只看 HTTP 状态码——这是唯一能把"200 但是个
 # HTML 错误页"的假死镜像识别出来的办法,见该函数定义处的注释。
 #
-# 特意不做 check_root/check_openwrt/check_installed:探测是纯只读操作,不修改任何
+# 特意不做 check_root/detect_platform/check_installed:探测是纯只读操作,不修改任何
 # 系统状态,也不要求已有安装存在——这样才能在非 OpenWrt 的开发机 / CI 上直接跑通
 # (构建验证阶段要用到);生产环境下这条路径仍然只会被 LuCI 通过 fs.exec 在真正
 # 装好的 OpenWrt 上调用,ACL 已经把 exec 权限限制在 /opt/open-box/update.sh 这一份
@@ -561,7 +863,7 @@ if [ -n "$PROBE_CHANNEL" ]; then
   ASSET_URL="https://github.com/$REPO/releases/latest/download/$ASSET"
   SHA_URL="$ASSET_URL.sha256"
 
-  TMP_DL=$(mktemp -d "${TMPDIR:-/tmp}/open-box-probe.XXXXXX" 2>/dev/null) || {
+  TMP_DL=$(make_tmp_dir "${TMPDIR:-/tmp}/open-box-probe") || {
     echo "fail 无法创建临时目录"
     exit 0
   }
@@ -626,7 +928,7 @@ fi
 
 # ---------- --detach:派生后台子进程,自己立即返回 ----------
 # LuCI 一键升级通过 rpcd 的 fs.exec 调用本脚本;fs.exec 是同步等待且有超时的,
-# 升级却要下载约 78MB,同步跑必然中途被杀。所以 --detach 分支只做一件事:再拉起
+# 升级却要下载约 106MB,同步跑必然中途被杀。所以 --detach 分支只做一件事:再拉起
 # 一份自己(不带 --detach,避免无限递归),输出重定向到日志文件,然后立刻退出——
 # fs.exec 几乎瞬间就能返回,真正的下载/替换在后台独立进程里进行,LuCI 页面转而
 # 轮询 meta.json 的版本号与这份日志。原有的 --direct/--mirror 选择通过环境变量
@@ -660,7 +962,34 @@ if [ "$DETACH" = "1" ]; then
   : > "$UPDATE_LOG" 2>/dev/null || true
   { echo "stage=starting"; } > "$STATUS_PATH" 2>/dev/null || true
   rm -f "$CANCEL_FLAG" 2>/dev/null || true
-  if command -v setsid >/dev/null 2>&1; then
+  # systemd(Debian / Ubuntu)先挪出调用者的 cgroup:setsid 只换会话、不换 cgroup。面板点「升级」(还有定时
+  # 自动升级)时派发进程在 openbox-panel.service 的 cgroup 里,worker 跟着也在;下面「停止服务」停面板时
+  # systemd 按 cgroup 整个杀(单元没写 KillMode,默认 control-group),worker 一起没了、文件一个没换,面板也
+  # 停着(2026-09-29 用户的 Ubuntu 服务器 v0.1.263 → 264 就停在「停止服务... Terminated」)。
+  # systemd-run --scope 在本进程里 exec,环境变量、日志重定向原样带过去,只是换进一个自己的临时 scope。
+  # 不给固定单元名:上次失败留下的同名 scope 会让这次报 unit already exists。先空跑一次确认能用,不能用
+  # 再退回 setsid——不能拿 worker 的退出码判断,worker 升级失败也是非 0,退回去就成了升两次
+  # OpenWrt 同理(#375):procd 把每个服务实例放进自己的 cgroup(/sys/fs/cgroup/services/<服务>/<实例>),从面板
+  # 发起时派发进程和 worker 都在面板那一组里。2026-09 下旬起的 procd(OpenWrt SNAPSHOT;instance_free →
+  # instance_remove_cgroup)停服务时先把组里剩下的进程全杀掉再删目录,下面「停止服务」停面板时 worker、正在跑的
+  # 「停内核」和它触发的 dnsmasq 重启一起没了:停在 committing、面板停着、内核还在跑。派生 worker 之前先把派发
+  # 进程挪进根 cgroup(cgroup v2 的根不受「内部进程」限制),worker 跟着就不在面板那一组了。挪不动就照旧派发
+  # (老 procd 停服务只删空目录、不杀组里的进程,照样能升)
+  if [ -r /etc/openwrt_release ] && grep -q '^0::/services/' /proc/self/cgroup 2>/dev/null \
+    && [ -w /sys/fs/cgroup/cgroup.procs ]; then
+    echo $$ > /sys/fs/cgroup/cgroup.procs 2>/dev/null \
+      || warn "没能把升级进程挪出 $(sed -n 's/^0:://p' /proc/self/cgroup 2>/dev/null),较新的 procd 停面板时可能把它一起结束;遇到请 SSH 登录后运行 open-box update"
+  fi
+  if [ ! -r /etc/openwrt_release ] && [ -d /run/systemd/system ] && command -v systemd-run >/dev/null 2>&1 \
+    && systemd-run --scope --quiet true >/dev/null 2>&1; then
+    OPENBOX_UPDATE_CHANNEL_OVERRIDE="$CHANNEL_OVERRIDE" OPENBOX_UPDATE_MIRROR_PREFIX="$CLI_MIRROR_PREFIX" OPENBOX_UPDATE_EXPECT="$EXPECT_VERSION" OPENBOX_UPDATE_DISPATCHED=1 \
+      systemd-run --scope --quiet --description="Open-Box update" setsid sh "$0" >"$UPDATE_LOG" 2>&1 </dev/null &
+  elif [ ! -r /etc/openwrt_release ] && grep -q 'openbox-panel\.service' /proc/self/cgroup 2>/dev/null; then
+    # 挪不出面板的 cgroup(没有 systemd-run、容器里建不了 scope……):退回 setsid 的话 worker 还在面板服务里,
+    # 下面「停止服务」停面板时会被一起结束,文件一个没换、面板也停着(审查第九项)。宁可不升,让用户在 SSH 里跑
+    { echo "stage=failed"; echo "message=没法把升级进程挪出面板服务(systemd-run --scope 不可用),请 SSH 登录后运行 open-box update"; } > "$STATUS_PATH" 2>/dev/null || true
+    die "没法把升级进程挪出面板服务(systemd-run --scope 不可用),在面板里升级会在停面板时被一起结束。请 SSH 登录后运行:open-box update"
+  elif command -v setsid >/dev/null 2>&1; then
     OPENBOX_UPDATE_CHANNEL_OVERRIDE="$CHANNEL_OVERRIDE" OPENBOX_UPDATE_MIRROR_PREFIX="$CLI_MIRROR_PREFIX" OPENBOX_UPDATE_EXPECT="$EXPECT_VERSION" OPENBOX_UPDATE_DISPATCHED=1 \
       setsid sh "$0" >"$UPDATE_LOG" 2>&1 </dev/null &
   elif command -v busybox >/dev/null 2>&1 && busybox setsid true >/dev/null 2>&1; then
@@ -689,13 +1018,31 @@ check_root() {
   [ "$(id -u)" = "0" ] || die "请以 root 身份运行本脚本。"
 }
 
-check_openwrt() {
-  [ -r /etc/openwrt_release ] || die "未检测到 OpenWrt 系统(缺少 /etc/openwrt_release)。"
+# 跑在哪种系统上。OpenWrt(procd / uci / LuCI)是原生形态;Debian / Ubuntu(systemd)2026-09 起也能装:
+# 服务由 systemd 管(debian/systemd/*.service),面板用 debian/bin/ 下的 systemctl 包装脚本代替 /etc/init.d,
+# 没有 LuCI、没有 dnsmasq 分流、防火墙自理(README 有说明)。两种都不是就拒绝。
+PLATFORM=""
+detect_platform() {
+  if [ -r /etc/openwrt_release ]; then
+    PLATFORM="openwrt"
+    CORE_SVC=/etc/init.d/openbox
+    PANEL_SVC=/etc/init.d/openbox-panel
+    CLI_LINK=/usr/bin/open-box
+  elif [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+    PLATFORM="systemd"
+    CORE_SVC="$INSTALL_ROOT/debian/bin/openbox-ctl"
+    PANEL_SVC="$INSTALL_ROOT/debian/bin/openbox-panel-ctl"
+    CLI_LINK=/usr/local/bin/open-box
+  else
+    die "未检测到 OpenWrt(缺少 /etc/openwrt_release),也不是 systemd 系统。Open-Box 支持 OpenWrt 路由器和 Debian / Ubuntu(systemd)。"
+  fi
 }
 
 check_installed() {
   if [ ! -d "$INSTALL_ROOT" ] || [ ! -f "$INSTALL_ROOT/meta.json" ]; then
-    die "未检测到现有 Open-Box 安装($INSTALL_ROOT)。首次安装请使用 install.sh。"
+    # 同上:给能直接照抄的命令,别只说"请使用 install.sh"
+    die "未检测到现有 Open-Box 安装($INSTALL_ROOT)。首次安装请复制下面这条命令运行:
+       curl -fsSL https://raw.githubusercontent.com/liandu2024/Open-Box/main/scripts/install.sh | sh -s -- --mirror"
   fi
 }
 
@@ -718,6 +1065,20 @@ map_arch() {
 cleanup_stale_stage_dirs() {
   for d in "$INSTALL_ROOT"/.update-stage.*; do
     [ -e "$d" ] || continue
+    safe_rm_rf "$d"
+  done
+  # 下载目录 .open-box-update.XXXXXX(约 100MB)和自迁移的脚本副本 .openbox-update.<pid>.sh 现在也在
+  # 持久化分区里(TMP_PARENT 默认 /opt),断电 / OOM 之后同样没人收——这里一并清掉。
+  # 正在跑的这一份脚本副本($0)和它所在目录不能动:sh 是边读边执行的。
+  _self=$(cd -- "$(dirname -- "$0")" 2>/dev/null && pwd -P)/$(basename -- "$0")
+  [ -n "$TMP_PARENT" ] || return 0
+  for d in "$TMP_PARENT"/.open-box-update.* "$TMP_PARENT"/.openbox-update.*.sh; do
+    [ -e "$d" ] || continue
+    # 两边都按物理路径比(TMP_PARENT 可能是符号链接,比如 /tmp -> /private/tmp)
+    _dp=$(cd -- "$(dirname -- "$d")" 2>/dev/null && pwd -P)/$(basename -- "$d")
+    case "$_self" in
+      "$d"|"$d"/*|"$_dp"|"$_dp"/*) continue ;;
+    esac
     safe_rm_rf "$d"
   done
 }
@@ -743,12 +1104,16 @@ check_storage() {
   fi
 }
 
-# /tmp 常见是 tmpfs(内存),只用来放下载下来的压缩包,不在这里解包(见 Important
-# 3);仍然值得单独测一下,避免连下载都放不下就走到后面才失败。检测失败时不阻断
+# 临时目录默认在持久化分区,不在这里解包(见 Important 3);仍然值得单独测一下,
+# 避免连下载都放不下就走到后面才失败。检测失败时不阻断
 # (df 在个别精简系统上可能对某些挂载点报错),只是提前警示,交给后面真正的下载步骤
 # 决定成败。
 check_tmp_space() {
-  tmp_base="${TMPDIR:-/tmp}"
+  # 先把临时目录挑出来:以前这里在 ensure_tmp_parent 之前跑,TMP_PARENT 还是空串,
+  # free_space_kb_for "" 量的是当前目录(多半是板载 overlay),/opt 挂着大盘的路由器也被
+  # 误报「可用空间不足(约 73MB)」(GitHub #228)。ensure_tmp_parent 幂等,重复调无害
+  ensure_tmp_parent
+  tmp_base="$TMP_PARENT"
   kb=$(free_space_kb_for "$tmp_base")
   case "$kb" in
     ''|*[!0-9]*)
@@ -757,7 +1122,7 @@ check_tmp_space() {
       ;;
   esac
   if [ "$kb" -lt "$MIN_TMP_DOWNLOAD_KB" ]; then
-    die "$tmp_base 可用空间不足(约 $((kb / 1024))MB),下载升级包(约 80MB)可能会失败。请清理 $tmp_base,或设置 TMPDIR 指向空间更充足的目录后重试。"
+    die "$tmp_base 可用空间不足(约 $((kb / 1024))MB),下载和暂存升级包可能会失败。请清理 $tmp_base,或设置 OPENBOX_TMPDIR 指向空间更充足的目录后重试。"
   fi
 }
 
@@ -818,7 +1183,7 @@ if ! mkdir "$UPDATE_LOCK" 2>/dev/null; then
     die "已有一次更新在进行中(pid $_lock_pid),请等它结束或先取消。"
   fi
   rm -rf "$UPDATE_LOCK" 2>/dev/null
-  mkdir "$UPDATE_LOCK" 2>/dev/null || die "无法创建更新锁 $UPDATE_LOCK。"
+  mkdir "$UPDATE_LOCK" 2>/dev/null || die "无法创建更新锁 ${UPDATE_LOCK}。"
 fi
 echo "$$" > "$UPDATE_LOCK/pid" 2>/dev/null || true
 # 派发进程在 fork 之前已经清过一次取消标志;这里再清会把"派发到 worker 启动之间"到达的
@@ -826,9 +1191,11 @@ echo "$$" > "$UPDATE_LOCK/pid" 2>/dev/null || true
 [ "${OPENBOX_UPDATE_DISPATCHED:-0}" = "1" ] || rm -f "$CANCEL_FLAG" 2>/dev/null || true
 write_status starting "" "" ""
 
+# 从这里起的失败都算"升的过程中出的事",带上环境信息;上面的参数错误 / --probe 不用
+ENV_REPORT_ON=1
 info "预检..."
 check_root
-check_openwrt
+detect_platform
 check_installed
 map_arch
 cleanup_stale_stage_dirs
@@ -836,6 +1203,198 @@ check_storage
 check_tmp_space
 resolve_channel
 info "预检通过(架构 $ARCH,通道 $CHANNEL)。"
+
+# ---------- 系统依赖:内核模块与命令 ----------
+# 路由器固件的默认镜像常缺其中一两样(#44 缺 kmod-nft-queue;有用户缺 kmod-veth 导致规则页不能模拟 LAN
+# 终端)。这里按"功能是否可用"检查(模块可能直接编进内核,不看包名),缺的就地用 opkg / apk 装;装不上
+# 只警告不中断——面板和内核在缺项下各有明确提示,不该因为软件源不通就装不了 Open-Box。
+#   kmod-tun           tun 设备,内核起不来的硬要求
+#   kmod-nft-queue     auto_redirect(nftables 转发)的 queue 表达式,缺了内核退到纯 tun 兼容模式
+#   kmod-nft-nat       auto_redirect 的 redirect 表达式(fw4 默认自带,顺手核对)
+#   kmod-veth ip-full  规则页「真实路由 · 模拟 LAN 终端」要建网络命名空间和 veth
+#   ca-bundle          HTTPS 证书(订阅、更新下载)
+# OPENBOX_SKIP_DEPS=1 跳过这一步(自己管软件包的人用)。三个路径变量只为测试时能指到假目录。
+DEP_TUN_DEV="${DEP_TUN_DEV:-/dev/net/tun}"
+DEP_SYS_MODULE="${DEP_SYS_MODULE:-/sys/module}"
+DEP_CA_BUNDLE="${DEP_CA_BUNDLE:-/etc/ssl/certs/ca-certificates.crt}"
+dep_ok() {
+  case "$1" in
+    kmod-tun) [ -e "$DEP_TUN_DEV" ] || { modprobe tun >/dev/null 2>&1; [ -e "$DEP_TUN_DEV" ]; } ;;
+    kmod-nft-queue) [ -d "$DEP_SYS_MODULE/nft_queue" ] || modprobe nft_queue >/dev/null 2>&1 ;;
+    kmod-nft-nat) [ -d "$DEP_SYS_MODULE/nft_redir" ] || modprobe nft_redir >/dev/null 2>&1 ;;
+    kmod-veth) [ -d "$DEP_SYS_MODULE/veth" ] || modprobe veth >/dev/null 2>&1 ;;
+    ip-full) ip netns list >/dev/null 2>&1 ;;
+    ca-bundle) [ -s "$DEP_CA_BUNDLE" ] ;;
+    # 下面两个只在 Debian / Ubuntu 上检查:nft 命令装 Open-Box 自己的表,xz 解 nodejs.org 的 Node 包
+    nftables) command -v nft >/dev/null 2>&1 ;;
+    xz-utils) command -v xz >/dev/null 2>&1 ;;
+    *) return 0 ;;
+  esac
+}
+# 依赖名按 OpenWrt 的包名写;Debian / Ubuntu 换成 apt 的包名,内核模块随发行版内核自带(没有单独的包,装不上只能提示)
+dep_pkg() {
+  [ "${_dep_pm:-}" = "apt-get" ] || { echo "$1"; return 0; }
+  case "$1" in
+    kmod-*) echo "" ;;
+    ip-full) echo "iproute2" ;;
+    ca-bundle) echo "ca-certificates" ;;
+    *) echo "$1" ;;
+  esac
+}
+dep_effect() {
+  case "$1" in
+    kmod-tun) echo "内核起不来(没有 tun 设备)" ;;
+    # 2026-09-30 开发路由器实测(内核 1.14.1 / sing-tun 0.9.3):两个 queue 模块都没有时 nftables 转发照常,只关掉首包预判;
+    # 有 nfnetlink_queue、缺 nft_queue 时 nft 规则装不上,内核自动降级纯 tun
+    kmod-nft-queue)
+      if [ -d "$DEP_SYS_MODULE/nfnetlink_queue" ] || modprobe nfnetlink_queue >/dev/null 2>&1; then
+        echo "nftables 转发起不来,内核会自动改用纯 tun 兼容模式,吞吐低一些"
+      else
+        echo "只影响入口的「首包预判放行」(直连终端、节点地址的连接先进内核再直连出去),nftables 转发和其它功能照常"
+      fi
+      ;;
+    kmod-nft-nat) echo "auto_redirect 转发规则加不上,退到兼容模式" ;;
+    kmod-veth|ip-full) echo "规则页不能模拟 LAN 终端(可改用内核诊断)" ;;
+    ca-bundle) echo "HTTPS 订阅和更新下载会因证书校验失败" ;;
+    nftables) echo "起内核前装不上 Open-Box 自己的 nft 表(进内核前放行 / 直连应答放行不生效)" ;;
+    xz-utils) echo "解不开 nodejs.org 的 Node 压缩包,面板跑不起来" ;;
+  esac
+}
+# 各包管理器的软件源配置在哪(提示用)
+dep_feeds() {
+  case "${_dep_pm:-}" in
+    opkg) echo "/etc/opkg/distfeeds.conf" ;;
+    apk) echo "/etc/apk/repositories.d/distfeeds.list" ;;
+    apt-get) echo "/etc/apt/sources.list(.d)" ;;
+    *) echo "软件源配置" ;;
+  esac
+}
+ensure_dependencies() {
+  if [ "${OPENBOX_SKIP_DEPS:-}" = "1" ]; then
+    info "按 OPENBOX_SKIP_DEPS=1 跳过系统依赖检查。"
+    return 0
+  fi
+  _dep_all="kmod-tun kmod-nft-queue kmod-nft-nat kmod-veth ip-full ca-bundle"
+  [ "${PLATFORM:-openwrt}" = "systemd" ] && _dep_all="$_dep_all nftables xz-utils"
+  _dep_missing=""
+  for _d in $_dep_all; do dep_ok "$_d" || _dep_missing="$_dep_missing $_d"; done
+  if [ -z "$_dep_missing" ]; then
+    info "系统依赖齐全(tun / nftables queue+nat / veth / ip netns / 证书)。"
+    return 0
+  fi
+  _dep_pm=""
+  _dep_verb=""
+  _dep_updated=1
+  _dep_unknown=""
+  _dep_kernel=""
+  if command -v opkg >/dev/null 2>&1; then _dep_pm=opkg; _dep_verb="opkg install"
+  elif command -v apk >/dev/null 2>&1; then _dep_pm=apk; _dep_verb="apk add"
+  elif command -v apt-get >/dev/null 2>&1; then _dep_pm=apt-get; _dep_verb="apt-get install -y --no-install-recommends"; export DEBIAN_FRONTEND=noninteractive
+  fi
+  if [ -z "$_dep_pm" ]; then
+    warn "缺少系统依赖:${_dep_missing# };没找到 opkg / apk / apt-get,请自行安装。"
+  else
+    info "缺少系统依赖:${_dep_missing# },尝试用 $_dep_pm 安装(软件源不通时只提示,不中断)..."
+    _dep_to=""
+    command -v timeout >/dev/null 2>&1 && _dep_to="timeout 180"
+    _dep_updated=1
+    $_dep_to $_dep_pm update >/dev/null 2>&1 || { _dep_updated=0; warn "$_dep_pm update 失败(软件源不通?),仍尝试安装。"; }
+    # 逐个装:一个装不上不连累其它(内核模块包要和当前内核版本一致,厂商固件常对不上)。记下装不上的原因,
+    # 最后按原因提示——以前一律提示「opkg install 包名」,软件源不通 / 源里没有这个包时照着敲也只会得到 Unknown package
+    for _d in $_dep_missing; do
+      _dep_pkg=$(dep_pkg "$_d")
+      [ -n "$_dep_pkg" ] || continue
+      _dep_out=$($_dep_to $_dep_verb "$_dep_pkg" 2>&1) || true
+      # 内核对不上时 opkg 也先打一行 Unknown package(真机输出),所以先认内核
+      case "$_dep_out" in
+        *"kernel (="*|*"kernel="*) _dep_kernel="$_dep_kernel $_d" ;;
+        *"Unknown package"*|*"no such package"*) _dep_unknown="$_dep_unknown $_d" ;;
+      esac
+    done
+  fi
+  _dep_still=""
+  for _d in $_dep_missing; do dep_ok "$_d" || _dep_still="$_dep_still $_d"; done
+  if [ -z "$_dep_still" ]; then
+    info "系统依赖已补齐:${_dep_missing# }"
+    return 0
+  fi
+  for _d in $_dep_still; do
+    _dep_pkg=$(dep_pkg "$_d")
+    if [ -z "$_dep_pkg" ]; then
+      warn "仍缺 $_d:$(dep_effect "$_d")。这个内核模块应随系统内核自带,请检查内核配置(modprobe ${_d#kmod-} 的报错)。"
+    elif [ "$_d" = "kmod-nft-queue" ]; then
+      # 用户 2026-10-01:装不上就不管了——提示不装也能用,给出手动安装命令,用户自己装。v0.1.267~272 会按内核版本
+      # 去别的源自动找,而且找不到时把整个安装 / 升级带退出了(set -e,GitHub #354 #358),这段已经拿掉
+      _dep_why=""
+      case " $_dep_unknown " in *" $_d "*) _dep_why="固件的软件源里没有这个包,要从固件作者的软件源装" ;; esac
+      case " $_dep_kernel " in *" $_d "*) _dep_why="软件源里的包和本机内核版本对不上,要从固件作者的软件源装" ;; esac
+      [ "$_dep_updated" = "0" ] && _dep_why="${_dep_pm:-opkg} update 没成功,先检查 $(dep_feeds) 里的软件源地址"
+      warn "仍缺 $_d:$(dep_effect "$_d")。不装也能用;要装请自行执行:${_dep_pm:-opkg} update && ${_dep_verb:-opkg install} $_dep_pkg${_dep_why:+($_dep_why)}"
+    elif [ "$_dep_updated" = "0" ]; then
+      warn "仍缺 $_d:$(dep_effect "$_d")。$_dep_pm update 没成功,软件源连不上时什么包都装不了:先检查 $(dep_feeds) 里的软件源地址(国内连不上官方源可换镜像),等 $_dep_pm update 能成功后再执行:$_dep_pm update && $_dep_verb $_dep_pkg"
+    else
+      case " $_dep_unknown " in
+        *" $_d "*) warn "仍缺 $_d:$(dep_effect "$_d")。软件源里没有这个包(第三方固件的软件源里常没有官方内核模块):换一个自带 $_dep_pkg 的固件,或者从固件作者的软件源安装。" ;;
+        *)
+          case " $_dep_kernel " in
+            *" $_d "*) warn "仍缺 $_d:$(dep_effect "$_d")。软件源里的 $_dep_pkg 和本机内核版本对不上(第三方 / 厂商固件常见):从固件作者的软件源安装,或者换一个自带它的固件。" ;;
+            *) warn "仍缺 $_d:$(dep_effect "$_d")。可稍后手动执行:$_dep_pm update && ${_dep_verb:-opkg install} $_dep_pkg" ;;
+          esac
+          ;;
+      esac
+    fi
+  done
+  return 0
+}
+ensure_dependencies
+
+# ---- openbox-download-sources:start ----
+# 这一段在 install.sh / update.sh 里一模一样。下载正文失败时按顺序换来源再试:当前通道 → 其余内置镜像 → 直连
+# (当前是镜像时)。以前一次失败就退出——同一个镜像每次都在同一处断开的用户永远装不上(GitHub #330:Debian 13 +
+# ghfast.top,每次 SSL unexpected eof)。每行一个「来源 完整地址」,来源是 direct 或镜像前缀;BUILTIN_MIRRORS 在调用时已定义
+openbox_download_sources() {
+  # 调用方常把 IFS 设成只有换行(逐行读结果),这里要按空白拆
+  _ds_ifs=$IFS
+  IFS='
+	 '
+  if [ "$CHANNEL" = "mirror" ] && [ -n "$MIRROR_PREFIX" ]; then _ds_cur="$MIRROR_PREFIX"; else _ds_cur="direct"; fi
+  _ds_list="$_ds_cur"
+  for _ds_m in $BUILTIN_MIRRORS; do
+    [ "$_ds_m" = "$_ds_cur" ] || _ds_list="$_ds_list $_ds_m"
+  done
+  [ "$_ds_cur" = "direct" ] || _ds_list="$_ds_list direct"
+  for _ds_src in $_ds_list; do
+    case "$_ds_src" in
+      direct) printf 'direct %s\n' "$1" ;;
+      http://*|https://*) printf '%s %s/%s\n' "$_ds_src" "${_ds_src%/}" "$1" ;;
+      *) printf '%s https://%s/%s\n' "$_ds_src" "${_ds_src%/}" "$1" ;;
+    esac
+  done
+  IFS=$_ds_ifs
+}
+# 拼好镜像前缀的地址还原成原始地址(升级时组件脚本传进来的就是拼好的)
+openbox_unmirror_url() {
+  _uu="$1"
+  if [ "$CHANNEL" = "mirror" ] && [ -n "$MIRROR_PREFIX" ]; then
+    case "$MIRROR_PREFIX" in
+      http://*|https://*) _uu_p="${MIRROR_PREFIX%/}/" ;;
+      *) _uu_p="https://${MIRROR_PREFIX%/}/" ;;
+    esac
+    case "$_uu" in "$_uu_p"*) _uu="${_uu#"$_uu_p"}" ;; esac
+  fi
+  printf '%s\n' "$_uu"
+}
+# 哪个来源下载成功就改用它,后面的下载先从它开始
+openbox_adopt_source() {
+  case "$1" in
+    direct) CHANNEL=direct; MIRROR_PREFIX="" ;;
+    *) CHANNEL=mirror; MIRROR_PREFIX="$1" ;;
+  esac
+}
+openbox_source_label() {
+  case "$1" in direct) echo "GitHub 直连" ;; *) echo "$1" ;; esac
+}
+# ---- openbox-download-sources:end ----
 
 detect_downloader
 
@@ -846,39 +1405,75 @@ detect_downloader
 # 校验、解包都完成后才从 meta.json 读出来(见下方),所以"是否已是最新版本"的判断
 # 也相应挪到了解包之后——这是放弃 API 查询换来的必然代价:多了一次下载,但镜像通道
 # 从此能用。
-# 没给 --expect 就直连 GitHub 看一眼 releases/latest 的 302 指向哪个 tag(几十字节,
-# 8 秒超时;直连不通就算了)。拿到 tag 才能用带版本号的资产名。
-resolve_latest_tag() {
-  _rlt_url="https://github.com/$REPO/releases/latest"
+# 没给 --expect 就看一眼 releases/latest 的 302 指向哪个 tag(几十字节,12 秒超时)。拿到 tag 才能用带版本号的
+# 资产名,解包后也才能核对版本——拿不到就只能用会动的 releases/latest/download,镜像缓存了旧包也发现不了。
+# 先直连;直连不通、走的是镜像通道时再经镜像问一次(国内直连 GitHub 常常不通,以前只问直连,定时自动更新探到
+# 新版本也会因为这里拿不到 tag 而装回镜像缓存的旧包,审查第六项)。
+resolve_latest_tag_from() {
   case "$DOWNLOADER" in
-    curl) curl -sI --connect-timeout 8 --max-time 12 "$_rlt_url" 2>/dev/null ;;
+    curl) curl -sI --connect-timeout 8 --max-time 12 "$1" 2>/dev/null ;;
     # OpenWrt 自带的 wget 是 uclient-fetch,没有 -S / --max-redirect(错误会被吞掉,
     # 静默退回稳定资产名,镜像缓存旧包的问题就回来了):改为跟着 302 把 releases/latest
     # 的页面拉下来,从里面的 /releases/tag/<tag> 链接取版本号
     # 页面里还有 /releases/tag/*name 这种模板链接,只认 v 开头的版本号
-    wget) wget -q -O - --timeout=12 "$_rlt_url" 2>/dev/null | sed -n 's|.*/releases/tag/\(v[0-9][0-9A-Za-z._-]*\).*|\1|p' | head -n 1 ;;
+    wget) wget -q -O - --timeout=12 "$1" 2>/dev/null | sed -n 's|.*/releases/tag/\(v[0-9][0-9A-Za-z._-]*\).*|\1|p' | head -n 1 ;;
   esac | sed -n 's/^[Ll]ocation: .*\/releases\/tag\/\(v[0-9][0-9A-Za-z._-]*\).*/\1/p; /^v[0-9][0-9A-Za-z._-]*$/p' | head -n 1
 }
-if [ -z "$EXPECT_VERSION" ]; then
-  EXPECT_VERSION=$(resolve_latest_tag)
-  case "$EXPECT_VERSION" in
-    *[!A-Za-z0-9._-]*) EXPECT_VERSION="" ;;
-  esac
-fi
-if [ -n "$EXPECT_VERSION" ]; then
-  ASSET="open-box-${EXPECT_VERSION}-linux-${ARCH}.tar.gz"
-  ASSET_URL="https://github.com/$REPO/releases/download/${EXPECT_VERSION}/$ASSET"
-else
-  ASSET="open-box-linux-${ARCH}.tar.gz"
-  ASSET_URL="https://github.com/$REPO/releases/latest/download/$ASSET"
-fi
-SHA_URL="$ASSET_URL.sha256"
+LATEST_URL="https://github.com/$REPO/releases/latest"
+# Compare plain numeric semver tags without depending on sort -V (not available in
+# every BusyBox build). Returns success when $1 is older than $2.
+version_less_than() {
+  awk -v a="${1#v}" -v b="${2#v}" '
+    BEGIN {
+      na = split(a, aa, "."); nb = split(b, bb, ".");
+      for (i = 1; i <= 3; i++) {
+        av = (i <= na ? aa[i] + 0 : 0); bv = (i <= nb ? bb[i] + 0 : 0);
+        if (av < bv) exit 0;
+        if (av > bv) exit 1;
+      }
+      exit 1;
+    }'
+}
+
+# 从 GitHub 已发布的 Release 中找出当前版本的直接上一个版本。只接受
+# vMAJOR.MINOR.PATCH 形式的正式版本，自动跳过非版本标签。
+resolve_previous_tag() {
+  _rpt_current="$1"
+  _rpt_api="https://api.github.com/repos/$REPO/releases?per_page=100"
+  # 加速镜像一般只代理 github.com / raw 域名,不代理 api.github.com:API 先直连,直连不通再试镜像前缀
+  _rpt_json=$(fetch_to_stdout "$_rpt_api" 2>/dev/null) || _rpt_json=$(fetch_to_stdout "$(build_url "$_rpt_api")") || return 1
+  _rpt_best=""
+  # 先按逗号拆行:API 可能返回压成一行的 JSON,逐行 sed 只会取到最后一个 tag
+  _rpt_tags=$(printf '%s' "$_rpt_json" | tr ',' '\n' | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\(v[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)".*/\1/p')
+  for _rpt_tag in $_rpt_tags; do
+    if version_less_than "$_rpt_tag" "$_rpt_current"; then
+      if [ -z "$_rpt_best" ] || version_less_than "$_rpt_best" "$_rpt_tag"; then
+        _rpt_best="$_rpt_tag"
+      fi
+    fi
+  done
+  [ -n "$_rpt_best" ] || return 1
+  printf '%s\n' "$_rpt_best"
+}
+
+# 资产地址:有版本号就用带版本号的资产名。版本号要等选好镜像之后才探(见下方),探到了再重算一次
+set_asset_urls() {
+  if [ -n "$EXPECT_VERSION" ]; then
+    ASSET="open-box-${EXPECT_VERSION}-linux-${ARCH}.tar.gz"
+    ASSET_URL="https://github.com/$REPO/releases/download/${EXPECT_VERSION}/$ASSET"
+  else
+    ASSET="open-box-linux-${ARCH}.tar.gz"
+    ASSET_URL="https://github.com/$REPO/releases/latest/download/$ASSET"
+  fi
+  SHA_URL="$ASSET_URL.sha256"
+}
+set_asset_urls
 
 OLD_VERSION=$(sed -n 's/.*"version" *: *"\([^"]*\)".*/\1/p' "$INSTALL_ROOT/meta.json" 2>/dev/null | head -n 1)
 
 # ---------- 内置镜像列表(--mirror 不带前缀时使用)----------
 # 三个都是 2026-09-01 现场验证过的:能取到与直连字节级一致的 releases/latest 资产
-# (.sha256 与 78MB tarball 均验证过),也能代理 raw.githubusercontent.com。按此顺序
+# (.sha256 与 106MB tarball 均验证过),也能代理 raw.githubusercontent.com。按此顺序
 # 依次探测,选中第一个探测通过的——加速站是出了名的会挂,所以不能假设列表里第一个
 # 永远可用,必须能在探测失败时继续试下一个,而不是直接报错退出。install.sh 里维护
 # 着同一份列表(两边都是 curl | sh 单文件直跑,没有可共享的公共库文件,只能保持
@@ -938,13 +1533,14 @@ cleanup() {
   fi
   # 文件已经换过、面板还没拉起来就走到这里(比如铺 LuCI 文件时 die 了):无论如何把面板
   # 起来,用户至少还能进面板看到发生了什么;卡在"面板停着"是最糟的结局
-  if [ "${POST_SWAP:-0}" = "1" ] && [ "${PANEL_STARTED:-0}" != "1" ] && [ -x /etc/init.d/openbox-panel ]; then
-    /etc/init.d/openbox-panel start >/dev/null 2>&1 || true
+  if [ "${POST_SWAP:-0}" = "1" ] && [ "${PANEL_STARTED:-0}" != "1" ] && [ -x "${PANEL_SVC:-/etc/init.d/openbox-panel}" ]; then
+    "${PANEL_SVC:-/etc/init.d/openbox-panel}" start >/dev/null 2>&1 || true
   fi
   [ -n "${UPDATE_LOCK:-}" ] && rm -rf "$UPDATE_LOCK" 2>/dev/null
   return 0
 }
-TMP_DL=$(mktemp -d "${TMPDIR:-/tmp}/open-box-update.XXXXXX") || die "无法创建临时目录。"
+ensure_tmp_parent
+TMP_DL=$(make_tmp_dir "$TMP_PARENT/.open-box-update") || die "无法在 $TMP_PARENT 下创建临时目录。"
 trap cleanup EXIT INT TERM
 
 # 从这里开始,cleanup() trap 已经注册好(TMP_DL 已创建)——检查点可以放心
@@ -956,7 +1552,33 @@ if [ "$CHANNEL" = "mirror" ] && [ -z "$MIRROR_PREFIX" ]; then
   select_builtin_mirror
 fi
 
-# releases/latest/download/<资产> 是个**会动的指针**:78MB 正文要下几分钟,几十字节的
+# 没给 --expect 就在这里探最新版本号:镜像已经选好,直连不通时可以经镜像问。直连探不到也说明直连 GitHub 不通,
+# 后面的校验文件就不先试直连了(fetch_to_file_trusted),免得每个都白等一次超时
+if [ -z "$EXPECT_VERSION" ] && [ "$ROLLBACK_MODE" = "0" ]; then
+  EXPECT_VERSION=$(resolve_latest_tag_from "$LATEST_URL")
+  if [ -z "$EXPECT_VERSION" ]; then
+    TRUSTED_DIRECT_BROKEN=1
+    if [ "$CHANNEL" = "mirror" ] && [ -n "$MIRROR_PREFIX" ]; then
+      EXPECT_VERSION=$(resolve_latest_tag_from "$(build_url "$LATEST_URL")")
+    fi
+  fi
+  case "$EXPECT_VERSION" in
+    *[!A-Za-z0-9._-]*) EXPECT_VERSION="" ;;
+  esac
+  set_asset_urls
+fi
+
+if [ "$ROLLBACK_MODE" = "1" ]; then
+  [ -n "$OLD_VERSION" ] || die "无法读取当前安装版本,不能自动寻找上一个 Release。"
+  info "正在查找 $OLD_VERSION 的上一个 GitHub Release..."
+  EXPECT_VERSION=$(resolve_previous_tag "$OLD_VERSION") || die "无法找到 $OLD_VERSION 的上一个正式 Release。"
+  ASSET="open-box-${EXPECT_VERSION}-linux-${ARCH}.tar.gz"
+  ASSET_URL="https://github.com/$REPO/releases/download/${EXPECT_VERSION}/$ASSET"
+  SHA_URL="$ASSET_URL.sha256"
+  info "将从 $OLD_VERSION 回退到 ${EXPECT_VERSION}。"
+fi
+
+# releases/latest/download/<资产> 是个**会动的指针**:106MB 正文要下几分钟,几十字节的
 # .sha256 是另一次请求。两次请求之间只要发布了新版本,拿到的就是"旧正文 + 新校验和",
 # 校验必然失败。真机 192.168.3.35 上就这么失败过一次:v0.1.49 的包配上 v0.1.50 的
 # 校验和,报"SHA256 不匹配",而两个文件各自都是完好的。
@@ -975,28 +1597,41 @@ if [ -n "$EXPECT_VERSION" ] && [ -n "$OLD_VERSION" ] && [ "$OLD_VERSION" = "$EXP
   write_status done "" "" "已是最新版本,无需升级"
   exit 0
 fi
+# 探到的「最新版本」比装着的还旧:镜像缓存了旧的 releases/latest 跳转,或者面板探版本号时拿到的是旧的。
+# 这不是升级,也不该悄悄降级(要回旧版本用 --rollback)
+if [ "$ROLLBACK_MODE" = "0" ] && [ -n "$EXPECT_VERSION" ] && [ -n "$OLD_VERSION" ] && version_less_than "$EXPECT_VERSION" "$OLD_VERSION"; then
+  info "探到的最新版本 $EXPECT_VERSION 比当前的 $OLD_VERSION 还旧(镜像缓存了旧的版本信息?),不降级。"
+  write_status done "" "" "当前版本比探到的最新版本还新,无需升级"
+  exit 0
+fi
 
+# 组件升级要用装着的 Node 核对清单:它自己跑不起来(文件坏了、换过固件、缺库……)时直接改用完整安装包,
+# 不然清单那一步就中止了,连 --rollback 都用不了(审查第八、十四项)
 if [ -f "$INSTALL_ROOT/panel/server/system/update-components.sh" ]; then
-  . "$INSTALL_ROOT/panel/server/system/update-components.sh"
-  if prepare_component_update; then _COMPONENT_PREPARED=1; fi
+  if [ "$(openbox_node_try "$INSTALL_ROOT" "$(cat "$INSTALL_ROOT/data/node-preload" 2>/dev/null || true)")" = "ok" ]; then
+    . "$INSTALL_ROOT/panel/server/system/update-components.sh"
+    if prepare_component_update; then _COMPONENT_PREPARED=1; fi
+  else
+    warn "当前安装的 Node 跑不起来,改用完整安装包升级。"
+  fi
 fi
 if [ "$_COMPONENT_PREPARED" = "0" ]; then
 _dl_round=0
 while :; do
   _dl_round=$((_dl_round + 1))
 
-  fetch_to_file "$(build_url "$SHA_URL")" "$TMP_DL/$ASSET.sha256.pre" || die "下载校验文件失败:$SHA_URL。现有安装未改动。"
+  fetch_to_file_trusted "$SHA_URL" "$TMP_DL/$ASSET.sha256.pre" sha || die "下载校验文件失败:${SHA_URL}。现有安装未改动。"
   check_cancel_and_abort
 
   info "下载发布包:$ASSET"
   ASSET_DL_URL=$(build_url "$ASSET_URL")
   ASSET_TOTAL=$(probe_content_length "$ASSET_DL_URL")
   case "$ASSET_TOTAL" in ''|*[!0-9]*) ASSET_TOTAL='' ;; esac
-  download_with_progress "$ASSET_DL_URL" "$TMP_DL/$ASSET" "$ASSET_TOTAL" || die "下载升级包失败:$ASSET_URL。现有安装未改动。"
+  download_with_progress "$ASSET_DL_URL" "$TMP_DL/$ASSET" "$ASSET_TOTAL" || die "下载升级包失败(内置镜像和直连都试过了):${ASSET_URL}。现有安装未改动。"
 
   check_cancel_and_abort
 
-  fetch_to_file "$(build_url "$SHA_URL")" "$TMP_DL/$ASSET.sha256" || die "下载校验文件失败:$SHA_URL。现有安装未改动。"
+  fetch_to_file_trusted "$SHA_URL" "$TMP_DL/$ASSET.sha256" sha || die "下载校验文件失败:${SHA_URL}。现有安装未改动。"
 
   check_cancel_and_abort
 
@@ -1028,9 +1663,9 @@ if ! ( cd "$TMP_DL" && $SHA_TOOL $SHA_ARGS "$ASSET.sha256" >/dev/null ); then
 fi
 info "校验通过。"
 
-# ---------- 解包(校验通过之后才做,且解到 /opt 所在文件系统,不是 /tmp)----------
-# 实测:tarball 约 78MB,解开后约 204MB,合计约 282MB;512MB 设备的 tmpfs(/tmp)
-# 上限约 256MB,解在 /tmp 必然 ENOSPC——虽然会安全失败(校验已经通过,不会碰现有
+# ---------- 解包(校验通过之后才做,且解到 /opt 所在文件系统)----------
+# 实测:发布包约 106MB,解开后约 204MB;解包不使用 /tmp,避免 tmpfs 上限不足导致
+# ENOSPC——虽然会安全失败(校验已经通过,不会碰现有
 # 安装),但这一档机器永远升不了级。改到 $INSTALL_ROOT 所在文件系统的暂存目录,
 # 复用的是 flash/eMMC 而不是内存,且与"校验通过前不碰安装目录"的不变式并不冲突:
 # 暂存目录与正式安装目录是分开的路径,真正替换现有安装是最后一步(P6 终审
@@ -1042,10 +1677,10 @@ info "解包..."
 STAGE_DIR="$INSTALL_ROOT/.update-stage.$$"
 safe_rm_rf "$STAGE_DIR"
 mkdir -p "$STAGE_DIR" || die "无法在 $INSTALL_ROOT 下创建暂存目录(权限或空间不足?)。现有安装未改动。"
-tar -xzf "$TMP_DL/$ASSET" -C "$STAGE_DIR" || die "解包失败。现有安装未改动。"
+extract_tgz "$TMP_DL/$ASSET" "$STAGE_DIR" || die "解包失败。现有安装未改动。"
 fi # 完整包 / 按需组件均已在 STAGE_DIR 准备好
 for must in node panel bin openwrt meta.json; do
-  [ -e "$STAGE_DIR/$must" ] || die "升级包内容不完整,缺少 $must。现有安装未改动。"
+  [ -e "$STAGE_DIR/$must" ] || die "升级包内容不完整,缺少 ${must}。现有安装未改动。"
 done
 
 # 这是最后一个可以安全取消的检查点:再往下就要读版本号、决定是否进入停服务/
@@ -1058,6 +1693,10 @@ NEW_VERSION=$(sed -n 's/.*"version" *: *"\([^"]*\)".*/\1/p' "$STAGE_DIR/meta.jso
 if [ -n "$EXPECT_VERSION" ] && [ "$NEW_VERSION" != "$EXPECT_VERSION" ]; then
   die "下载到的包是 $NEW_VERSION,不是期望的 $EXPECT_VERSION(镜像缓存了旧包?换「GitHub 直连」通道再试)。现有安装未改动。"
 fi
+# 没探到版本号时用的是会动的 releases/latest/download:镜像缓存的旧包连同它的校验和一起对得上,不拦就会悄悄降级
+if [ "$ROLLBACK_MODE" = "0" ] && [ -n "$OLD_VERSION" ] && version_less_than "$NEW_VERSION" "$OLD_VERSION"; then
+  die "下载到的包是 $NEW_VERSION,比当前的 $OLD_VERSION 还旧(镜像缓存了旧包?),不降级;要回到旧版本请用 --rollback。现有安装未改动。"
+fi
 if [ "$_COMPONENT_PREPARED" = "0" ] && [ -n "$OLD_VERSION" ] && [ "$OLD_VERSION" = "$NEW_VERSION" ]; then
   info "当前已是最新版本($OLD_VERSION),无需升级。"
   write_status done "" "" "已是最新版本,无需升级"
@@ -1067,6 +1706,25 @@ if [ -n "$OLD_VERSION" ]; then
   info "$OLD_VERSION → $NEW_VERSION"
 else
   info "升级到 $NEW_VERSION"
+fi
+
+# ---------- 新版本的 Node 先在暂存目录里试(现有安装和服务都还没动)----------
+# 以前是换完文件、删掉旧版本之后才试,新 Node 起不来(固件太老、缺库、页大小不对)就只能停在半路,回也回不去
+# (审查第八项)。Debian / Ubuntu 的 glibc 版 Node 也在这里换进暂存目录:运行时组件没变时暂存目录里的 node
+# 就是装着的那份(链接),openbox_glibc_node 看到版本对得上什么都不做
+if [ "$PLATFORM" = "systemd" ]; then
+  info "Debian / Ubuntu:检查 glibc 版 Node 运行时..."
+  if ! _gn_err=$(openbox_glibc_node "$STAGE_DIR"); then
+    [ -n "$_gn_err" ] && printf '%s\n' "$_gn_err" >&2
+    die "glibc 版 Node 没装上(请检查能否访问 nodejs.org 或 npmmirror.com)。现有安装未改动。"
+  fi
+fi
+info "检查新版本的 Node 能否运行..."
+if ! _ob_node_err=$(openbox_node_smoke "$STAGE_DIR"); then
+  warn "新版本随包的 Node 在这台设备上起不来:"
+  [ -n "$_ob_node_err" ] && printf '%s\n' "$_ob_node_err" >&2
+  case "$_ob_node_err" in *"symbol not found"*) die "固件太老,请升级到 OpenWrt 24 以上。现有安装未改动。" ;; esac
+  die "新版本的面板在这台设备上跑不起来,升级中止,现有安装未改动。请把上面几行连同 uname -a、cat /etc/openwrt_release、head -3 /proc/meminfo 的输出发到 GitHub issue。"
 fi
 
 # ---------- 校验并解包成功之后,才允许停服务、动现有安装 ----------
@@ -1083,18 +1741,18 @@ rm -f "$CANCEL_FLAG" 2>/dev/null || true
 
 # 记住内核此刻是否在跑:升级完把它按新版本重新生成配置再拉起来,不用用户再进面板点启动
 CORE_WAS_RUNNING=0
-if [ -x /etc/init.d/openbox ] && /etc/init.d/openbox status 2>/dev/null | grep -q running; then
+if [ -x "$CORE_SVC" ] && "$CORE_SVC" status 2>/dev/null | grep -q running; then
   CORE_WAS_RUNNING=1
 fi
 
 info "停止服务..."
-if [ -x /etc/init.d/openbox-panel ]; then
-  /etc/init.d/openbox-panel stop >/dev/null 2>&1 || true
+if [ -x "$PANEL_SVC" ]; then
+  "$PANEL_SVC" stop >/dev/null 2>&1 || true
 fi
-if [ -x /etc/init.d/openbox ]; then
+if [ -x "$CORE_SVC" ]; then
   # 会顺带触发 P5 的安全清理(摘掉指向旧内核的 DNS 接管、移除 v6 拦截),
   # 这正是升级窗口期间希望的状态:内核马上要被换掉,不该让残留的接管卡住 LAN 上网。
-  /etc/init.d/openbox stop >/dev/null 2>&1 || true
+  "$CORE_SVC" stop >/dev/null 2>&1 || true
 fi
 
 info "替换 node/ panel/ bin/ openwrt/(保留 data/ 与 etc/)..."
@@ -1106,12 +1764,20 @@ POST_SWAP=1
 # 两阶段替换 + 整体回退:
 #   1) 先把四个旧组件各自挪到 .old(全部挪完之前一个都不删);
 #   2) 再把四个新组件从暂存目录挪进来;
-#   3) init 脚本也铺完、确认都成功后,才统一删 .old(见下方 swap:end)。
+#   3) init 脚本也铺完、新版本的面板起来并应答 /api/health 之后,才统一删 .old(见下方「面板起来了才删旧版本」);
+#      面板起不来就整体回退到旧版本(审查第八项)。
 # 中途任何一步失败都整体回退:新的删掉、.old 挪回原位,现有安装回到升级前的样子。
 # 以前是换一个删一个 .old,第三个失败时前两个的旧版本已经没了,装置卡成半新半旧,
 # 只能手工修或重装。
-COMPONENTS="${UPDATE_COMPONENTS:-node panel bin openwrt}"
-INITD_DIR="${OPENBOX_INITD_DIR:-/etc/init.d}"
+COMPONENTS="${UPDATE_COMPONENTS:-node panel bin openwrt debian}"
+# init 脚本(OpenWrt)/ systemd 单元(Debian)铺到哪、叫什么:回退和铺装两处都按这两个变量走
+if [ "$PLATFORM" = "systemd" ]; then
+  INITD_DIR="${OPENBOX_INITD_DIR:-/etc/systemd/system}"
+  INITD_SUFFIX=".service"
+else
+  INITD_DIR="${OPENBOX_INITD_DIR:-/etc/init.d}"
+  INITD_SUFFIX=""
+fi
 SWAPPED_NEW=""
 rollback_components() {
   _rb_failed=""
@@ -1127,17 +1793,66 @@ rollback_components() {
   # init 脚本铺到一半失败的话,已经铺进去的也要换回旧的;meta.json 同理
   for _rb in openbox openbox-panel; do
     if [ -e "$STAGE_DIR/initd-backup/$_rb" ]; then
-      cp "$STAGE_DIR/initd-backup/$_rb" "$INITD_DIR/$_rb" || _rb_failed="$_rb_failed initd:$_rb"
+      cp "$STAGE_DIR/initd-backup/$_rb" "$INITD_DIR/$_rb$INITD_SUFFIX" || _rb_failed="$_rb_failed initd:$_rb"
     fi
   done
+  [ -n "$INITD_SUFFIX" ] && systemctl daemon-reload >/dev/null 2>&1
   if [ -e "$STAGE_DIR/initd-backup/meta.json" ]; then
     cp "$STAGE_DIR/initd-backup/meta.json" "$INSTALL_ROOT/meta.json" || _rb_failed="$_rb_failed meta.json"
   fi
+  for _rb in update.sh uninstall.sh; do
+    if [ -e "$STAGE_DIR/initd-backup/$_rb" ]; then
+      cp -p "$STAGE_DIR/initd-backup/$_rb" "$INSTALL_ROOT/$_rb" || _rb_failed="$_rb_failed $_rb"
+    fi
+  done
   [ -z "$_rb_failed" ]
 }
+
+# 升级前内核在跑 → 按(当时装着的)版本重新生成配置并启动,走面板同款流水线(panel/server/cli/
+# deploy.mjs:冲突检测 → 规则集 → 校验 → 落盘 → DNS 接管 → 防火墙 → 启动 → 验证)。
+# 绝不能退回 init 脚本直接起旧配置:停内核时 DNS 接管已被还原,不经流水线重新接管就把内核
+# 拉起来,dnsmasq 模式下路由器自己的 DNS 会在 dnsmasq 和内核之间打环、什么都解析不了
+# (开发路由器实测)。那个版本没有这个脚本(只会是降级到老版本)就保持停止,提示去面板点启动。
+# 新版本面板起不来、或者换文件途中失败,整体回退之后也走这里,把旧版本的内核拉起来。结果写进 CORE_MSG
+# (定义放在换文件之前:swap_failed 在换文件途中就会调它)
+restart_core() {
+  CORE_MSG="内核未自动重启——如之前配置并运行着代理服务,请到面板重新启动它。"
+  [ "$CORE_WAS_RUNNING" = "1" ] || return 0
+  DEPLOY_CLI="$INSTALL_ROOT/panel/server/cli/deploy.mjs"
+  if [ -x "$INSTALL_ROOT/node/bin/node" ] && [ -f "$DEPLOY_CLI" ]; then
+    # 面板这时已经起来了,前端能重新读到状态文件:给内核重启单独一个阶段,否则弹窗
+    # 一直停在"正在替换文件,面板即将重启…",用户不知道后面还有一次内核重启(约 20 秒)。
+    write_status restarting_core "" "" "面板已重启,正在重新生成配置并启动内核"
+    info "升级前内核在运行,重新生成配置并启动内核..."
+    # LD_PRELOAD:内核缺 madvise 的设备上 Node 要带兼容库(冒烟测试记在 data/node-preload,没有就是空)
+    # 部署的输出留在 $_deploy_out:以前整个丢进 /dev/null,升级后内核没起来时用户和我们都看不到原因
+    # (#354 #369 #376 #378;失败的那次连部署状态都没写,面板里也查不到)。失败时把最后几行带进升级日志
+    _deploy_out="${TMPDIR:-/tmp}/openbox-update-deploy.log"
+    # 先 cd /:升级是在 panel/ 里发起的话(比如在那个目录下敲 open-box update),当前目录已经随旧版本删掉,
+    # Node 加载依赖时 process.cwd() 直接 ENOENT 崩掉,部署一步没走(开发路由器上复现过)
+    if (cd / && OPENBOX_ROOT="$INSTALL_ROOT" ZASHBOARD_DB_PATH="$INSTALL_ROOT/data/openbox.sqlite" \
+       LD_PRELOAD="$(cat "$INSTALL_ROOT/data/node-preload" 2>/dev/null)" \
+       OPENSSL_CONF=/dev/null LD_LIBRARY_PATH="$INSTALL_ROOT/node/lib" "$INSTALL_ROOT/node/bin/node" "$DEPLOY_CLI") >"$_deploy_out" 2>&1; then
+      CORE_MSG="内核已重新生成配置并启动。"
+    else
+      _deploy_rc=$?
+      warn "内核启动失败(部署退出码 $_deploy_rc),部署输出的最后几行(全文在 $_deploy_out):"
+      tail -n 15 "$_deploy_out" 2>/dev/null | sed 's/^/    /' >&2
+      CORE_MSG="内核启动失败,请到面板查看原因后重新启动。"
+    fi
+  else
+    warn "这个版本没有自动启动内核的脚本,请到面板重新启动内核。"
+    CORE_MSG="这个版本没有自动启动内核的脚本,请到面板重新启动内核。"
+  fi
+}
+
 swap_failed() {
   if rollback_components; then
-    die "$1 已把 node/ panel/ bin/ openwrt/ 与 init 脚本整体回退到升级前的版本,现有安装应仍完整($INSTALL_ROOT);请检查磁盘空间与权限后重试。"
+    # 旧版本的面板和内核拉回来:面板以前靠退出时的 cleanup 拉,内核没人管,升级前在跑的就一直停着
+    "$PANEL_SVC" start >/dev/null 2>&1 || true
+    PANEL_STARTED=1
+    restart_core
+    die "$1 已把 node/ panel/ bin/ openwrt/ 与 init 脚本整体回退到升级前的版本,现有安装应仍完整($INSTALL_ROOT);${CORE_MSG}请检查磁盘空间与权限后重试。"
   fi
   die "$1 回退时也失败了(没能挪回:$_rb_failed),安装现处于不一致状态:请检查 $INSTALL_ROOT 下各组件与对应的 .old 目录,必要时手工把 .old 挪回原名,或重新运行 update.sh。"
 }
@@ -1146,7 +1861,7 @@ for comp in $COMPONENTS; do
 done
 for comp in $COMPONENTS; do
   if [ -e "$INSTALL_ROOT/$comp" ]; then
-    mv "$INSTALL_ROOT/$comp" "$INSTALL_ROOT/$comp.old" || swap_failed "无法备份旧的 $comp。"
+    mv "$INSTALL_ROOT/$comp" "$INSTALL_ROOT/$comp.old" || swap_failed "无法备份旧的 ${comp}。"
   fi
 done
 for comp in $COMPONENTS; do
@@ -1156,7 +1871,12 @@ done
 # meta.json 也留一份:回退后版本号要跟组件一致,不能旧组件挂着新版本号
 mkdir -p "$STAGE_DIR/initd-backup" || swap_failed "无法创建备份目录。"
 [ -e "$INSTALL_ROOT/meta.json" ] && { cp "$INSTALL_ROOT/meta.json" "$STAGE_DIR/initd-backup/meta.json" || swap_failed "无法备份 meta.json。"; }
-mv "$STAGE_DIR/meta.json" "$INSTALL_ROOT/meta.json" || warn "meta.json 替换失败,面板显示的版本号可能不准确,但不影响功能。"
+# 换不上就整体回退:组件已经是新的,meta 还是旧的的话版本号、组件核对(下次升级按它算复用)都会错(GPT 复核第四项)
+mv "$STAGE_DIR/meta.json" "$INSTALL_ROOT/meta.json" || swap_failed "替换 meta.json 失败。"
+# 升级 / 卸载脚本也备一份:新版本面板起不来要整体回退时一起换回去(rollback_components)
+for _script in update.sh uninstall.sh; do
+  [ -e "$INSTALL_ROOT/$_script" ] && { cp -p "$INSTALL_ROOT/$_script" "$STAGE_DIR/initd-backup/$_script" || swap_failed "无法备份 ${_script}。"; }
+done
 # uninstall.sh 随产物分发(LuCI 兜底页要调它),升级时一并刷新,免得留着旧版本的
 # 卸载逻辑去清理新版本铺下的东西。
 if [ -e "$STAGE_DIR/uninstall.sh" ]; then
@@ -1175,30 +1895,43 @@ fi
 # root(0);统一改回 0:0,避免残留一个陌生 uid(P6 终审 Minor)。
 chown -R 0:0 "$INSTALL_ROOT" || warn "重置 $INSTALL_ROOT 属主为 root 失败,可能不影响使用。"
 
+
 info "重新铺装 init 脚本与 LuCI 文件..."
-# 先把现有 init 脚本存一份到暂存目录:铺到一半失败要连组件一起整体回退
+# 先把现有 init 脚本 / systemd 单元存一份到暂存目录:铺到一半失败要连组件一起整体回退
 mkdir -p "$STAGE_DIR/initd-backup" || swap_failed "无法创建 init 脚本备份目录。"
 for _initd in openbox openbox-panel; do
-  if [ -e "$INITD_DIR/$_initd" ]; then
-    cp "$INITD_DIR/$_initd" "$STAGE_DIR/initd-backup/$_initd" || swap_failed "无法备份现有的 $INITD_DIR/$_initd。"
+  if [ -e "$INITD_DIR/$_initd$INITD_SUFFIX" ]; then
+    cp "$INITD_DIR/$_initd$INITD_SUFFIX" "$STAGE_DIR/initd-backup/$_initd" || swap_failed "无法备份现有的 $INITD_DIR/$_initd${INITD_SUFFIX}。"
   fi
 done
-cp "$INSTALL_ROOT/openwrt/initd/openbox" "$INITD_DIR/openbox" || swap_failed "无法安装 $INITD_DIR/openbox。"
-cp "$INSTALL_ROOT/openwrt/initd/openbox-panel" "$INITD_DIR/openbox-panel" || swap_failed "无法安装 $INITD_DIR/openbox-panel。"
-chmod +x "$INITD_DIR/openbox" "$INITD_DIR/openbox-panel"
-# 组件和 init 脚本都换好了,这才是删旧版本的时候
-for comp in $COMPONENTS; do
-  [ -e "$INSTALL_ROOT/$comp.old" ] && safe_rm_rf "$INSTALL_ROOT/$comp.old"
-done
+if [ "$PLATFORM" = "systemd" ]; then
+  chmod +x "$INSTALL_ROOT/debian/bin/"* "$INSTALL_ROOT/debian/shim/"* 2>/dev/null || true
+  cp "$INSTALL_ROOT/debian/systemd/openbox.service" "$INITD_DIR/openbox.service" || swap_failed "无法安装 $INITD_DIR/openbox.service。"
+  cp "$INSTALL_ROOT/debian/systemd/openbox-panel.service" "$INITD_DIR/openbox-panel.service" || swap_failed "无法安装 $INITD_DIR/openbox-panel.service。"
+  chmod 644 "$INITD_DIR/openbox.service" "$INITD_DIR/openbox-panel.service" 2>/dev/null || true
+  systemctl daemon-reload >/dev/null 2>&1 || warn "systemctl daemon-reload 失败,单元文件可能要等重启后才生效。"
+else
+  cp "$INSTALL_ROOT/openwrt/initd/openbox" "$INITD_DIR/openbox" || swap_failed "无法安装 $INITD_DIR/openbox。"
+  cp "$INSTALL_ROOT/openwrt/initd/openbox-panel" "$INITD_DIR/openbox-panel" || swap_failed "无法安装 $INITD_DIR/openbox-panel。"
+  chmod +x "$INITD_DIR/openbox" "$INITD_DIR/openbox-panel"
+fi
+# 旧版本(.old)先留着:新版本的面板真的起来了才删(见下方),起不来还能整体回退
 # ---- swap:end ----
 
+if [ "$PLATFORM" = "openwrt" ]; then
 mkdir -p /www/luci-static/resources/view/openbox || warn "无法创建 LuCI 视图目录(不影响面板本身,LuCI 页面可能是旧的)。"
-cp "$INSTALL_ROOT/openwrt/luci/htdocs/luci-static/resources/view/openbox/status.js" \
-  /www/luci-static/resources/view/openbox/status.js || warn "无法安装 LuCI 视图文件(不影响面板本身,LuCI 页面可能是旧的)。"
+# 按目录拷,不写死文件名(理由同 install.sh:视图文件会改名来绕开浏览器缓存)
+cp "$INSTALL_ROOT/openwrt/luci/htdocs/luci-static/resources/view/openbox/"*.js \
+  /www/luci-static/resources/view/openbox/ || warn "无法安装 LuCI 视图文件(不影响面板本身,LuCI 页面可能是旧的)。"
+chmod 644 /www/luci-static/resources/view/openbox/*.js 2>/dev/null || true
+# 改名前的老视图文件(v0.1.215 及更早叫 status.js):菜单已经不指它了,留着只会让人
+# 以为还有一个旧页面。面板 init 脚本里也兜了一次,这里顺手清掉。
+rm -f /www/luci-static/resources/view/openbox/status.js 2>/dev/null || true
 
 mkdir -p /usr/share/luci/menu.d || warn "无法创建 LuCI 菜单目录(不影响面板本身,LuCI 页面可能是旧的)。"
 cp "$INSTALL_ROOT/openwrt/luci/root/usr/share/luci/menu.d/luci-app-openbox.json" \
   /usr/share/luci/menu.d/luci-app-openbox.json || warn "无法安装 LuCI 菜单文件(不影响面板本身,LuCI 页面可能是旧的)。"
+chmod 644 /usr/share/luci/menu.d/luci-app-openbox.json 2>/dev/null || true
 
 mkdir -p /usr/share/rpcd/acl.d || warn "无法创建 rpcd ACL 目录(不影响面板本身,LuCI 页面可能是旧的)。"
 # 先比对再覆盖:rpcd 只有在 ACL 真的变了时才需要重启,而重启 rpcd 会清空它内存里的
@@ -1211,50 +1944,81 @@ if [ ! -f "$_ACL_DST" ] || ! cmp -s "$_ACL_SRC" "$_ACL_DST"; then
   _acl_changed=1
 fi
 cp "$_ACL_SRC" "$_ACL_DST" || warn "无法安装 rpcd ACL 文件(不影响面板本身,LuCI 页面可能是旧的)。"
+chmod 644 "$_ACL_DST" 2>/dev/null || true
+
+fi
+
+# 命令行 open-box(SSH 下看面板密码 / 检查升级)。OpenWrt 放 /usr/bin,Debian 放 /usr/local/bin(CLI_LINK)。
+# 不覆盖别人放在那里的真文件;建不了只警告。面板的 init 脚本每次启动也会补一次(从不认识这个文件的老版本升上来时靠它)
+if [ -f "$INSTALL_ROOT/openwrt/bin/open-box" ] && { [ ! -e "$CLI_LINK" ] || [ -L "$CLI_LINK" ]; }; then
+  chmod +x "$INSTALL_ROOT/openwrt/bin/open-box" 2>/dev/null || true
+  ln -sf "$INSTALL_ROOT/openwrt/bin/open-box" "$CLI_LINK" 2>/dev/null || warn "无法创建 $CLI_LINK(不影响面板)。"
+fi
 
 # 用 -rf 而不是 -f:OpenWrt <=22.03 的 Lua 版 LuCI 里 /tmp/luci-modulecache 是
 # 目录,rm -f 对目录返回非零,在 set -eu 下会直接中止脚本(P6 终审 Important 4)。
 # 菜单/视图文件的变化靠清缓存即可生效,不需要动 rpcd。
+if [ "$PLATFORM" = "openwrt" ]; then
 rm -rf /tmp/luci-*cache* 2>/dev/null || true
 if [ "$_acl_changed" = "1" ] && [ -x /etc/init.d/rpcd ]; then
   info "rpcd 权限文件有变化,重启 rpcd(LuCI 需要重新登录一次)..."
   /etc/init.d/rpcd restart >/dev/null 2>&1 || warn "重启 rpcd 失败,LuCI 页面权限可能要等下次重启路由器后才生效。"
 fi
+fi
+
+# 面板起来没有:轮询 /api/health(不用登录),最多等 $1 秒。端口按 data/panel-port,没有就是 2026。
+# 只看启动命令的返回值不够——procd / systemd 都是立刻返回,Node 随后崩溃循环也照样返回成功
+panel_healthy() {
+  _ph_port=$(cat "$INSTALL_ROOT/data/panel-port" 2>/dev/null | tr -dc '0-9' || true)
+  [ -n "$_ph_port" ] || _ph_port=2026
+  _ph_deadline=$(( $(date +%s) + $1 ))
+  while :; do
+    case "$DOWNLOADER" in
+      curl) _ph_body=$(curl -fsS --max-time 3 "http://127.0.0.1:$_ph_port/api/health" 2>/dev/null || true) ;;
+      *) _ph_body=$(wget -q -T 3 -O - "http://127.0.0.1:$_ph_port/api/health" 2>/dev/null || true) ;;
+    esac
+    case "$_ph_body" in *'"ok":true'*) return 0 ;; esac
+    [ "$(date +%s)" -lt "$_ph_deadline" ] || return 1
+    sleep 2
+  done
+}
 
 info "启动面板..."
-/etc/init.d/openbox-panel enable || warn "设置面板开机自启失败,可稍后在 LuCI → 服务 → Open-Box 中手动开启。"
-/etc/init.d/openbox-panel start || warn "面板启动命令返回了非零状态,请稍后访问面板地址确认;如不可用可到 LuCI → 服务 → Open-Box 中重试。"
+if [ "$PLATFORM" = "openwrt" ]; then
+  RETRY_HINT="可稍后在 LuCI → 服务 → Open-Box 中重试"
+  PANEL_LOG_HINT="logread | grep node"
+else
+  RETRY_HINT="可稍后用 systemctl status openbox-panel 查看原因"
+  PANEL_LOG_HINT="journalctl -u openbox-panel -n 50"
+fi
+"$PANEL_SVC" enable || warn "设置面板开机自启失败,${RETRY_HINT}。"
+"$PANEL_SVC" start || warn "面板启动命令返回了非零状态,请稍后访问面板地址确认;如不可用${RETRY_HINT}。"
 PANEL_STARTED=1
 
-# 升级前内核在跑 → 现在按新版本重新生成配置并启动,走面板同款流水线(panel/server/cli/
-# deploy.mjs:冲突检测 → 规则集 → 校验 → 落盘 → DNS 接管 → 防火墙 → 启动 → 验证)。
-# 绝不能退回 init 脚本直接起旧配置:停内核时 DNS 接管已被还原,不经流水线重新接管就把内核
-# 拉起来,dnsmasq 模式下路由器自己的 DNS 会在 dnsmasq 和内核之间打环、什么都解析不了
-# (开发路由器实测)。目标版本没有这个脚本(只会是降级到老版本)就保持停止,提示去面板点启动。
-CORE_MSG="内核未自动重启——如之前配置并运行着代理服务,请到面板重新启动它。"
-if [ "$CORE_WAS_RUNNING" = "1" ]; then
-  DEPLOY_CLI="$INSTALL_ROOT/panel/server/cli/deploy.mjs"
-  if [ -x "$INSTALL_ROOT/node/bin/node" ] && [ -f "$DEPLOY_CLI" ]; then
-    # 面板这时已经起来了,前端能重新读到状态文件:给内核重启单独一个阶段,否则弹窗
-    # 一直停在"正在替换文件,面板即将重启…",用户不知道后面还有一次内核重启(约 20 秒)。
-    write_status restarting_core "" "" "面板已重启,正在按新版本重新生成配置并启动内核"
-    info "升级前内核在运行,按新版本重新生成配置并启动内核..."
-    if OPENBOX_ROOT="$INSTALL_ROOT" ZASHBOARD_DB_PATH="$INSTALL_ROOT/data/openbox.sqlite" \
-       LD_LIBRARY_PATH="$INSTALL_ROOT/node/lib" "$INSTALL_ROOT/node/bin/node" "$DEPLOY_CLI" >/dev/null 2>&1; then
-      CORE_MSG="内核已按新版本重新生成配置并启动。"
-    else
-      warn "内核启动失败(配置生成或校验没通过),请到面板查看原因后重新启动。"
-      CORE_MSG="内核启动失败,请到面板查看原因后重新启动。"
-    fi
-  else
-    warn "这个版本没有自动启动内核的脚本,请到面板重新启动内核。"
-    CORE_MSG="这个版本没有自动启动内核的脚本,请到面板重新启动内核。"
+# ---------- 面板起来了才删旧版本;起不来就整体回退 ----------
+# 慢的路由器上 Node 起来要十几二十秒,第一次启动还要迁移数据:给足 90 秒
+info "等待新版本的面板应答..."
+if ! panel_healthy "${OPENBOX_UPDATE_HEALTH_WAIT:-90}"; then
+  warn "新版本 $NEW_VERSION 的面板启动后一直没有应答,整体回退到 ${OLD_VERSION:-升级前的版本}..."
+  write_status committing "" "" "新版本的面板没有起来,正在回退到 ${OLD_VERSION:-升级前的版本}"
+  "$PANEL_SVC" stop >/dev/null 2>&1 || true
+  if rollback_components; then
+    "$PANEL_SVC" start >/dev/null 2>&1 || true
+    restart_core
+    die "新版本 $NEW_VERSION 的面板启动后没有应答,已整体回退到 ${OLD_VERSION:-升级前的版本}。${CORE_MSG}请把 $PANEL_LOG_HINT 的输出发到 GitHub issue。"
   fi
+  "$PANEL_SVC" start >/dev/null 2>&1 || true
+  die "新版本 $NEW_VERSION 的面板起不来,回退时也失败了(没能挪回:$_rb_failed),安装现处于不一致状态:请检查 $INSTALL_ROOT 下各组件与对应的 .old 目录,必要时手工把 .old 挪回原名,或重新运行安装脚本。"
 fi
+for comp in $COMPONENTS; do
+  [ -e "$INSTALL_ROOT/$comp.old" ] && safe_rm_rf "$INSTALL_ROOT/$comp.old"
+done
+
+restart_core
 
 write_status done "" "" "升级完成:$NEW_VERSION;$CORE_MSG"
 
 echo ""
-echo "Open-Box 已升级到 $NEW_VERSION。"
+echo "Open-Box 已升级到 ${NEW_VERSION}。"
 echo "面板已重新启动;$CORE_MSG"
 echo ""
