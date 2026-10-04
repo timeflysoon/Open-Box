@@ -11,7 +11,7 @@ permissions:
   contents: read
 
 env:
-  OPENBOX_REPO: liandu2024/Open-Box
+  OPENBOX_REPO: timeflysoon/Open-Box
 
 jobs:
   geodata:
