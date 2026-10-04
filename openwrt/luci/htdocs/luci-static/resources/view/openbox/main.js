@@ -14,8 +14,16 @@
 // ---------------------------------------------------------------------------
 var I18N = {
 	'zh-Hans': {
-		'Basic settings. Full management lives in the Open-Box panel:':
-			'基本设置,完整管理请到 Open-Box 面板:',
+		'Full management lives in the Open-Box panel:':
+			'完整管理请到 Open-Box 面板:',
+		'Password:': '密码:',
+		'View password': '查看密码',
+		'Panel password': '面板密码',
+		'Reading...': '正在读取…',
+		'Panel address: %s': '面板地址:%s',
+		'No password yet. Open %s in a browser and set one on first visit.': '还没有设置密码。用浏览器打开 %s,首次打开时设置。',
+		'Could not read the password (the panel database is missing, or the Node runtime is unavailable).':
+			'读不到密码(面板数据库不在,或 Node 运行时不可用)。',
 		'sing-box core': 'sing-box 内核',
 		'Open-Box panel': 'Open-Box 面板',
 		'Open-Box upgrade': 'Open-Box 升级',
@@ -40,6 +48,10 @@ var I18N = {
 		'Action sent: %s %s': '已发送操作:%s %s',
 		'Action failed: %s': '操作失败:%s',
 		'init action failed': '服务操作未成功',
+		'Generating the config and starting the core…': '正在生成配置并启动内核…',
+		'Core started.': '内核已启动。',
+		'The core did not start: %s': '内核没有起来:%s',
+		'The core is still starting. Check it in the Open-Box panel (Backend) in a moment.': '内核还在启动,请稍后到 Open-Box 面板「后端设置」查看。',
 		'Update now': '立即更新',
 		'Current version: %s': '当前版本:%s',
 		'New version: %s': '新版本:%s',
@@ -90,6 +102,18 @@ var I18N = {
 		'Close': '关闭',
 		'Remove Open-Box from this router. Services are stopped, DNS and firewall changes are reverted, and the LuCI page disappears after the next refresh.':
 			'从这台路由器上移除 Open-Box。服务会被停止,DNS 与防火墙改动会被还原,刷新后本页面也会消失。',
+		'Change port': '修改端口',
+		'Change panel port': '修改面板端口',
+		'The panel listens on this port. Changing it restarts the panel if it is running.':
+			'面板监听这个端口。修改后如果面板正在运行,会自动重启一次。',
+		'Port': '端口',
+		'Save': '保存',
+		'Enter a port between 1024 and 65535.': '请填 1024-65535 之间的端口。',
+		'Checking and saving...': '正在检测端口并保存…',
+		'Could not change the port.': '端口没能改成。',
+		'Panel port changed to %s and the panel was restarted. New address: %s':
+			'面板端口已改为 %s,面板已重启。新地址:%s',
+		'Panel port changed to %s. New address: %s': '面板端口已改为 %s。新地址:%s',
 		'Uninstall Open-Box': '卸载 Open-Box',
 		'Also delete data (subscriptions, password, rule sets)': '同时删除数据(订阅、密码、规则集)',
 		'Keeping data lets a later re-install reuse it. Delete it for a completely fresh start.':
@@ -98,13 +122,30 @@ var I18N = {
 		'Cancel': '取消',
 		'Confirm uninstall': '确认卸载',
 		'Uninstalling...': '正在卸载…',
-		'Uninstalled. Refresh the page; this menu entry will be gone.': '已卸载。请刷新页面,本菜单项将会消失。',
+		'Uninstalled. Please refresh the page.': '卸载成功,请刷新网页。',
+		'Back to home page': '返回首页',
 		'Uninstall failed: %s': '卸载失败:%s',
+		'Uninstall failed.': '卸载失败。',
+		'Recent uninstall log:': '最近的卸载日志:',
+		'Stopping services...': '正在停止服务…',
+		'Reverting firewall rules...': '正在还原防火墙规则…',
+		'Removing init scripts and LuCI files...': '正在删除启动脚本与 LuCI 文件…',
+		'Deleting program files...': '正在删除程序文件…',
+		'No result yet. The uninstall may still be running in the background — check over SSH: cat /tmp/openbox-uninstall.status':
+			'暂时没有结果。卸载可能仍在后台进行——可用 SSH 查看:cat /tmp/openbox-uninstall.status',
 		'Uninstall script not found. Run it manually over SSH.': '未找到卸载脚本,请通过 SSH 手动执行。'
 	},
 	'zh-Hant': {
-		'Basic settings. Full management lives in the Open-Box panel:':
-			'基本設定,完整管理請到 Open-Box 面板:',
+		'Full management lives in the Open-Box panel:':
+			'完整管理請到 Open-Box 面板:',
+		'Password:': '密碼:',
+		'View password': '檢視密碼',
+		'Panel password': '面板密碼',
+		'Reading...': '正在讀取…',
+		'Panel address: %s': '面板位址:%s',
+		'No password yet. Open %s in a browser and set one on first visit.': '還沒有設定密碼。用瀏覽器開啟 %s,首次開啟時設定。',
+		'Could not read the password (the panel database is missing, or the Node runtime is unavailable).':
+			'讀不到密碼(面板資料庫不在,或 Node 執行環境不可用)。',
 		'sing-box core': 'sing-box 核心',
 		'Open-Box panel': 'Open-Box 面板',
 		'Open-Box upgrade': 'Open-Box 升級',
@@ -129,6 +170,10 @@ var I18N = {
 		'Action sent: %s %s': '已傳送操作:%s %s',
 		'Action failed: %s': '操作失敗:%s',
 		'init action failed': '服務操作未成功',
+		'Generating the config and starting the core…': '正在產生設定並啟動核心…',
+		'Core started.': '核心已啟動。',
+		'The core did not start: %s': '核心沒有啟動:%s',
+		'The core is still starting. Check it in the Open-Box panel (Backend) in a moment.': '核心還在啟動,請稍後到 Open-Box 面板「後端設定」查看。',
 		'Update now': '立即更新',
 		'Current version: %s': '目前版本:%s',
 		'New version: %s': '新版本:%s',
@@ -179,6 +224,18 @@ var I18N = {
 		'Close': '關閉',
 		'Remove Open-Box from this router. Services are stopped, DNS and firewall changes are reverted, and the LuCI page disappears after the next refresh.':
 			'從這台路由器上移除 Open-Box。服務會被停止,DNS 與防火牆變更會被還原,重新整理後本頁面也會消失。',
+		'Change port': '修改連接埠',
+		'Change panel port': '修改面板連接埠',
+		'The panel listens on this port. Changing it restarts the panel if it is running.':
+			'面板監聽這個連接埠。修改後如果面板正在執行,會自動重新啟動一次。',
+		'Port': '連接埠',
+		'Save': '儲存',
+		'Enter a port between 1024 and 65535.': '請填 1024-65535 之間的連接埠。',
+		'Checking and saving...': '正在檢測連接埠並儲存…',
+		'Could not change the port.': '連接埠沒能改成。',
+		'Panel port changed to %s and the panel was restarted. New address: %s':
+			'面板連接埠已改為 %s,面板已重新啟動。新位址:%s',
+		'Panel port changed to %s. New address: %s': '面板連接埠已改為 %s。新位址:%s',
 		'Uninstall Open-Box': '解除安裝 Open-Box',
 		'Also delete data (subscriptions, password, rule sets)': '同時刪除資料(訂閱、密碼、規則集)',
 		'Keeping data lets a later re-install reuse it. Delete it for a completely fresh start.':
@@ -187,8 +244,17 @@ var I18N = {
 		'Cancel': '取消',
 		'Confirm uninstall': '確認解除安裝',
 		'Uninstalling...': '正在解除安裝…',
-		'Uninstalled. Refresh the page; this menu entry will be gone.': '已解除安裝。請重新整理頁面,本選單項目將會消失。',
+		'Uninstalled. Please refresh the page.': '解除安裝成功,請重新整理網頁。',
+		'Back to home page': '回到首頁',
 		'Uninstall failed: %s': '解除安裝失敗:%s',
+		'Uninstall failed.': '解除安裝失敗。',
+		'Recent uninstall log:': '最近的解除安裝日誌:',
+		'Stopping services...': '正在停止服務…',
+		'Reverting firewall rules...': '正在還原防火牆規則…',
+		'Removing init scripts and LuCI files...': '正在刪除啟動指令碼與 LuCI 檔案…',
+		'Deleting program files...': '正在刪除程式檔案…',
+		'No result yet. The uninstall may still be running in the background — check over SSH: cat /tmp/openbox-uninstall.status':
+			'暫時沒有結果。解除安裝可能仍在背景進行——可用 SSH 檢視:cat /tmp/openbox-uninstall.status',
 		'Uninstall script not found. Run it manually over SSH.': '找不到解除安裝腳本,請透過 SSH 手動執行。'
 	}
 };
@@ -297,6 +363,51 @@ function act(name, actions) {
 	});
 }
 
+// 内核的「启动 / 重启」和面板里点的一样:先生成配置再启动,auto_redirect 起不来时自动降级成纯 tun。以前直接调
+// init 脚本:全新安装还没生成配置时什么都起不来却提示「已发送」(GitHub #299),起不来也不降级(#290)。
+// 生成配置要十来秒,rpcd 的 fs.exec 有超时,所以让命令行在后台跑(open-box start --detach),这里每 2 秒问一次
+// `open-box start --status`:running = 还在跑,否则是 cli/deploy.mjs 的结果 JSON
+var DEPLOY_POLL_MS = 2000;
+var DEPLOY_WAIT_MS = 180000;
+
+function deployCore() {
+	return fs.exec(CLI_PATH, [ 'start', '--detach' ]).then(function (res) {
+		if (!res || res.code !== 0) {
+			throw new Error((res && (res.stderr || res.stdout)) || ('exit ' + (res && res.code)));
+		}
+		ui.addNotification(null, E('p', tr('Generating the config and starting the core…')), 'info');
+		return waitDeploy(Date.now() + DEPLOY_WAIT_MS);
+	}).then(function (result) {
+		if (result === null) {
+			ui.addNotification(null, E('p', tr('The core is still starting. Check it in the Open-Box panel (Backend) in a moment.')), 'warning');
+		} else if (result.ok) {
+			ui.addNotification(null, E('p', [ tr('Core started.') ].concat(result.warning ? [ ' ', result.warning ] : [])), 'info');
+		} else {
+			ui.addNotification(null, E('p', fmt('The core did not start: %s', result.message || '')), 'error');
+		}
+		window.setTimeout(function () { location.reload(); }, 1500);
+	}).catch(function (err) {
+		ui.addNotification(null, E('p', fmt('Action failed: %s', err.message || err)), 'error');
+	});
+}
+
+// 等后台部署结束:返回结果对象 {ok,message,warning};到时限还在跑返回 null
+function waitDeploy(deadline) {
+	return new Promise(function (resolve) { window.setTimeout(resolve, DEPLOY_POLL_MS); }).then(function () {
+		return fs.exec(CLI_PATH, [ 'start', '--status' ]).catch(function () { return null; });
+	}).then(function (res) {
+		var text = String((res && res.stdout) || '').trim();
+		if (text !== 'running' && text !== '') {
+			try {
+				return JSON.parse(text);
+			} catch (e) {
+				return { ok: false, message: text };
+			}
+		}
+		return Date.now() < deadline ? waitDeploy(deadline) : null;
+	});
+}
+
 // ---------------------------------------------------------------------------
 // 版本
 // ---------------------------------------------------------------------------
@@ -357,12 +468,62 @@ function checkLatest() {
 	});
 }
 
+var CLI_PATH = '/opt/open-box/openwrt/bin/open-box';
+
+// 面板密码:忘了密码的人打开这个页面就能看到(SSH 下敲 open-box 也能看)。面板密码本来就明文存在这台路由器上,
+// 能登进 LuCI 的人(root)早已能控制整台机器,这里不多泄露什么。走 fs.exec 调随包的命令行 `open-box password`
+// (只读打开面板数据库),需要 ACL 里对该路径的 exec 授权——这条授权是和本功能一起加的,升级时 rpcd 会因
+// 权限文件变化而重启、LuCI 要重新登录一次;万一还是旧会话(被拒绝)或命令不在,读不到就不显示,不影响页面其它部分。
+// 退出码:0 = stdout 是密码;3 = 还没设置过(首次打开面板时设置);其它 = 读不了。
+function readPanelPassword() {
+	return fs.exec(CLI_PATH, [ 'password' ]).then(function (res) {
+		if (res && res.code === 0) return { state: 'set', password: String(res.stdout || '').replace(/\r?\n$/, '') };
+		if (res && res.code === 3) return { state: 'unset' };
+		return { state: 'unknown' };
+	}).catch(function () { return { state: 'unknown' }; });
+}
+
+// 面板端口:唯一来源是 open-box 命令(它读 data/panel-port,没有就是 2026)。页面不自己
+// 猜端口——猜错了给出的面板地址就是打不开的那个。
+function readPanelPort() {
+	return fs.exec(CLI_PATH, [ 'port' ]).then(function (res) {
+		if (!res || res.code !== 0) return null;
+		var n = parseInt(String(res.stdout || '').trim(), 10);
+		return (n > 0 && n < 65536) ? n : null;
+	}).catch(function () { return null; });
+}
+
+// 改端口:冲突检测、写文件、改防火墙放行规则、面板在跑就重启 —— 全在 open-box port 里做,
+// 页面只负责把用户填的数字递进去、把失败原因(脚本写到 stderr 的那句中文)照原样显示。
+function setPanelPort(port) {
+	return fs.exec(CLI_PATH, [ 'port', String(port) ]).then(function (res) {
+		if (res && res.code === 0) {
+			return { ok: true, restarted: /restarted=yes/.test(String(res.stdout || '')) };
+		}
+		var msg = String((res && (res.stderr || res.stdout)) || '').trim();
+		return { ok: false, message: msg.split('\n').pop() || '' };
+	}).catch(function (err) {
+		return { ok: false, message: String(err && err.message || err) };
+	});
+}
+
 var UNINSTALL_PATH = '/opt/open-box/uninstall.sh';
+var UNINSTALL_STATUS_PATH = '/tmp/openbox-uninstall.status';
+var UNINSTALL_LOG_PATH = '/tmp/openbox-uninstall.log';
+var UNINSTALL_POLL_INTERVAL_MS = 1000;
+var UNINSTALL_POLL_TIMEOUT_MS = 180000; // 3 分钟:停服务 + 重载防火墙 + 删几百 MB 的宽松上限
 
 // 卸载走本地脚本(随发布包铺下来的那份),不依赖外网——这个页面存在的意义就是
 // 面板/网络出问题时还能操作。fs.exec 需要 ACL 里对该路径的 exec 授权。
+//
+// 必须带 --detach,理由和更新那边一模一样(见 UPDATE_PATH 定义处的长注释):
+// rpcd 的 fs.exec 是一次有超时的 XHR,而卸载要停两个服务、reload 防火墙、删掉
+// 几百 MB 程序文件,同步调用必然是 XHR 先超时——页面上就报「卸载失败:XHR
+// request timed out」,而后台其实一路删到底,用户还以为失败了去刷新,结果整个
+// 插件页都没了(这正是用户报的那一幕)。--detach 让脚本立刻返回,进度改由
+// pollUninstall() 轮询状态文件。
 function runUninstall(purge) {
-	var args = purge ? [ '--purge' ] : [];
+	var args = purge ? [ '--detach', '--purge' ] : [ '--detach' ];
 	return fs.exec(UNINSTALL_PATH, args).then(function (res) {
 		if (!res || res.code !== 0) {
 			var detail = (res && (res.stderr || res.stdout)) || ('exit ' + (res ? res.code : '?'));
@@ -370,6 +531,91 @@ function runUninstall(purge) {
 		}
 		return res;
 	});
+}
+
+// uninstall.sh 的 key=value 进度文件,写法与 update.sh 那份同源,字段少一些。
+function parseUninstallStatus(txt) {
+	var out = { pid: '', stage: '', message: '' };
+	String(txt || '').split('\n').forEach(function (line) {
+		var i = line.indexOf('=');
+		if (i === -1) return;
+		var k = line.slice(0, i), v = line.slice(i + 1);
+		if (k === 'pid') out.pid = v;
+		else if (k === 'stage') out.stage = v;
+		else if (k === 'message') out.message = v;
+	});
+	return out;
+}
+
+function uninstallStageText(stage) {
+	switch (stage) {
+		case 'stopping': return tr('Stopping services...');
+		case 'firewall': return tr('Reverting firewall rules...');
+		case 'files': return tr('Removing init scripts and LuCI files...');
+		case 'removing': return tr('Deleting program files...');
+		case 'done': return tr('Finishing...');
+		default: return tr('Uninstalling...');
+	}
+}
+
+// 轮询卸载进度。判成功有两个各自独立的信号,任一成立即可:
+//
+//  1) 状态文件 stage=done。最准,但不一定读得到——/tmp/openbox-uninstall.status
+//     的读权限是这个版本才加进 ACL 的,而 LuCI 会话的 ACL 是登录时一次算好缓存
+//     住的(见 readUpdateStatus() 顶部那段说明),升级之后没重新登录的旧会话读它
+//     会一直被拒。
+//  2) meta.json 没了。它在 removing 阶段随程序文件一起被删,而它的读权限很早就
+//     在 ACL 里,任何会话都读得到——所以这条信号对旧会话同样有效,是 1) 的兜底。
+//     卸载最后一步还会重启 rpcd,那之后所有 fs.* 都可能失败,同样落到这一条上。
+//
+// 判失败只有一个信号:stage=failed(uninstall.sh 的 die() 写的)。读不到状态文件
+// 本身从不当作失败——它太容易是权限问题,而后台卸载照样在跑,误报"失败"正是这次
+// 要修掉的那个毛病。真的超时(3 分钟)就如实说"可能还在后台跑,SSH 去看"。
+// 返回的 promise 上挂了 cancel(),用于"根本没触发起来"时立刻停掉轮询,不要让它
+// 空转到 3 分钟超时再弹第二个结论出来。
+// staleText:开始卸载之前状态文件里就有的内容(没有就传 null)。/tmp 里的状态文件会留到
+// 下次重启,上一次卸载失败/被中断后它很可能停在 done——不防的话,这次一按下去,第一轮轮询
+// 就读到那句陈年的 done,立刻报"已卸载"(其实什么都还没发生)。所以内容和开工前一字不差
+// 时一律当作"还没开始";真跑起来第一件事就是写 starting,内容必然变。
+function pollUninstall(onStage, staleText) {
+	var started = Date.now();
+	var metaGoneStreak = 0;
+	var timer = null;
+	var finish = null;
+	var p = new Promise(function (resolve) {
+		finish = function (res) { window.clearInterval(timer); resolve(res); };
+		timer = window.setInterval(function () {
+			Promise.all([
+				fs.read(UNINSTALL_STATUS_PATH).then(function (txt) {
+					if (staleText !== null && staleText !== undefined && String(txt) === String(staleText)) return null;
+					return parseUninstallStatus(txt);
+				}).catch(function () { return null; }),
+				fs.read(META_PATH).then(function () { return true; }).catch(function () { return false; })
+			]).then(function (r) {
+				var status = r[0], metaThere = r[1];
+				if (status && status.stage && onStage) onStage(status.stage);
+				if (status && status.stage === 'done') {
+					finish({ result: 'done' });
+					return;
+				}
+				if (status && status.stage === 'failed') {
+					finish({ result: 'failed', message: status.message || '' });
+					return;
+				}
+				// 连着两轮读不到 meta.json 才认——躲开 rpcd 重启瞬间的单次抖动。
+				metaGoneStreak = metaThere ? 0 : metaGoneStreak + 1;
+				if (metaGoneStreak >= 2) {
+					finish({ result: 'done' });
+					return;
+				}
+				if (Date.now() - started > UNINSTALL_POLL_TIMEOUT_MS) {
+					finish({ result: 'timeout' });
+				}
+			});
+		}, UNINSTALL_POLL_INTERVAL_MS);
+	});
+	p.cancel = function () { finish({ result: 'aborted' }); };
+	return p;
 }
 
 // ---------------------------------------------------------------------------
@@ -772,6 +1018,10 @@ var STYLE_CSS =
 	// 副标题末尾那条面板地址:靠 margin-left 和前面的文案分开,而不是在 i18n 词条
 	// 里塞一个尾随空格(不可见、编辑时极易丢),中英文冒号后的松紧也能各自合适。
 	'.ob-descr a{margin-left:.4em}' +
+	'.ob-head-actions{display:flex;align-items:center;gap:8px;flex-shrink:0}' +
+	'.ob-pw-btn{vertical-align:baseline}' +
+	'.ob-pw-modal code{display:inline-block;margin-left:.4em;padding:2px 8px;border-radius:4px;' +
+	'background:rgba(127,127,127,.15);font-size:1.15em;user-select:all}' +
 	'.ob-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:start;margin-top:12px}' +
 	// 卸载卡片撤走后网格只剩三张:两列排布会在右下角留一个空格子。让内容最多的
 	// 「Open-Box 升级」横跨两列把这个洞填掉(渠道列表另有 max-width 兜着,不会
@@ -808,6 +1058,17 @@ var STYLE_CSS =
 	'.ob-pill-muted{opacity:.7;border-color:rgba(127,127,127,.4)}' +
 	'.ob-btns{display:flex;flex-wrap:wrap;gap:8px;margin:14px 0 0}' +
 	'.ob-meta{display:flex;flex-wrap:wrap;gap:.5em;align-items:baseline;margin:.4em 0;font-size:.95em}' +
+	// 卸载确认里的勾选框和说明文字必须共用一个行高与中线。LuCI 主题通常会给
+	// 原生 input/label 追加各自的 margin、line-height,只靠父级 align-items:center
+	// 会让勾选框落到文字基线下面,尤其在中文字体和 Windows 浏览器上明显。
+	'.ob-purge-row{display:flex!important;align-items:center!important;margin:.4em 0;text-align:left;line-height:22px}' +
+	'.ob-purge-label{display:inline-flex!important;align-items:center!important;gap:8px;height:22px!important;margin:0!important;padding:0!important;line-height:22px!important;position:static!important;top:auto!important;transform:none!important;cursor:pointer}' +
+	'.ob-purge-box{position:absolute!important;width:1px!important;height:1px!important;margin:-1px!important;padding:0!important;overflow:hidden!important;clip:rect(0 0 0 0)!important;clip-path:inset(50%)!important;white-space:nowrap!important;border:0!important;opacity:0!important}' +
+	'.ob-purge-mark{display:inline-flex!important;flex:0 0 22px!important;align-items:center!important;justify-content:center!important;width:22px!important;height:22px!important;box-sizing:border-box!important;border:1px solid rgba(127,127,127,.38)!important;border-radius:4px!important;background:transparent!important;line-height:1!important}' +
+	'.ob-purge-box:checked + .ob-purge-mark{border-color:#5c6de0!important;background:#5c6de0!important}' +
+	'.ob-purge-box:checked + .ob-purge-mark:after{content:"";display:block!important;width:6px!important;height:11px!important;border:solid #fff!important;border-width:0 2px 2px 0!important;transform:translateY(-1px) rotate(45deg)!important}' +
+	'.ob-purge-box:focus-visible + .ob-purge-mark{outline:2px solid currentColor!important;outline-offset:2px!important}' +
+	'.ob-purge-text{display:inline-block!important;height:22px!important;line-height:22px!important}' +
 	// 升级卡片中段那条分隔线跟着标题线一起收进内容宽度:原来用负 margin 通栏
 	// (margin:14px -18px)顶到卡片边缘,现在同一张卡片里若一条线通栏、一条线
 	// 不通栏,会显得是没对齐的 bug。
@@ -838,13 +1099,15 @@ return view.extend({
 			serviceState('openbox'),
 			serviceState('openbox-panel'),
 			readInstalledVersion(),
-			readInstalledSingboxVersion()
+			readInstalledSingboxVersion(),
+			readPanelPort()
 		]);
 	},
 
 	render: function (data) {
 		var core = data[0], panel = data[1], installed = data[2], singboxVersion = data[3];
-		var panelUrl = 'http://' + window.location.hostname + ':2026';
+		var panelPort = data[4] || 2026;
+		var panelUrl = 'http://' + window.location.hostname + ':' + panelPort;
 		var self = this;
 
 		// -------------------------------------------------------------------
@@ -923,60 +1186,199 @@ return view.extend({
 		// 这件事足够反直觉(停完重启路由器,内核不会自己回来),原本用一段说明文字
 		// 摆在卡片里,但那段文字太长、占掉半张卡片,已按要求撤掉。信息本身不能跟着
 		// 丢,所以改挂 title:不占版面,想知道的人一悬停就有。
-		function serviceButtons(name, st, stopActions, stopHint) {
+		// extra:接在这排按钮后面的额外按钮(面板卡片用它放「修改端口」)。样式照抄同一排的
+		// cbi-button-neutral,不另起一套。
+		function serviceButtons(name, st, stopActions, stopHint, extra) {
 			var stopAttrs = { 'class': 'cbi-button cbi-button-reset',
 				'click': ui.createHandlerFn(self, function () { return act(name, stopActions || 'stop'); }) };
 			if (stopHint) stopAttrs.title = stopHint;
+			// 内核的启动 / 重启要先生成配置(deployCore);面板的照旧直接调 init 脚本
+			var startOrRestart = function (action) {
+				return name === 'openbox' ? deployCore() : act(name, action);
+			};
 			return E('div', { 'class': 'ob-btns' }, [
 				E('button', { 'class': 'cbi-button cbi-button-apply',
-					'click': ui.createHandlerFn(self, function () { return act(name, 'start'); }) }, tr('Start')),
+					'click': ui.createHandlerFn(self, function () { return startOrRestart('start'); }) }, tr('Start')),
 				E('button', stopAttrs, tr('Stop')),
 				E('button', { 'class': 'cbi-button cbi-button-neutral',
-					'click': ui.createHandlerFn(self, function () { return act(name, 'restart'); }) }, tr('Restart')),
+					'click': ui.createHandlerFn(self, function () { return startOrRestart('restart'); }) }, tr('Restart')),
 				E('button', { 'class': 'cbi-button cbi-button-neutral',
 					'click': ui.createHandlerFn(self, function () {
 						return act(name, st.enabled ? 'disable' : 'enable');
 					}) }, st.enabled ? tr('Disable autostart') : tr('Enable autostart'))
-			]);
+			].concat(extra || []));
 		}
 
+		// 「修改端口」:点开显示当前端口,可以改;保存时由 open-box port 查冲突,冲突就不保存、
+		// 把原因显示出来;面板本来在跑的话它会自动重启,所以保存成功后要提示地址变了。
+		function showPortDialog() {
+			var input = E('input', {
+				'class': 'cbi-input-text', 'type': 'text', 'inputmode': 'numeric',
+				'style': 'width:8em', 'value': String(panelPort)
+			});
+			var hint = E('p', { 'style': 'min-height:1.2em;margin:.4em 0 0 0;color:#d04a4a' }, '');
+			var save = function () {
+				var n = parseInt(String(input.value || '').replace(/[^0-9]/g, ''), 10);
+				if (!(n > 0 && n < 65536)) { hint.textContent = tr('Enter a port between 1024 and 65535.'); return; }
+				if (n === panelPort) { ui.hideModal(); return; }
+				hint.textContent = '';
+				hint.style.color = '';
+				hint.textContent = tr('Checking and saving...');
+				return setPanelPort(n).then(function (res) {
+					if (!res.ok) {
+						hint.style.color = '#d04a4a';
+						hint.textContent = res.message || tr('Could not change the port.');
+						return;
+					}
+					ui.hideModal();
+					var url = 'http://' + window.location.hostname + ':' + n;
+					var done = res.restarted
+						? fmt('Panel port changed to %s and the panel was restarted. New address: %s', String(n), url)
+						: fmt('Panel port changed to %s. New address: %s', String(n), url);
+					ui.addNotification(null, E('p', {}, done), 'info');
+					window.setTimeout(function () { location.reload(); }, 1500);
+				});
+			};
+			ui.showModal(tr('Change panel port'), [
+				E('p', {}, tr('The panel listens on this port. Changing it restarts the panel if it is running.')),
+				E('div', { 'style': 'display:flex;align-items:center;gap:.6em;margin:.6em 0' }, [
+					E('label', {}, tr('Port')), input
+				]),
+				hint,
+				E('div', { 'class': 'right', 'style': BTNROW }, [
+					E('button', { 'class': 'cbi-button', 'click': function () { ui.hideModal(); } }, tr('Cancel')),
+					E('button', { 'class': 'cbi-button cbi-button-apply',
+						'click': ui.createHandlerFn(self, save) }, tr('Save'))
+				])
+			]);
+			input.focus();
+			input.select();
+		}
+
+		// 「查看密码」:点了才去读(readPanelPassword 走 open-box password)。
+		// 三种结果各有各的说法:读到了就显示;还没设置就告诉他去面板首次设置;读不到就说明原因。
+		function showPasswordDialog() {
+			ui.showModal(tr('Panel password'), [ E('p', { 'class': 'spinning' }, tr('Reading...')) ]);
+			return readPanelPassword().then(function (pw) {
+				var body;
+				if (pw.state === 'set') {
+					body = [
+						E('p', { 'class': 'ob-pw-modal' }, [ tr('Password:'), E('code', {}, pw.password) ]),
+						E('p', { 'style': 'opacity:.75;font-size:90%' }, fmt('Panel address: %s', panelUrl)),
+					];
+				} else if (pw.state === 'unset') {
+					body = [ E('p', {}, fmt('No password yet. Open %s in a browser and set one on first visit.', panelUrl)) ];
+				} else {
+					body = [ E('p', {}, tr('Could not read the password (the panel database is missing, or the Node runtime is unavailable).')) ];
+				}
+				body.push(E('div', { 'class': 'right', 'style': BTNROW }, [
+					E('button', { 'class': 'cbi-button', 'click': function () { ui.hideModal(); } }, tr('Close'))
+				]));
+				ui.showModal(tr('Panel password'), body);
+			});
+		}
+
+		// 触发卸载 + 盯进度 + 报结论。脚本带 --detach 立刻返回,所以这里不等 fs.exec
+		// 的结果下结论(它只是"有没有成功触发"的参考):轮询与 exec 并行起跑,由
+		// pollUninstall() 给出 done / failed / timeout。
+		function startUninstall(purge, staleStatusText) {
+			var progress = E('p', { 'class': 'spinning' }, tr('Uninstalling...'));
+			ui.showModal(tr('Uninstall Open-Box'), [ progress ]);
+
+			var poll = pollUninstall(function (stage) {
+				progress.textContent = uninstallStageText(stage);
+			}, staleStatusText);
+			var polling = poll.then(function (res) {
+				if (res.result === 'aborted') return;
+				if (res.result === 'done') {
+					// 卸载完这个页面就不存在了,再刷新当前地址只会得到一个"找不到"。所以先把地址栏
+					// 换成 LuCI 首页(只改地址、不跳转,用户能把成功提示看完),这样他按刷新就直接
+					// 落到 OpenWrt 首页;想立刻走的也可以按按钮。
+					try { window.history.replaceState({}, '', L.url()); } catch (e) { /* 老浏览器没有就算了 */ }
+					ui.showModal(tr('Uninstall Open-Box'), [
+						E('p', {}, tr('Uninstalled. Please refresh the page.')),
+						E('div', { 'class': 'right', 'style': BTNROW }, [
+							E('button', { 'class': 'cbi-button cbi-button-apply', 'click': function () {
+								window.location.replace(L.url());
+							} }, tr('Back to home page'))
+						])
+					]);
+					return;
+				}
+				// 失败/超时都把日志尾巴摆出来(读得到的话),别让用户只看到一句结论。
+				return fs.read(UNINSTALL_LOG_PATH).then(function (t) { return t; }).catch(function () { return ''; })
+					.then(function (logTail) {
+						ui.hideModal();
+						var msg = res.result === 'failed'
+							? (res.message ? fmt('Uninstall failed: %s', res.message) : tr('Uninstall failed.'))
+							: tr('No result yet. The uninstall may still be running in the background — check over SSH: cat /tmp/openbox-uninstall.status');
+						showUpdateFailure(msg, String(logTail || '').split('\n').slice(-12).join('\n'),
+							tr('Uninstall Open-Box'), tr('Recent uninstall log:'));
+					});
+			});
+
+			// fs.exec 这一路只用来抓"根本没触发起来"的硬错误(脚本不存在 / ACL 没授
+			// exec)。XHR 超时之类不作数——--detach 本来就该秒回,真超时了也让轮询说话。
+			runUninstall(purge).catch(function (err) {
+				var msg = String(err && err.message || err);
+				if (/not found|No such file/i.test(msg)) {
+					poll.cancel();
+					ui.hideModal();
+					ui.addNotification(null, E('p', tr('Uninstall script not found. Run it manually over SSH.')), 'error');
+				} else {
+					window.console.debug('[open-box] 卸载 fs.exec 报错(通常是 XHR 超时),以状态文件为准:' + msg);
+				}
+			});
+
+			return polling;
+		}
+
+		// 「确认卸载」要等 10 秒才能点:卸载不可撤销,面板那边的「恢复出厂设置」也是这个做法
+		var UNINSTALL_DELAY_SECONDS = 10;
+
 		function showUninstallDialog() {
-			var purgeBox = E('input', { 'type': 'checkbox', 'id': 'ob-purge' });
+			var purgeBox = E('input', { 'class': 'ob-purge-box', 'type': 'checkbox', 'id': 'ob-purge' });
+			var left = UNINSTALL_DELAY_SECONDS;
+			var confirmBtn = null;
+			var timer = null;
+			function stopTimer() { if (timer) { clearInterval(timer); timer = null; } }
+			function tick() {
+				left -= 1;
+				if (!confirmBtn || !confirmBtn.isConnected) { stopTimer(); return; }
+				if (left > 0) { confirmBtn.textContent = fmt('%s (%s)', tr('Confirm uninstall'), String(left)); return; }
+				stopTimer();
+				confirmBtn.disabled = false;
+				confirmBtn.textContent = tr('Confirm uninstall');
+			}
 			ui.showModal(tr('Uninstall Open-Box'), [
 				// 「卸载到底会发生什么」原本写在卸载卡片的说明里,卡片撤掉后这句话
 				// 必须跟着搬进来——否则用户点开确认框只剩一句"不可撤销",不知道
 				// 撤销的是什么。
 				E('p', {}, tr('Remove Open-Box from this router. Services are stopped, DNS and firewall changes are reverted, and the LuCI page disappears after the next refresh.')),
 				E('p', {}, tr('This cannot be undone. Continue?')),
-				E('div', { 'style': ROW + ';justify-content:flex-start;text-align:left' }, [
-					purgeBox,
-					E('label', { 'for': 'ob-purge' }, tr('Also delete data (subscriptions, password, rule sets)'))
+				E('div', { 'class': 'ob-purge-row' }, [
+					E('label', { 'class': 'ob-purge-label', 'for': 'ob-purge' }, [
+						purgeBox,
+						E('span', { 'class': 'ob-purge-mark', 'aria-hidden': 'true' }),
+						E('span', { 'class': 'ob-purge-text' }, tr('Also delete data (subscriptions, password, rule sets)'))
+					])
 				]),
 				E('p', { 'style': 'opacity:.75;font-size:90%' },
 					tr('Keeping data lets a later re-install reuse it. Delete it for a completely fresh start.')),
 				E('div', { 'class': 'right', 'style': BTNROW }, [
 					E('button', { 'class': 'cbi-button',
 						'click': function () { ui.hideModal(); } }, tr('Cancel')),
-					E('button', { 'class': 'cbi-button cbi-button-negative',
+					(confirmBtn = E('button', { 'class': 'cbi-button cbi-button-negative', 'disabled': '',
 						'click': ui.createHandlerFn(self, function () {
+							stopTimer();
 							var purge = purgeBox.checked === true;
-							ui.showModal(tr('Uninstall Open-Box'), [ E('p', { 'class': 'spinning' }, tr('Uninstalling...')) ]);
-							return runUninstall(purge).then(function () {
-								ui.hideModal();
-								ui.addNotification(null, E('p', tr('Uninstalled. Refresh the page; this menu entry will be gone.')), 'info');
-							}).catch(function (err) {
-								ui.hideModal();
-								var msg = String(err && err.message || err);
-								if (/not found|No such file/i.test(msg)) {
-									msg = tr('Uninstall script not found. Run it manually over SSH.');
-									ui.addNotification(null, E('p', msg), 'error');
-								} else {
-									ui.addNotification(null, E('p', fmt('Uninstall failed: %s', msg)), 'error');
-								}
-							});
-						}) }, tr('Confirm uninstall'))
+							// 先把"开工前状态文件里已有的内容"抓下来,交给轮询去认陈旧值(见 pollUninstall)
+							return fs.read(UNINSTALL_STATUS_PATH).catch(function () { return null; })
+								.then(function (staleText) { return startUninstall(purge, staleText); });
+						}) }, fmt('%s (%s)', tr('Confirm uninstall'), String(UNINSTALL_DELAY_SECONDS))))
 				])
 			]);
+			timer = setInterval(tick, 1000);
 		}
 
 		// 更新失败时把日志尾巴摆出来,而不是让用户面对一句"失败了"猜半天——
@@ -986,10 +1388,11 @@ return view.extend({
 		// 区分"根本没启动起来"和"启动之后某一步失败了"这两种情况。不管哪种标题,
 		// 弹窗结构都一样(消息 + 日志尾巴 + 关闭按钮),必须始终可关闭——这里的
 		// 关闭按钮就是那个不变式的落地点。
-		function showUpdateFailure(msg, logTail, title) {
+		// logLabel 可选:卸载复用这个弹窗,日志那一栏得叫"最近的卸载日志",不能照抄"更新"。
+		function showUpdateFailure(msg, logTail, title, logLabel) {
 			var body = [ E('p', {}, msg) ];
 			if (logTail) {
-				body.push(E('p', { 'style': 'font-weight:bold;margin:.6em 0 .2em 0' }, tr('Recent update log:')));
+				body.push(E('p', { 'style': 'font-weight:bold;margin:.6em 0 .2em 0' }, logLabel || tr('Recent update log:')));
 				body.push(E('pre', {
 					'style': 'max-height:16em;overflow:auto;background:rgba(127,127,127,.08);' +
 						'padding:.5em;font-size:85%;white-space:pre-wrap;margin:0'
@@ -1512,13 +1915,23 @@ return view.extend({
 					// .ob-descr a 的 margin-left 撑开——中文冒号后跟一个半角空格会显得
 					// 松,交给 CSS 控制两种语言下都合适。
 					E('span', { 'class': 'ob-descr' }, [
-						tr('Basic settings. Full management lives in the Open-Box panel:'),
-						E('a', { 'href': panelUrl, 'target': '_blank', 'rel': 'noreferrer' }, panelUrl)
+						tr('Full management lives in the Open-Box panel:'),
+						E('a', { 'href': panelUrl, 'target': '_blank', 'rel': 'noreferrer' }, panelUrl),
+						// 密码不再直接印在这一行:谁路过、谁截图都看得见(反馈里的截图基本都带着它)。
+						// 改成一个按钮,点了才去取、才弹出来——不点的话密码根本不进这个页面。
 					])
 				]),
-				E('button', { 'class': 'cbi-button cbi-button-negative',
-					'click': ui.createHandlerFn(self, function () { return showUninstallDialog(); }) },
-					tr('Uninstall Open-Box'))
+				// 右边一组:「查看密码」挨着「卸载」放(用户要求挪到后面)。密码不直接印在页面上:
+				// 谁路过、谁截图都看得见(反馈里的截图基本都带着它),点了才去取、才弹出来
+				E('div', { 'class': 'ob-head-actions' }, [
+					E('button', {
+						'class': 'cbi-button cbi-button-neutral ob-pw-btn',
+						'click': ui.createHandlerFn(self, showPasswordDialog)
+					}, tr('View password')),
+					E('button', { 'class': 'cbi-button cbi-button-negative',
+						'click': ui.createHandlerFn(self, function () { return showUninstallDialog(); }) },
+						tr('Uninstall Open-Box'))
+				])
 			]),
 
 			// .ob-wrap > .ob-grid 是固定两列、900px 断点收缩成单列的网格(定义见
@@ -1560,7 +1973,10 @@ return view.extend({
 					// 挪到了页面副标题(见上方 .ob-descr)。
 					E('div', { 'class': 'ob-card' }, [
 						cardTitle(tr('Open-Box panel'), panel, installed || tr('Not installed')),
-						serviceButtons('openbox-panel', panel, null)
+						serviceButtons('openbox-panel', panel, null, null, [
+							E('button', { 'class': 'cbi-button cbi-button-neutral',
+								'click': ui.createHandlerFn(self, showPortDialog) }, tr('Change port'))
+						])
 					]),
 
 					// 「Open-Box 升级」独立成一张卡片(负责人手绘草图的要求):标题行右侧是

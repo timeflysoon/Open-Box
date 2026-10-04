@@ -21,6 +21,13 @@ DNSMASQ_TAKEOVER="$DATA/dnsmasq-takeover.txt"
 # 正本在 data/,开机复制进 dnsmasq 的 conf-dir(在 /tmp,重启就没了)。不改用户自己的 rebind_domain。
 DNSMASQ_FORWARD_SRC="$DATA/dnsmasq-forward.conf"
 DNSMASQ_FORWARD_CONF=open-box.conf
+# dnsmasq 查询日志(受管文件里带 log-facility 这一行时写这里;panel/server/system/dnsmasq-query-log.mjs 的 DNSMASQ_QUERY_LOG_PATH,
+# openbox-panel 里同一个路径):面板读它认出 dnsmasq 转来的查询是哪台终端。没人读时是指向 /dev/null 的软链接
+DNSMASQ_QUERY_LOG=/var/run/dnsmasq/open-box-query.log
+# 加上查询日志后 dnsmasq 起不来时记在这里(panel/server/system/dns-takeover.mjs 的 queryLogFailedPath):之后面板不再加那两行
+DNSMASQ_QUERY_LOG_FAILED="$DATA/dnsmasq-query-log.failed"
+# dnsmasq 除了 conf-dir 还会读的配置:固件自带的主配置、init 脚本按 uci 生成的那份(查已有日志设置用,不加引号好展开通配)
+DNSMASQ_CONF_FILES="/etc/dnsmasq.conf /var/etc/dnsmasq.conf*"
 # 与 system/deploy.mjs 的 configMetaPath 一致:面板每次落盘 config.json 时旁边写的元数据,
 # 里面的 dnsMode 说明这份配置是哪种 DNS 模式。
 CONF_META="$OPENBOX_ROOT/etc/config.meta.json"
@@ -31,6 +38,9 @@ DNSMASQ_OUTBOUND_TAG=dnsmasq
 # sing-box 自己流量的 fwmark(tun 的 auto_redirect_output_mark 默认值):带这个标记的包
 # 会被内核的 nft output 链直接放行、ip rule 9000 跳过 tun 路由表
 SINGBOX_OUTPUT_MARK=0x2024
+# Open-Box 的放行位(内核 1.14.1-openbox-tcp15 起认,见 system/entry-bypass.mjs):进内核前放行的流量只按位或上这一位,
+# 别的位(mwan3 记在连接上的线路等)原样留着,怎么走交给路由器自己的路由
+OPENBOX_PASS_MARK=0x02000000
 NFT_TABLE="inet openbox"
 
 openbox_dnsmasq_mode() {
@@ -94,6 +104,45 @@ openbox_watch_start() {
 	) </dev/null >/dev/null 2>&1 &
 }
 
+# dnsmasq 查询日志那两行(受管文件里,面板开着域名过滤时加的)。dnsmasq 已经有别处设了日志去向 / 查询日志——uci 选项、固件自带的
+# /etc/dnsmasq.conf(常见 log-facility=/dev/null)、init 脚本生成的 /var/etc/dnsmasq.conf.*、conf-dir 里别的文件——再加一行
+# log-facility,dnsmasq 2.9x 直接拒绝启动(illegal repeated keyword),DNS 和 DHCP 一起停(GitHub #286)。
+# 和 dns-takeover.mjs 的 userDnsmasqLogging 同一个判断;$1 是 conf-dir
+openbox_dnsmasq_logging_conflict() {
+	[ "$(uci -q get dhcp.@dnsmasq[0].logqueries)" = "1" ] && return 0
+	[ -n "$(uci -q get dhcp.@dnsmasq[0].logfacility)" ] && return 0
+	for _ob_f in $DNSMASQ_CONF_FILES "$1"/*; do
+		[ -f "$_ob_f" ] || continue
+		[ "${_ob_f##*/}" = "$DNSMASQ_FORWARD_CONF" ] && continue
+		grep -qE '^[ 	]*log-(facility|queries)([ 	=]|$)' "$_ob_f" && return 0
+	done
+	return 1
+}
+openbox_strip_query_log() {
+	[ -f "$1" ] || return 0
+	grep -vxF -e 'log-queries=extra' -e "log-facility=$DNSMASQ_QUERY_LOG" "$1" > "$1.ob-new"
+	if [ -s "$1.ob-new" ]; then mv -f "$1.ob-new" "$1"; else rm -f "$1.ob-new" "$1"; fi
+}
+# 重启 dnsmasq;受管文件里带着查询日志时确认它真起来了(配置有错时一启动就退出、procd 隔几秒再拉),没起来就撤掉那两行、
+# 记下失败、再重启一次
+openbox_dnsmasq_restart() {
+	/etc/init.d/dnsmasq restart >/dev/null 2>&1
+	_ob_q="$(openbox_dnsmasq_confdir)/$DNSMASQ_FORWARD_CONF"
+	grep -qx "log-facility=$DNSMASQ_QUERY_LOG" "$_ob_q" 2>/dev/null || return 0
+	_ob_miss=0
+	for _ob_i in 1 2 3 4; do
+		sleep 1
+		pidof dnsmasq >/dev/null 2>&1 || _ob_miss=$((_ob_miss + 1))
+	done
+	[ "$_ob_miss" -lt 2 ] && return 0
+	openbox_strip_query_log "$_ob_q"
+	openbox_strip_query_log "$DNSMASQ_FORWARD_SRC"
+	echo "dnsmasq 加上查询日志后起不来,开机重放时已自动去掉 $(date)" > "$DNSMASQ_QUERY_LOG_FAILED"
+	rm -f "$DNSMASQ_QUERY_LOG"
+	/etc/init.d/dnsmasq restart >/dev/null 2>&1
+	logger -t openbox "dnsmasq did not start with the query log lines; removed them" 2>/dev/null
+}
+
 # 这份配置是 dnsmasq 分流模式时,确保 dnsmasq 的上游指向内核。
 # 为什么要在这里做:干净重启时 K10 的 stop 会按设计把接管还原(内核死了不能让全 LAN 无解析),
 # 开机 S99 只用 procd 拉起内核、没人重新接管——dnsmasq 走运营商上游,被内核 nft 的
@@ -141,6 +190,19 @@ openbox_apply_takeover() {
 		rm -f "$_ob_installed"
 		_ob_restart=1
 	fi
+	# 受管文件要 dnsmasq 记查询日志:dnsmasq 别处已经设了日志(或者上次加上后没起来)就先把那两行去掉,不然 dnsmasq 起不来;
+	# 否则日志文件还不在(开机时 /tmp 是空的)就先指向 /dev/null 再重启 dnsmasq——面板还没起来、没人读的时候不能让它往 /tmp 里
+	# 一直写。面板起来后会换成普通文件(dnsmasq-query-log.mjs)
+	if [ -f "$_ob_installed" ] && grep -qx "log-facility=$DNSMASQ_QUERY_LOG" "$_ob_installed"; then
+		if [ -f "$DNSMASQ_QUERY_LOG_FAILED" ] || openbox_dnsmasq_logging_conflict "$_ob_confdir"; then
+			openbox_strip_query_log "$_ob_installed"
+			openbox_strip_query_log "$DNSMASQ_FORWARD_SRC"
+			_ob_restart=1
+		elif [ ! -e "$DNSMASQ_QUERY_LOG" ]; then
+			mkdir -p "${DNSMASQ_QUERY_LOG%/*}"
+			ln -sf /dev/null "$DNSMASQ_QUERY_LOG"
+		fi
+	fi
 	# 按域名转发:uci 里是用户自己的上游,一个字不碰;只保证转发文件在 conf-dir 里(那是 /tmp,开机是空的)
 	# 且和正本一致、noresolv 和状态文件一致。都对就不重启 dnsmasq
 	if [ "$_ob_plan" = "domains" ]; then
@@ -153,7 +215,7 @@ openbox_apply_takeover() {
 			uci -q commit dhcp
 			_ob_restart=1
 		fi
-		[ -n "$_ob_restart" ] && /etc/init.d/dnsmasq restart >/dev/null 2>&1
+		[ -n "$_ob_restart" ] && openbox_dnsmasq_restart
 		return 0
 	fi
 	# 全量接管(plan=all / 老版本没记录):上游只能剩内核这一个,noresolv=1。比的是完整列表——只看
@@ -177,31 +239,103 @@ openbox_apply_takeover() {
 	done
 	uci -q set dhcp.@dnsmasq[0].noresolv=1
 	uci -q commit dhcp
-	/etc/init.d/dnsmasq restart >/dev/null 2>&1
+	openbox_dnsmasq_restart
 	echo "openbox: dnsmasq upstream re-pointed to sing-box ($_ob_want )" >&2
 }
 
-# 兜底,防打环:dnsmasq 自己发往外部上游的查询打上内核自身的 fwmark,内核的 nft 就不再把它
-# DNAT 回 172.19.0.2。正常接管时 dnsmasq 只问 127.0.0.1#7853(走 lo,本就不会被 DNAT);
-# 按域名转发时其余域名交给路由器上游、以及接管丢失的异常情况,都靠这条不打环。
-# 只在 dnsmasq 分流模式装:劫持模式本来就要让路由器自己的解析进内核。
-openbox_apply_dns_mark() {
+# 进内核之前就放行的端口 / 终端(GitHub #183 #187):面板部署时生成的 nft 链正文(不含 table 外壳,
+# server/system/entry-bypass.mjs)。只认规则里会出现的字符,混进别的东西整份不装
+ENTRY_BYPASS="$OPENBOX_ROOT/etc/entry-bypass.nft"
+openbox_entry_bypass() {
+	[ -s "$ENTRY_BYPASS" ] || return 0
+	grep -q '[^A-Za-z0-9 	{}.,:;!="_@/-]' "$ENTRY_BYPASS" && return 0
+	cat "$ENTRY_BYPASS"
+}
+
+# Open-Box 自己的 nft 表(inet openbox),起内核前按需整张重建;都不需要就不建。表里的规则都是给包和连接或上
+# 放行位 $OPENBOX_PASS_MARK:内核的 auto_redirect 链看到它就 return,下面那两条策略路由让它不进 tun 表。
+# - dns_out(只在 dnsmasq 分流模式装,防打环):dnsmasq 自己发往外部上游的查询打上放行位,内核的 nft 就不再把它
+#   DNAT 回 172.19.0.2。正常接管时 dnsmasq 只问 127.0.0.1#7853(走 lo,本就不会被 DNAT);按域名转发时其余域名
+#   交给路由器上游、以及接管丢失的异常情况,都靠这条不打环。劫持模式本来就要让路由器自己的解析进内核,不装。
+# - entry_bypass_in / entry_bypass_out(面板生成的,见上):放行端口、按 IP 的不进内核 / 白名单
+# 这张表防火墙重载不动它;restart 不清理(见 restart()),所以这里先删再建
+# 给内核自身流量的标记补一条**终止查找**的策略路由(GitHub #157)。
+#
+# sing-box 的 auto_route 自己会装 `9000: from all fwmark <output mark> goto 9002` + `9002: nop`,
+# 意思是"带这个标记的包跳过 tun 表",但 goto 一个 nop **不终止查找** —— 后面还有什么规则就接着匹配。
+# GL.iNet 固件开了 VPN 策略路由 / 断网保护时,后面正好是两条黑洞:
+#   9910: not from all fwmark 0/0xf000 blackhole     (0x2024 & 0xf000 = 0x2000 ≠ 0,命中)
+#   9920: from all iif br-lan blackhole              (进内核前放行的局域网包,iif 正是 br-lan)
+# 于是内核自己发出去的每一个连接、以及所有"进内核前放行"的流量,全部 no route to host ——
+# 报告者的日志里直连国内 IP 都不通,就是这么来的。
+#
+# 补一条优先级在 9000 之前、直接 `lookup main` 的规则,查找就在 main 表结束,到不了那些黑洞。
+# 普通固件上结果不变(本来也是落到 32766 main)。这条只管内核自己的流量。
+#
+# 进内核前放行的流量(带放行位 $OPENBOX_PASS_MARK)交给路由器自己的路由,只补两条不让它进 tun 表的:
+#   8998: fwmark <放行位>/<放行位> goto 9010   纯 tun 兼容模式下 sing-box 的 9000~9009 会把局域网的包全拉进 tun 表,
+#         跳到它的 9010 nop 之后接着按路由器的规则走;auto_redirect 模式下没有 9010,这条是 [unresolved],不生效
+#   32767(排在系统的 lookup default 之后): fwmark <放行位>/<放行位> unreachable   主表、default 表都查不到路由时到此为止,
+#         不掉进 auto_redirect 的兜底规则 `32768: not from all fwmark 0x2024 lookup <tun 表>`
+# mwan3 的规则(1001~3002)排在这些之前,带 mwan3 标记的包照 mwan3 走。放行位避开了上面 GL.iNet 那条的 0xf000。
+OPENBOX_MARK_RULE_PREF=8999
+OPENBOX_PASS_RULE_PREF=8998
+OPENBOX_PASS_SKIP_TO=9010
+OPENBOX_PASS_LAST_PREF=32767
+
+openbox_apply_mark_rule() {
+	command -v ip >/dev/null 2>&1 || return 0
+	openbox_clear_mark_rule
+	ip rule add pref $OPENBOX_MARK_RULE_PREF fwmark $SINGBOX_OUTPUT_MARK lookup main >/dev/null 2>&1
+	ip -6 rule add pref $OPENBOX_MARK_RULE_PREF fwmark $SINGBOX_OUTPUT_MARK lookup main >/dev/null 2>&1
+	for _ob_ip in "ip" "ip -6"; do
+		$_ob_ip rule add pref $OPENBOX_PASS_RULE_PREF fwmark $OPENBOX_PASS_MARK/$OPENBOX_PASS_MARK goto $OPENBOX_PASS_SKIP_TO >/dev/null 2>&1
+		$_ob_ip rule add pref $OPENBOX_PASS_LAST_PREF fwmark $OPENBOX_PASS_MARK/$OPENBOX_PASS_MARK unreachable >/dev/null 2>&1
+	done
+	return 0
+}
+
+openbox_clear_mark_rule() {
+	command -v ip >/dev/null 2>&1 || return 0
+	while ip rule del pref $OPENBOX_MARK_RULE_PREF >/dev/null 2>&1; do :; done
+	while ip -6 rule del pref $OPENBOX_MARK_RULE_PREF >/dev/null 2>&1; do :; done
+	# 32767 上还有系统自己的 lookup default:只按放行位那条的条件删,不能光按优先级删
+	for _ob_ip in "ip" "ip -6"; do
+		while $_ob_ip rule del pref $OPENBOX_PASS_RULE_PREF fwmark $OPENBOX_PASS_MARK/$OPENBOX_PASS_MARK >/dev/null 2>&1; do :; done
+		while $_ob_ip rule del pref $OPENBOX_PASS_LAST_PREF fwmark $OPENBOX_PASS_MARK/$OPENBOX_PASS_MARK unreachable >/dev/null 2>&1; do :; done
+	done
+	return 0
+}
+
+openbox_apply_nft() {
 	command -v nft >/dev/null 2>&1 || return 0
-	if ! openbox_dnsmasq_mode; then
-		nft delete table $NFT_TABLE >/dev/null 2>&1
-		return 0
-	fi
-	_ob_uid="$(id -u dnsmasq 2>/dev/null)"
-	[ -n "$_ob_uid" ] || return 0
-	nft -f - >/dev/null 2>&1 <<-EOF
-		table $NFT_TABLE {
-			chain dns_out {
-				type filter hook output priority -150; policy accept;
-			}
-		}
-		flush chain $NFT_TABLE dns_out
-		add rule $NFT_TABLE dns_out meta skuid $_ob_uid meta l4proto { tcp, udp } th dport 53 meta mark set $SINGBOX_OUTPUT_MARK
-	EOF
+	nft delete table $NFT_TABLE >/dev/null 2>&1
+	_ob_uid=""
+	openbox_dnsmasq_mode && _ob_uid="$(id -u dnsmasq 2>/dev/null)"
+	_ob_entry="$(openbox_entry_bypass)"
+	[ -n "$_ob_uid" ] || [ -n "$_ob_entry" ] || return 0
+	{
+		echo "table $NFT_TABLE {"
+		if [ -n "$_ob_uid" ]; then
+			echo "	chain dns_out {"
+			echo "		type filter hook output priority -150; policy accept;"
+			echo "		meta skuid $_ob_uid meta l4proto { tcp, udp } th dport 53 meta mark set meta mark or $OPENBOX_PASS_MARK ct mark set ct mark or $OPENBOX_PASS_MARK"
+			echo "	}"
+		fi
+		[ -n "$_ob_entry" ] && echo "$_ob_entry"
+		echo "}"
+	} | nft -f - >/dev/null 2>&1 || echo "openbox: failed to install nft table $NFT_TABLE" >&2
+}
+
+# auto_redirect 在 nft 里用到的表达式各自是一个内核模块(queue / nat / redir / tproxy / socket / fib)。装的时候
+# 预检会 modprobe 一次,但重启后没人再加载它们,nft 提交规则时内核找不到模块就回 ENOENT:
+#   auto-redirect: setup nftables: flush nftables: conn.Receive: netlink receive: no such file or directory
+# (GitHub #225 的 N1:lsmod 里有 nfnetlink_queue、没有 nft_queue)。起内核前挨个 modprobe 一遍,没装的模块
+# 静默跳过——缺了就还是走降级纯 tun 那条路,面板会说明
+openbox_load_modules() {
+	for _ob_mod in tun nft_queue nft_nat nft_redir nft_tproxy nft_socket nft_fib_inet nft_ct; do
+		[ -d "/sys/module/$_ob_mod" ] || modprobe "$_ob_mod" >/dev/null 2>&1
+	done
 }
 
 # 内核的 auto_redirect 会自己建一张 `inet sing-box` 表。正常退出时它会删掉,但被强杀、
@@ -241,10 +375,15 @@ start_service() {
 
 	openbox_clean_stale_nft
 	openbox_apply_takeover
-	openbox_apply_dns_mark
+	openbox_load_modules
+	openbox_apply_nft
+	openbox_apply_mark_rule
 
 	procd_open_instance openbox
 	procd_set_param command "$BIN" run -c "$CONF" -D "$DATA"
+	# 直连应答放行的开关文件(内核 tcp10 起):面板在入口白名单模式时建它,内核的 DNS 直连侧应答发出前按它决定写不写
+	# 入口放行集合(panel/server/system/direct-answer-bypass.mjs)
+	procd_set_param env OPENBOX_DIRECT_ANSWER_FLAG="$DATA/flip/direct-answer.on"
 	procd_set_param stdout 1
 	procd_set_param stderr 1
 	procd_set_param respawn 3600 5 5
@@ -264,6 +403,7 @@ start_service() {
 # 仅在确有变更时才 commit/重启 dnsmasq 与 firewall:默认 hijack 模式从不碰 dnsmasq,
 # 无脑 commit 既会造成一次无意义的全 LAN 解析瞬断,还会顺带提交用户在别处暂存的改动。
 openbox_cleanup() {
+	openbox_clear_mark_rule
 	# 按域名转发的转发文件(在 dnsmasq 的 conf-dir 里)先拿掉:它指向的内核马上就没了。有备份的话下面
 	# 的 uci 还原会一起重启 dnsmasq;没有备份(domains 期间 uci 本来就是用户的)就单独重启一次
 	_ob_installed="$(openbox_dnsmasq_confdir)/$DNSMASQ_FORWARD_CONF"
@@ -323,7 +463,11 @@ openbox_cleanup() {
 	elif [ -n "$_ob_had_forward" ]; then
 		/etc/init.d/dnsmasq restart >/dev/null 2>&1
 	fi
+	# 受管文件拿掉、dnsmasq 重启过之后,查询日志没人写了
+	rm -f "$DNSMASQ_QUERY_LOG"
 
+	uci -q delete firewall.openbox_tun_forward
+	uci -q delete firewall.openbox_tun_input
 	uci -q delete firewall.openbox_v6block
 	if [ -n "$(uci -q changes firewall)" ]; then
 		uci -q commit firewall

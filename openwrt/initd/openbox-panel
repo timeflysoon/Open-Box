@@ -9,6 +9,8 @@ OPENBOX_ROOT=/opt/open-box
 NODE="$OPENBOX_ROOT/node/bin/node"
 ENTRY="$OPENBOX_ROOT/panel/server/index.mjs"
 DATA="$OPENBOX_ROOT/data"
+# dnsmasq 查询日志(openwrt/initd/openbox、panel/server/system/dnsmasq-query-log.mjs 里同一个路径)
+DNSMASQ_QUERY_LOG=/var/run/dnsmasq/open-box-query.log
 
 start_service() {
 	if [ ! -x "$NODE" ]; then
@@ -22,19 +24,97 @@ start_service() {
 
 	mkdir -p "$DATA"
 
+	# 命令行 open-box(SSH 下看面板密码 / 检查升级,见 openwrt/bin/open-box)。安装 / 升级脚本也会建这个软链接;
+	# 这里每次启动补一次,是因为老版本的升级脚本不认识它——从老版本升上来的机器靠这一步拿到命令。
+	# 只在 /usr/bin/open-box 不存在或本来就是软链接时动手,不覆盖别人放在那里的真文件
+	if [ -f "$OPENBOX_ROOT/openwrt/bin/open-box" ] && { [ ! -e /usr/bin/open-box ] || [ -L /usr/bin/open-box ]; }; then
+		chmod +x "$OPENBOX_ROOT/openwrt/bin/open-box" 2>/dev/null
+		ln -sf "$OPENBOX_ROOT/openwrt/bin/open-box" /usr/bin/open-box 2>/dev/null
+	fi
+
+	# LuCI 视图文件从 status.js 改名成了 main.js(菜单项跟着改指向)。改名是为了绕开浏览器缓存:
+	# nginx 对 luci-static 只给 ETag/Last-Modified,而 LuCI 请求时带的 ?v= 是它自己的版本号,我们
+	# 升级不会让它变——URL 一模一样,浏览器就一直吃缓存里的旧页面(真机上因此出现"页面还是旧的、
+	# 点卸载报 XHR 超时");换个文件名浏览器就必须重新拉。
+	#
+	# 但改名对"从 v0.1.215 及更早升上来"的机器有个坑:跑的是本机那份**老** update.sh,它按旧名
+	# status.js 去拷(拷不到,只 warn),却会把新的菜单文件装上——菜单指向 openbox/main,而 /www 里
+	# 只有老的 status.js,页面就打不开了。所以这里每次启动都兜一遍:视图和菜单跟包里的不一致就补齐,
+	# 再清掉改名前残留的 status.js。(ACL 故意不在这里碰——换 ACL 要重启 rpcd,会把 LuCI 会话全踢掉。)
+	_luci_view_src="$OPENBOX_ROOT/openwrt/luci/htdocs/luci-static/resources/view/openbox/main.js"
+	_luci_view_dst=/www/luci-static/resources/view/openbox/main.js
+	if [ -f "$_luci_view_src" ]; then
+		if [ ! -f "$_luci_view_dst" ] || ! cmp -s "$_luci_view_src" "$_luci_view_dst"; then
+			mkdir -p /www/luci-static/resources/view/openbox 2>/dev/null
+			cp "$_luci_view_src" "$_luci_view_dst" 2>/dev/null && chmod 644 "$_luci_view_dst" 2>/dev/null
+		fi
+		rm -f /www/luci-static/resources/view/openbox/status.js 2>/dev/null
+	fi
+	_luci_menu_src="$OPENBOX_ROOT/openwrt/luci/root/usr/share/luci/menu.d/luci-app-openbox.json"
+	_luci_menu_dst=/usr/share/luci/menu.d/luci-app-openbox.json
+	if [ -f "$_luci_menu_src" ] && { [ ! -f "$_luci_menu_dst" ] || ! cmp -s "$_luci_menu_src" "$_luci_menu_dst"; }; then
+		mkdir -p /usr/share/luci/menu.d 2>/dev/null
+		cp "$_luci_menu_src" "$_luci_menu_dst" 2>/dev/null && chmod 644 "$_luci_menu_dst" 2>/dev/null
+		# 菜单真换了才清 LuCI 的缓存 —— 不清的话它还按缓存里的老菜单去加载视图。
+		# 用 -rf:老版 LuCI 的 /tmp/luci-modulecache 是目录,rm -f 对目录返回非零。
+		rm -rf /tmp/luci-*cache* 2>/dev/null
+	fi
+
+	# Node 堆上限。不设的话 V8 在内存不大的路由器上会把老生代一路放到几百 MB 才认真回收(2026-09-17 一台
+	# 1 GB 的路由器上面板涨到 337 MB,整机内存抖动 5 分钟后被 OOM killer 杀掉)。面板常驻的数据很小,160 MB
+	# 足够;内存不到 768 MB 的设备收紧到 128 MB。上限同时交给面板的内存自检(system/memory-watchdog.mjs)。
+	# 面板端口:装的时候可以选(install.sh),之后能在 LuCI 页面或 open-box port 改。
+	# 文件跟着 data/ 走 —— 升级不动它,卸载保留数据时也留着。没有这个文件的是 v0.1.216 及更早
+	# 装的机器,必须继续用 2026,不能跟着新默认值(3036)跑,否则它们升级完面板就"搬家"了。
+	panel_port=$(cat "$DATA/panel-port" 2>/dev/null | tr -dc '0-9')
+	[ -n "$panel_port" ] || panel_port=2026
+
+	heap_mb=160
+	mem_kb=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo 2>/dev/null)
+	[ -n "$mem_kb" ] && [ "$mem_kb" -lt 786432 ] && heap_mb=128
+
+	# 内核缺 madvise 的设备(GitHub #290 #293):安装 / 升级脚本试出来随包 Node 要带兼容库才起得来时,把库的路径记在
+	# data/node-preload(scripts/install.sh 的 openbox-node-smoke 块)。这时经 openwrt/bin/compat/node 起:procd 会把
+	# 环境变量里的 LD_PRELOAD 换掉,只能由它在 procd 之后补上(见那个脚本)。面板起的子进程跟着继承
+	node_cmd="$NODE"
+	if [ -s "$DATA/node-preload" ] && [ -f "$OPENBOX_ROOT/openwrt/bin/compat/node" ]; then
+		chmod +x "$OPENBOX_ROOT/openwrt/bin/compat/node" 2>/dev/null
+		node_cmd="$OPENBOX_ROOT/openwrt/bin/compat/node"
+	fi
+
 	procd_open_instance openbox-panel
-	procd_set_param command "$NODE" "$ENTRY"
+	procd_set_param command "$node_cmd" "--max-old-space-size=$heap_mb" "$ENTRY"
+	# OPENSSL_CONF=/dev/null:Node 不读系统的 OpenSSL 配置——有的固件那份写法随包 Node 解析不了,面板直接起不来(GitHub #265)。
+	# HOST=:::IPv4 / IPv6 双栈(GitHub #276),系统没开 IPv6 时面板自己退回 0.0.0.0。
 	# LD_LIBRARY_PATH:x64 的 musl Node 动态依赖 libstdc++.so.6(OpenWrt 默认镜像不带,
 	# 见 scripts/build-release.sh 头部 Critical 1 说明),该库随发布包捆绑在
 	# node/lib/ 下,靠这个环境变量让动态链接器找到它。
 	procd_set_param env \
-		PORT=2026 \
-		HOST=0.0.0.0 \
+		PORT="$panel_port" \
+		HOST=:: \
+		OPENSSL_CONF=/dev/null \
 		OPENBOX_ROOT="$OPENBOX_ROOT" \
 		LD_LIBRARY_PATH="$OPENBOX_ROOT/node/lib" \
+		OPENBOX_PANEL_HEAP_MB="$heap_mb" \
 		ZASHBOARD_DB_PATH="$DATA/openbox.sqlite"
 	procd_set_param stdout 1
 	procd_set_param stderr 1
 	procd_set_param respawn 3600 5 0
 	procd_close_instance
+}
+
+# 面板停了就没人读 dnsmasq 的查询日志:换回指向 /dev/null 的软链接、让 dnsmasq 重开日志(USR2),免得它往 /tmp 里
+# 一直写。面板再起来会换回普通文件。面板崩溃由 procd 几秒内拉起,接着读,不走这里。
+# 信号只发给真正的 dnsmasq(/proc/<pid>/exe 是 dnsmasq 二进制):按名字发(killall)会连 ujail 外壳和正在跑的
+# /etc/init.d/dnsmasq 脚本一起打到,脚本收到 USR2 直接退出,正在进行的 dnsmasq 重启就断在半截(panel/server/system/dnsmasq-signal.mjs)
+stop_service() {
+	if [ -f "$DNSMASQ_QUERY_LOG" ] && [ ! -L "$DNSMASQ_QUERY_LOG" ]; then
+		ln -sf /dev/null "$DNSMASQ_QUERY_LOG.sink" && mv -f "$DNSMASQ_QUERY_LOG.sink" "$DNSMASQ_QUERY_LOG" || return 0
+		for _pid in $(pidof dnsmasq); do
+			case "$(readlink "/proc/$_pid/exe" 2>/dev/null)" in
+				*/dnsmasq) kill -USR2 "$_pid" 2>/dev/null ;;
+			esac
+		done
+	fi
+	return 0
 }

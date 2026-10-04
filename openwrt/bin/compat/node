@@ -1,0 +1,13 @@
+#!/bin/sh
+# 面板服务在内核缺 madvise 的设备上的启动入口(GitHub #290 #293,见 openwrt/initd/openbox-panel):带上兼容库再 exec 随包 Node。
+#
+# 不能在 init 脚本里用 procd_set_param env 设 LD_PRELOAD:procd 开着 stdout / stderr 转系统日志时,启动前会把 LD_PRELOAD 整个
+# 换成 /lib/libsetlbf.so(行缓冲),设的值到不了 Node(开发路由器实测,面板照样崩)。这里在 procd 之后补上,并保留它那个库。
+# 文件名故意叫 node:procd 按命令的文件名给日志打标签,和平常一样是 node[pid],诊断包照样认得出面板日志。
+root=$(cd "$(dirname "$0")/../../.." && pwd)
+preload=$(cat "$root/data/node-preload" 2>/dev/null)
+if [ -n "$preload" ] && [ -f "$preload" ]; then
+	LD_PRELOAD="$preload${LD_PRELOAD:+:$LD_PRELOAD}"
+	export LD_PRELOAD
+fi
+exec "$root/node/bin/node" "$@"

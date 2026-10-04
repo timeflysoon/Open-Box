@@ -2,7 +2,7 @@
 	"admin/services/openbox": {
 		"title": "Open-Box",
 		"order": 30,
-		"action": { "type": "view", "path": "openbox/status" },
+		"action": { "type": "view", "path": "openbox/main" },
 		"depends": { "acl": [ "luci-app-openbox" ] }
 	}
 }
