@@ -3,6 +3,7 @@ import test from 'node:test'
 import express from 'express'
 import { clearRulesetEntriesCache, registerRulesetRoutes } from './rulesets.mjs'
 import { createMockContext } from '../system/context.mjs'
+import { listTagForUrl } from '../engine/rule-list.mjs'
 import { createPaths } from '../system/paths.mjs'
 
 const paths = createPaths('/opt/open-box')
@@ -157,7 +158,48 @@ test('GET /policies/entries:站点集的规则集展开 + 手写条件,分档计
   }
 })
 
-test('GET /rulesets/preview:按网址拉回来解析,形状和 /rulesets/entries 一致;非 http(s) 直接 400;拉不动 503', async () => {
+// 规则集链接(list-xxx)也要能展开:本地编好的域名 / IP 两份哪份有解哪份,来源写网址;一份都没有就按网址现拉
+test('GET /policies/entries:规则集链接展开本地编好的那几份 .srs,只有 IP 一份也行;没编过就现拉', async () => {
+  const URL_L = 'https://example.com/one-china.srs'
+  const TAG_L = listTagForUrl(URL_L)
+  const ctx = okCtx({
+    [`${paths.rulesetDir}/${TAG_L}-ip.srs`]: 'binary',
+    [`${paths.dataDir}/tmp/${TAG_L}-ip.json`]: JSON.stringify({ version: 3, rules: [{ ip_cidr: ['1.0.1.0/24', '1.0.2.0/23'] }] }),
+  })
+  const store = { getProfile: () => ({ routing: { fallbackDefault: 'direct', policies: [{ id: 'c', name: 'CN', ruleUrls: [URL_L], domainSuffix: ['cn'] }] } }) }
+  const app = express()
+  clearRulesetEntriesCache()
+  registerRulesetRoutes(app, { ctx, paths, store, fetchImpl: async () => { throw new Error('本地有就不该拉网络') } })
+  const server = app.listen(0)
+  await new Promise((resolve) => server.once('listening', resolve))
+  const base = `http://127.0.0.1:${server.address().port}`
+  try {
+    const all = await (await fetch(`${base}/api/openbox/policies/entries?name=CN`)).json()
+    assert.deepEqual(all.missing, [])
+    assert.deepEqual(all.counts, { all: 3, domain: 1, ip: 2 })
+    assert.ok(all.entries.some((e) => e.source === URL_L && e.type === 'ip_cidr' && e.content === '1.0.1.0/24'))
+  } finally {
+    await new Promise((resolve) => server.close(resolve))
+  }
+  // 还没部署(本地一份都没有):按网址现拉,.srs 交给内核解
+  const srs = Buffer.concat([Buffer.from('SRS\x03', 'latin1'), Buffer.from('payload')])
+  const ctx2 = okCtx({ [`${paths.dataDir}/tmp/penetration-${TAG_L}.srs.json`]: JSON.stringify({ version: 3, rules: [{ ip_cidr: ['9.9.9.0/24'] }] }) })
+  const app2 = express()
+  clearRulesetEntriesCache()
+  registerRulesetRoutes(app2, { ctx: ctx2, paths, store, fetchImpl: async () => ({ ok: true, status: 200, arrayBuffer: async () => srs }) })
+  const server2 = app2.listen(0)
+  await new Promise((resolve) => server2.once('listening', resolve))
+  const base2 = `http://127.0.0.1:${server2.address().port}`
+  try {
+    const all = await (await fetch(`${base2}/api/openbox/policies/entries?name=CN`)).json()
+    assert.deepEqual(all.missing, [])
+    assert.ok(all.entries.some((e) => e.source === URL_L && e.content === '9.9.9.0/24'))
+  } finally {
+    await new Promise((resolve) => server2.close(resolve))
+  }
+})
+
+test('GET /rulesets/preview:按网址拉回来解析,形状和 /rulesets/entries 一致;非 http 或 https直接 400;拉不动 503', async () => {
   clearRulesetEntriesCache()
   const ctx = createMockContext({})
   const paths = createPaths('/opt/open-box')

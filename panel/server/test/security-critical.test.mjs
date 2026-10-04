@@ -58,7 +58,7 @@ const ensurePasswordConfigured = async () => {
 // 未认证客户端可读到 /API/storage 里的明文密码、可跑 POST /api/openbox/deploy 真实部署。
 // 修复后这四种变体在"已设密 + 未带 cookie"时都必须被守卫拦在 401,而不是命中真实 handler。
 
-test('Critical 1 回归:已设密未带 cookie 时 GET /API/openbox/profile(全大写)必须是 401,不能是 200', async () => {
+test('Critical 1 回归:已设密未带 cookie 时 GET /API/openbox/profile（全大写）必须是 401,不能是 200', async () => {
   await ensurePasswordConfigured()
   const res = await fetch(`${baseUrl}/API/openbox/profile`)
   assert.notEqual(res.status, 200)
@@ -67,28 +67,28 @@ test('Critical 1 回归:已设密未带 cookie 时 GET /API/openbox/profile(全�
   assert.equal(body.code, 'ACCESS_PASSWORD_REQUIRED')
 })
 
-test('Critical 1 回归:已设密未带 cookie 时 GET /Api/OpenBox/Profile(混合大小写)必须是 401,不能是 200', async () => {
+test('Critical 1 回归:已设密未带 cookie 时 GET /Api/OpenBox/Profile（混合大小写）必须是 401,不能是 200', async () => {
   await ensurePasswordConfigured()
   const res = await fetch(`${baseUrl}/Api/OpenBox/Profile`)
   assert.notEqual(res.status, 200)
   assert.equal(res.status, 401)
 })
 
-test('Critical 1 回归:已设密未带 cookie 时 GET /API/storage(大写)必须是 401,不能是 200(此前会泄露明文密码)', async () => {
+test('Critical 1 回归:已设密未带 cookie 时 GET /API/storage（大写）必须是 401,不能是 200（此前会泄露明文密码）', async () => {
   await ensurePasswordConfigured()
   const res = await fetch(`${baseUrl}/API/storage`)
   assert.notEqual(res.status, 200)
   assert.equal(res.status, 401)
 })
 
-test('Critical 1 回归:已设密未带 cookie 时 GET //api/openbox/profile(双斜杠)必须是 401,不能是 200', async () => {
+test('Critical 1 回归:已设密未带 cookie 时 GET //api/openbox/profile（双斜杠）必须是 401,不能是 200', async () => {
   await ensurePasswordConfigured()
   const res = await fetch(`${baseUrl}//api/openbox/profile`)
   assert.notEqual(res.status, 200)
   assert.equal(res.status, 401)
 })
 
-test('Critical 1 回归:已设密未带 cookie 时 POST /API/openbox/deploy(大写)不得真正触发部署', async () => {
+test('Critical 1 回归:已设密未带 cookie 时 POST /API/openbox/deploy（大写）不得真正触发部署', async () => {
   await ensurePasswordConfigured()
   const before = storeForTesting.getDeployState()
 
@@ -100,7 +100,7 @@ test('Critical 1 回归:已设密未带 cookie 时 POST /API/openbox/deploy(大�
   assert.deepEqual(storeForTesting.getDeployState(), before)
 })
 
-test('健全性检查:小写 + 正确 cookie 的 GET /api/openbox/profile 仍然是 200(未过度拦截)', async () => {
+test('健全性检查:小写 + 正确 cookie 的 GET /api/openbox/profile 仍然是 200（未过度拦截）', async () => {
   await ensurePasswordConfigured()
   const res = await fetch(`${baseUrl}/api/openbox/profile`, { headers: { cookie: authCookie } })
   assert.equal(res.status, 200)
@@ -123,7 +123,7 @@ test('isProtectedStorageKey:openbox/*、config/access-*、背景图 sentinel 判
 test('Critical 2 回归:PUT /api/storage 传入不含 openbox/* 的快照,已存 profile/订阅/clash-secret 仍在且值不变', async () => {
   await ensurePasswordConfigured()
 
-  storeForTesting.setProfile({ region: 'JP' })
+  storeForTesting.setProfile({ traffic: { keepMonths: 7 } })
   storeForTesting.setSubscriptions([{ id: 'sub-1', name: 'Regression Sub' }])
   const secretBefore = storeForTesting.getClashSecret()
 
@@ -134,14 +134,14 @@ test('Critical 2 回归:PUT /api/storage 传入不含 openbox/* 的快照,已存
   })
   assert.equal(res.status, 200)
 
-  assert.equal(storeForTesting.getProfile().region, 'JP')
+  assert.equal(storeForTesting.getProfile().traffic.keepMonths, 7)
   assert.deepEqual(storeForTesting.getSubscriptions(), [{ id: 'sub-1', name: 'Regression Sub' }])
   assert.equal(storeForTesting.getClashSecret(), secretBefore)
 })
 
 test('Critical 2 回归:GET /api/storage 的返回不含任何 config/access-password* 与 openbox/* 键', async () => {
   await ensurePasswordConfigured()
-  storeForTesting.setProfile({ region: 'US' }) // 确保 openbox/profile 键确实存在于表里
+  storeForTesting.setProfile({ traffic: { keepMonths: 9 } }) // 确保 openbox/profile 键确实存在于表里
 
   const res = await fetch(`${baseUrl}/api/storage`, { headers: { cookie: authCookie } })
   assert.equal(res.status, 200)
@@ -152,7 +152,7 @@ test('Critical 2 回归:GET /api/storage 的返回不含任何 config/access-pas
   assert.ok(!keys.some((k) => k.startsWith('config/access-')), `不应含 config/access-* 键,实际: ${keys.join(',')}`)
 })
 
-test('Critical 2 回归:PUT /api/storage 试图写 config/access-password → 密码实际值不变(不能借此改密/接管)', async () => {
+test('Critical 2 回归:PUT /api/storage 试图写 config/access-password → 密码实际值不变（不能借此改密/接管）', async () => {
   await ensurePasswordConfigured()
 
   const res = await fetch(`${baseUrl}/api/storage`, {
@@ -173,13 +173,84 @@ test('Critical 2 回归:PUT /api/storage 试图写 config/access-password → �
 
 test('Critical 2 回归:PUT /api/storage 试图写 openbox/profile → 被服务端忽略,真实 profile 不受影响', async () => {
   await ensurePasswordConfigured()
-  storeForTesting.setProfile({ region: 'US' })
+  storeForTesting.setProfile({ traffic: { keepMonths: 9 } })
 
   const res = await fetch(`${baseUrl}/api/storage`, {
     method: 'PUT',
     headers: { 'content-type': 'application/json', cookie: authCookie },
-    body: JSON.stringify({ entries: { 'openbox/profile': JSON.stringify({ region: 'EVIL' }) } }),
+    body: JSON.stringify({ entries: { 'openbox/profile': JSON.stringify({ traffic: { keepMonths: 99 } }) } }),
   })
   assert.equal(res.status, 200)
-  assert.equal(storeForTesting.getProfile().region, 'US')
+  assert.equal(storeForTesting.getProfile().traffic.keepMonths, 9)
+})
+
+// ==================== 增量同步(PATCH /api/storage) ====================
+// 起因是用户报「测试站点改了无法保存、换个浏览器又恢复默认」:以前每次同步都把整份本地快照
+// PUT 上去,两台浏览器各持一份,后写的那台会把别处改过的设置整份还原 —— 一台开着没关的旧页面
+// 改任何一个无关设置就能冲掉别人的改动。改成只推自己动过的键、服务端按键合并。
+test('PATCH /api/storage:只改点名的键,别的键原样不动(旧页面改无关设置不会还原别处的改动)', async () => {
+  await ensurePasswordConfigured()
+
+  const put = await fetch(`${baseUrl}/api/storage`, {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json', cookie: authCookie },
+    body: JSON.stringify({ entries: { 'config/a': '"1"', 'config/b': '"2"' } }),
+  })
+  assert.equal(put.status, 200)
+
+  const patch = await fetch(`${baseUrl}/api/storage`, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json', cookie: authCookie },
+    body: JSON.stringify({ entries: { 'config/b': '"changed"', 'config/c': '"3"' }, removed: [] }),
+  })
+  assert.equal(patch.status, 200)
+
+  const after = await fetch(`${baseUrl}/api/storage`, { headers: { cookie: authCookie } }).then((r) => r.json())
+  assert.equal(after.entries['config/a'], '"1"', '没点名的键要原样留着')
+  assert.equal(after.entries['config/b'], '"changed"', '已存在的键要能改(纯 INSERT 会撞主键,必须 upsert)')
+  assert.equal(after.entries['config/c'], '"3"', '新键要能加')
+})
+
+test('PATCH /api/storage:removed 里的键会删掉;受保护的键一个都不许碰', async () => {
+  await ensurePasswordConfigured()
+  storeForTesting.setProfile({ traffic: { keepMonths: 5 } })
+  const secretBefore = storeForTesting.getClashSecret()
+
+  await fetch(`${baseUrl}/api/storage`, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json', cookie: authCookie },
+    body: JSON.stringify({ entries: { 'config/gone': '"x"' }, removed: [] }),
+  })
+  const res = await fetch(`${baseUrl}/api/storage`, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json', cookie: authCookie },
+    body: JSON.stringify({
+      entries: { 'config/access-password': '"hijack"', 'openbox/profile': '{"traffic":{"keepMonths":1}}' },
+      removed: ['config/gone', 'openbox/clash-secret'],
+    }),
+  })
+  assert.equal(res.status, 200)
+
+  const after = await fetch(`${baseUrl}/api/storage`, { headers: { cookie: authCookie } }).then((r) => r.json())
+  assert.ok(!('config/gone' in after.entries), 'removed 里的普通键要删掉')
+  assert.equal(storeForTesting.getProfile().traffic.keepMonths, 5, 'openbox/* 不许被客户端改写')
+  assert.equal(storeForTesting.getClashSecret(), secretBefore, 'openbox/* 不许被客户端删掉')
+  const login = await fetch(`${baseUrl}/api/auth/login`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ password: TEST_PASSWORD }),
+  })
+  assert.equal(login.status, 200, '密码不该被 PATCH 改掉')
+})
+
+test('PATCH /api/storage:请求体不对给 400(entries 不是字符串值 / removed 不是字符串数组)', async () => {
+  await ensurePasswordConfigured()
+  for (const body of [{ entries: { 'config/x': 1 } }, { entries: {}, removed: [1] }, { entries: [], removed: [] }]) {
+    const res = await fetch(`${baseUrl}/api/storage`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json', cookie: authCookie },
+      body: JSON.stringify(body),
+    })
+    assert.equal(res.status, 400, JSON.stringify(body))
+  }
 })

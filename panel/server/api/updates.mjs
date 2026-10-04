@@ -1,7 +1,7 @@
 import express from 'express'
 import {
-  cancelUpdate, compareVersions, fetchLatestVersion, readChannel, readMeta, readUpdateLogTail,
-  readUpdateStatus, startUpdate,
+  cancelUpdate, compareVersions, fetchLatestVersion, fetchReleaseNote, readChannel, readMeta, readUpdateLogTail,
+  readJsonFile, readUpdateStatus, startUpdate,
 } from '../system/updater.mjs'
 
 const CHANNELS = new Set(['auto', 'direct', 'mirror'])
@@ -23,10 +23,20 @@ export const registerUpdateRoutes = (app, { ctx, paths, fetchImpl = globalThis.f
 
   // GET /api/openbox/update/status —— 本地信息,不出网
   router.get('/update/status', async (_req, res) => {
-    const [meta, channel, status, logTail] = await Promise.all([
+    const [meta, channel, status, logTail, geo] = await Promise.all([
       readMeta(ctx, paths), readChannel(ctx, paths), readUpdateStatus(ctx, paths), readUpdateLogTail(ctx, paths),
+      readJsonFile(ctx, `${paths.geoDir}/manifest.json`, {}),
     ])
-    res.json({ version: meta.version || '', singboxVersion: meta.singboxVersion || '', builtAt: meta.builtAt || '', channel, status, logTail })
+    const geoCounts = geo && typeof geo.counts === 'object' ? {
+      geosite: Number.isSafeInteger(geo.counts.geosite) ? geo.counts.geosite : 0,
+      geoip: Number.isSafeInteger(geo.counts.geoip) ? geo.counts.geoip : 0,
+    } : { geosite: 0, geoip: 0 }
+    res.json({
+      version: meta.version || '', singboxVersion: meta.singboxVersion || '', builtAt: meta.builtAt || '',
+      geoVersion: typeof geo?.version === 'string' ? geo.version : '',
+      geoDate: typeof geo?.date === 'string' ? geo.date : '',
+      geoCounts, channel, status, logTail,
+    })
   })
 
   // GET /api/openbox/update/check —— 探最新版
@@ -38,6 +48,14 @@ export const registerUpdateRoutes = (app, { ctx, paths, fetchImpl = globalThis.f
     } catch (error) {
       res.status(503).json({ message: error instanceof Error ? error.message : String(error) })
     }
+  })
+
+  // GET /api/openbox/update/notes?latest=vX.Y.Z —— 更新日志:最新那一版的 Release 说明(检查到新版的弹窗用,
+  // system/updater.mjs 的 fetchReleaseNote),url 是 Release 列表(看其它版本)。latest 是 /update/check 探到的,不给就再探一次
+  router.get('/update/notes', async (req, res) => {
+    const given = typeof req.query.latest === 'string' && /^v?\d+\.\d+\.\d+$/.test(req.query.latest) ? req.query.latest : ''
+    const latest = given || await latestTagOrEmpty()
+    res.json(await fetchReleaseNote(fetchImpl, { latest }))
   })
 
   // POST /api/openbox/update/run {channel}

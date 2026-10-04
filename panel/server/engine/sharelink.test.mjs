@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { parseShareLink } from './sharelink.mjs'
 
-test('ss:// SIP002(userinfo 为 base64 的 method:password)', () => {
+test('ss:// SIP002（userinfo 为 base64 的 method:password）', () => {
   // base64("aes-256-gcm:secretpw") = YWVzLTI1Ni1nY206c2VjcmV0cHc=
   const n = parseShareLink('ss://YWVzLTI1Ni1nY206c2VjcmV0cHc=@example.com:8388#香港节点')
   assert.equal(n.type, 'shadowsocks')
@@ -115,18 +115,18 @@ test('tuic:// 与 hysteria2:// 必须采集 insecure / allowInsecure 与 fp,并�
   assert.equal(s.fields.tls.enabled, true)
 })
 
-test('trojan:// 密码含百分号编码字符需解码(修复1)', () => {
+test('trojan:// 密码含百分号编码字符需解码（修复1）', () => {
   const n = parseShareLink('trojan://p%40ss%23word@t.com:443#PW')
   assert.equal(n.fields.password, 'p@ss#word')
 })
 
-test('tuic:// uuid:password 含百分号编码字符需分别解码(修复1)', () => {
+test('tuic:// uuid:password 含百分号编码字符需分别解码（修复1）', () => {
   const n = parseShareLink('tuic://33333333-3333-3333-3333-333333333333:p%40ss%3Aw@tu.example.com:443#TUIC2')
   assert.equal(n.fields.uuid, '33333333-3333-3333-3333-333333333333')
   assert.equal(n.fields.password, 'p@ss:w')
 })
 
-test('ss:// SIP002 SS-2022 明文 userinfo(method:password,非 base64)(修复2)', () => {
+test('ss:// SIP002 SS-2022 明文 userinfo（method:password,非 base64）（修复2）', () => {
   const n = parseShareLink('ss://2022-blake3-aes-256-gcm:vfOznL8Sc9U=@example.com:8388#SS2022')
   assert.equal(n.type, 'shadowsocks')
   assert.equal(n.fields.method, '2022-blake3-aes-256-gcm')
@@ -135,7 +135,7 @@ test('ss:// SIP002 SS-2022 明文 userinfo(method:password,非 base64)(修复2)'
   assert.equal(n.server_port, 8388)
 })
 
-test('ss:// SIP002 IPv6 主机剥括号(修复3)', () => {
+test('ss:// SIP002 IPv6 主机剥括号（修复3）', () => {
   const b = Buffer.from('aes-256-gcm:secretpw').toString('base64')
   const n = parseShareLink(`ss://${b}@[2001:db8::1]:8443#SSv6`)
   assert.equal(n.server, '2001:db8::1')
@@ -167,7 +167,7 @@ test('h2 传输归一为 http', () => {
   assert.equal(n.fields.transport.path, '/p')
 })
 
-test('vmess:// net:h2 传输归一为 http(修复1)', () => {
+test('vmess:// net:h2 传输归一为 http（修复1）', () => {
   const conf = { v: '2', ps: 'H2-01', add: 'h2.example.com', port: '443', id: '11111111-1111-1111-1111-111111111111', aid: '0', net: 'h2', path: '/vm-h2', host: 'cdn-h2.example.com', scy: 'auto' }
   const b = Buffer.from(JSON.stringify(conf)).toString('base64')
   const n = parseShareLink(`vmess://${b}`)
@@ -177,7 +177,7 @@ test('vmess:// net:h2 传输归一为 http(修复1)', () => {
   assert.equal(n.fields.transport.headers.Host, 'cdn-h2.example.com')
 })
 
-test('allowInsecure=true 变体也应置 insecure(修复6)', () => {
+test('allowInsecure=true 变体也应置 insecure（修复6）', () => {
   const n = parseShareLink('trojan://pw@a.com:443?sni=a.com&allowInsecure=true#I2')
   assert.equal(n.fields.tls.insecure, true)
 })
@@ -212,7 +212,7 @@ test('socks5:// 不带认证', () => {
   assert.equal(n.fields.password, undefined)
 })
 
-test('socks:// userinfo 是 base64 的 user:pass(v2rayN)', () => {
+test('socks:// userinfo 是 base64 的 user:pass（v2rayN）', () => {
   const b = Buffer.from('bob:pw123').toString('base64')
   const n = parseShareLink(`socks://${b}@例子.com:1080#B`)
   assert.equal(n.fields.username, 'bob')
@@ -220,7 +220,7 @@ test('socks:// userinfo 是 base64 的 user:pass(v2rayN)', () => {
   assert.equal(n.server_port, 1080)
 })
 
-test('socks:// 整体 base64 的 user:pass@host:port(Shadowrocket)', () => {
+test('socks:// 整体 base64 的 user:pass@host:port（Shadowrocket）', () => {
   const b = Buffer.from('carol:pw@5.6.7.8:1081').toString('base64')
   const n = parseShareLink(`socks://${b}#C`)
   assert.equal(n.fields.username, 'carol')
@@ -242,7 +242,7 @@ test('socks5:// IPv6 主机', () => {
   assert.equal(n.fields.username, 'u')
 })
 
-test('socks5:// 链接里的 sni / fp 一律忽略(内核这项没有 tls)', () => {
+test('socks5:// 链接里的 sni / fp 一律忽略（内核这项没有 tls）', () => {
   const n = parseShareLink('socks5://u:p@1.2.3.4:1080?sni=a.com&fp=chrome#F')
   assert.equal(n.fields.tls, undefined)
   assert.equal(n.fields.transport, undefined)

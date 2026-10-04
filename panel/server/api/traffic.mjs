@@ -3,7 +3,7 @@
 // 数据来自 system/traffic-collector.mjs 常驻采集写进 cache.db 的 traffic_daily 表。
 import express from 'express'
 import { readLocalAddresses } from '../system/local-subnets.mjs'
-import { HOUR_DETAIL_KEEP_DAYS, hourDayKey, localDay } from '../system/traffic-collector.mjs'
+import { HOUR_DETAIL_KEEP_DAYS, TAIL_COLLAPSE_AFTER_DAYS, TAIL_KEEP_HOSTS, hourDayKey, localDay } from '../system/traffic-collector.mjs'
 import { builtinTags } from '../engine/user-groups.mjs'
 
 const MONTH_RE = /^\d{4}-(0[1-9]|1[0-2])$/
@@ -57,29 +57,55 @@ export const parseDhcpLeases = (text) => {
   }
   return map
 }
-// 租约的每一行:{ mac, ip, name }(name 没有就是空串)。终端分流「不进内核」要按 MAC 放行,从这里给用户挑
+// 租约的每一行:{ mac, ip, name }(name 没有就是空串)。终端分流「不进内核」要按 MAC 放行,从这里给用户挑。
+// dnsmasq 的 DHCPv6 租约(Debian / Ubuntu 的租约文件里有)第二列是 IAID 不是 MAC,那种行 mac 记空串
+const MAC_RE = /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/
 export const parseDhcpLeaseRows = (text) => {
   const rows = []
   for (const line of String(text || '').split('\n')) {
     const f = line.trim().split(/\s+/)
-    if (f.length >= 3 && f[1] && f[2]) rows.push({ mac: f[1].toLowerCase(), ip: f[2], name: f[3] && f[3] !== '*' ? f[3] : '' })
+    if (f.length < 3 || !f[1] || !f[2]) continue
+    const mac = f[1].toLowerCase()
+    rows.push({ mac: MAC_RE.test(mac) ? mac : '', ip: f[2], name: f[3] && f[3] !== '*' ? f[3] : '' })
   }
   return rows
 }
 
+// 某个局域网 IP 此刻的 MAC:先查 DHCP 租约,查不到再看内核邻居表(静态 IP 的设备没有租约)。规则页推算按 MAC 的
+// 终端规则时用(api/penetration.mjs、api/route-test.mjs);认不出返回空串,那几条规则如实算「判不了」
+export const macForIp = async (ctx, paths, ip) => {
+  if (!ctx || !ip) return ''
+  try {
+    if (paths && paths.dhcpLeases) {
+      const hit = parseDhcpLeaseRows(await ctx.readFile(paths.dhcpLeases)).find((r) => r.ip === ip)
+      if (hit && hit.mac) return hit.mac
+    }
+  } catch {
+    // 没有租约文件
+  }
+  try {
+    const r = await ctx.exec('ip', ['neigh', 'show', ip], { timeoutMs: 3000 })
+    const m = /lladdr\s+(([0-9a-f]{2}:){5}[0-9a-f]{2})/i.exec(String(r && r.stdout || ''))
+    if (m) return m[1].toLowerCase()
+  } catch {
+    // 读不到邻居表
+  }
+  return ''
+}
+
 // 路由器自己的地址 → { iface, kind }:WAN / LAN 地址会以"终端"身份出现在流量表里(打环、
 // 路由器自身的直连),标出来免得像一台陌生设备
-const readSelfAddresses = async (ctx) => {
+const readSelfAddresses = async (ctx, platform) => {
   if (!ctx) return new Map()
   try {
-    return new Map((await readLocalAddresses(ctx)).map((a) => [a.address, { iface: a.iface, kind: a.kind }]))
+    return new Map((await readLocalAddresses(ctx, { platform })).map((a) => [a.address, { iface: a.iface, kind: a.kind }]))
   } catch {
     return new Map()
   }
 }
-const withClientLabels = (rows, names, self) => rows.map((r) => {
-  const out = { ...r, name: names.get(r.key) || '' }
-  const me = self.get(r.key)
+const withClientLabels = (rows, names, self, key = 'key') => rows.map((r) => {
+  const out = { ...r, name: names.get(r[key]) || '' }
+  const me = self.get(r[key])
   if (me) out.self = me
   return out
 })
@@ -91,6 +117,13 @@ const readLeaseNames = async (ctx, leasesPath) => {
   } catch {
     return new Map()
   }
+}
+
+// 给按终端 IP 的行补上 name(DHCP 主机名)和 self(路由器自己的地址);key 是行里放 IP 的字段。
+// 流量表的终端、「域名解析查询」的终端设备一栏共用(api/dns-filter.mjs)
+export const labelClients = async (ctx, paths, rows, key = 'key') => {
+  const [names, self] = await Promise.all([readLeaseNames(ctx, paths && paths.dhcpLeases), readSelfAddresses(ctx, paths && paths.platform)])
+  return withClientLabels(rows, names, self, key)
 }
 
 const DRILL_KINDS = new Set(['client', 'node', 'host'])
@@ -116,6 +149,7 @@ const FULL_LIMIT = 100000
 
 export const registerTrafficRoutes = (app, { collector, ctx, paths, store, now = () => new Date() }) => {
   const router = express.Router()
+  const readStore = collector.readStore || collector.store
   const directTag = () => {
     try { return builtinTags(store && store.getGroups ? store.getGroups() : []).direct } catch { return '直连' }
   }
@@ -124,14 +158,26 @@ export const registerTrafficRoutes = (app, { collector, ctx, paths, store, now =
   // perDay 是按天记录的日增量(存满整个保留时长按它算);小时明细只留 HOUR_DETAIL_KEEP_DAYS 天,
   // 另给 hourPerDay,前端估算时只乘这几天
   router.get('/traffic/usage', (_req, res) => {
-    const u = collector.store.usage ? collector.store.usage() : null
-    if (!u) return res.json({ rows: 0, days: 0, bytes: 0, perDay: 0, hourPerDay: 0, hourKeepDays: HOUR_DETAIL_KEEP_DAYS })
+    // 早于这一天的日子合并过长尾(只留当天流量最大的若干访问目标),一天的行数是近期的八分之一上下:
+    // 估「存满要多大」时近 TAIL_COLLAPSE_AFTER_DAYS 天按 perDay、更早的按 oldPerDay
+    const before = new Date(now())
+    before.setDate(before.getDate() - TAIL_COLLAPSE_AFTER_DAYS)
+    const u = readStore.usage ? readStore.usage(localDay(before)) : null
+    const collapse = { collapseAfterDays: TAIL_COLLAPSE_AFTER_DAYS, collapseKeepHosts: TAIL_KEEP_HOSTS }
+    if (!u) return res.json({ rows: 0, days: 0, bytes: 0, perDay: 0, oldPerDay: 0, hourPerDay: 0, hourKeepDays: HOUR_DETAIL_KEEP_DAYS, ...collapse })
     const dayBytes = Number(u.dayBytes ?? u.bytes) || 0
+    const oldBytes = Number(u.oldBytes) || 0
+    const oldDays = Number(u.oldDays) || 0
+    const recentDays = (Number(u.days) || 0) - oldDays
+    const perDay = recentDays > 0 ? Math.round((dayBytes - oldBytes) / recentDays) : (u.days ? Math.round(dayBytes / u.days) : 0)
     res.json({
       ...u,
-      perDay: u.days ? Math.round(dayBytes / u.days) : 0,
+      perDay,
+      // 还没有合并过的日子时按实测比例估(一天一万六千行 → 不到两千行)
+      oldPerDay: oldDays ? Math.round(oldBytes / oldDays) : Math.round(perDay * 0.12),
       hourPerDay: u.hourDays ? Math.round((Number(u.hourBytes) || 0) / u.hourDays) : 0,
       hourKeepDays: HOUR_DETAIL_KEEP_DAYS,
+      ...collapse,
     })
   })
 
@@ -142,12 +188,11 @@ export const registerTrafficRoutes = (app, { collector, ctx, paths, store, now =
       res.status(400).json({ error: 'month 应为 YYYY-MM' })
       return
     }
-    collector.flush()
     const exclude = isExcludeDirect(req)
     const tag = directTag()
-    let rows = collector.store.month(month)
-    if (exclude && collector.store.monthNode) {
-      const direct = new Map(collector.store.monthNode(month, tag).map((r) => [r.day, r]))
+    let rows = readStore.month(month)
+    if (exclude && readStore.monthNode) {
+      const direct = new Map(readStore.monthNode(month, tag).map((r) => [r.day, r]))
       rows = rows.map((r) => ({ day: r.day, ...minus(r, direct.get(r.day)) }))
     }
     res.json({ ...buildMonthView(month, rows, today), direct: { excluded: exclude, tag } })
@@ -165,8 +210,7 @@ export const registerTrafficRoutes = (app, { collector, ctx, paths, store, now =
       res.status(400).json({ error: 'hour 应为 0~23' })
       return
     }
-    collector.flush()
-    const store = collector.store
+    const store = readStore
     const exclude = isExcludeDirect(req) && typeof store.nodeRow === 'function'
     const tag = directTag()
     let hours = store.hours(day)
@@ -187,7 +231,7 @@ export const registerTrafficRoutes = (app, { collector, ctx, paths, store, now =
     }
     let nodes = store.day(scope, 'node', limit)
     let hosts = store.day(scope, 'host', exclude ? FULL_LIMIT : limit)
-    const [names, self] = await Promise.all([readLeaseNames(ctx, paths && paths.dhcpLeases), readSelfAddresses(ctx)])
+    const [names, self] = await Promise.all([readLeaseNames(ctx, paths && paths.dhcpLeases), readSelfAddresses(ctx, paths && paths.platform)])
     let clientRows = store.day(scope, 'client', exclude ? FULL_LIMIT : limit)
     let hostSum = store.daySum(scope, 'host')
     let clientSum = store.daySum(scope, 'client')
@@ -243,10 +287,9 @@ export const registerTrafficRoutes = (app, { collector, ctx, paths, store, now =
       res.status(400).json({ error: 'hour 应为 0~23' })
       return
     }
-    collector.flush()
     const exclude = isExcludeDirect(req)
     const tag = directTag()
-    let { rows, count, sum } = collector.store.drill(hour === null ? day : hourDayKey(day, hour), kind, key, by, limit)
+    let { rows, count, sum } = readStore.drill(hour === null ? day : hourDayKey(day, hour), kind, key, by, limit)
     if (exclude && kind === 'node' && key === tag) {
       rows = []
       count = 0
@@ -260,11 +303,7 @@ export const registerTrafficRoutes = (app, { collector, ctx, paths, store, now =
         sum = { up: Math.max(0, (Number(sum && sum.up) || 0) - (Number(direct.up) || 0)), down: Math.max(0, (Number(sum && sum.down) || 0) - (Number(direct.down) || 0)) }
       }
     }
-    let labeled = rows
-    if (by === 'client') {
-      const [names, self] = await Promise.all([readLeaseNames(ctx, paths && paths.dhcpLeases), readSelfAddresses(ctx)])
-      labeled = withClientLabels(rows, names, self)
-    }
+    const labeled = by === 'client' ? await labelClients(ctx, paths, rows) : rows
     res.json({ day, hour, kind, key, by, count, sum: sum || { up: 0, down: 0 }, rows: labeled })
   })
 
@@ -275,8 +314,7 @@ export const registerTrafficRoutes = (app, { collector, ctx, paths, store, now =
     const seen = new Map()
     for (const r of rows) seen.set(r.ip, { ip: r.ip, name: r.name, mac: r.mac })
     try {
-      collector.flush()
-      for (const r of collector.store.day(localDay(now()), 'client', 500)) {
+        for (const r of readStore.day(localDay(now()), 'client', 500)) {
         if (r.key && !seen.has(r.key)) seen.set(r.key, { ip: r.key, name: '', mac: '' })
       }
     } catch { /* 采集器没数据就只给租约 */ }

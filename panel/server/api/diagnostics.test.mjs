@@ -95,6 +95,8 @@ test('诊断包:秘密和节点地址一个都不能剩,该有的信息都在', 
   assert.equal(bundle.system.memTotal, '975 MB')
   assert.equal(bundle.system.tunDevice, true)
   assert.deepEqual(bundle.system.conflictingPlugins, ['passwall'])
+  // 面板带没带 madvise 兼容库(GitHub #290 #293)跟着面板进程自己的环境走
+  assert.equal(bundle.system.nodePreload, process.env.LD_PRELOAD || null)
   assert.match(bundle.kernel.nftTables, /table inet sing-box/)
   assert.equal(bundle.kernel.configMeta.routingHash, 'abc')
   assert.equal(bundle.settings.ipv6, true)
@@ -103,6 +105,28 @@ test('诊断包:秘密和节点地址一个都不能剩,该有的信息都在', 
   assert.equal(bundle.logs.kernel.split('\n').length, 200)
   assert.ok(!bundle.logs.kernel.includes('\x1b['))
   assert.ok(!bundle.logs.kernel.includes('line 0\n'))
+})
+
+test('诊断包 · 节点专用解析器(#136):机场 DoH 的主机名和私有路径在配置和日志里都抹掉,别的 DNS 照旧', async () => {
+  const withDoh = {
+    ...config,
+    dns: { ...config.dns, servers: [...config.dns.servers,
+      { type: 'https', tag: 'dns-sub-abc', server: 'dns.airport-private.net', server_port: 2096, path: '/p/SeCrEtPaTh', domain_resolver: 'dns-sub-abc-bootstrap' },
+      { type: 'udp', tag: 'dns-sub-abc-bootstrap', server: '223.5.5.5' }] },
+  }
+  const ctx = createMockContext({
+    files: { [paths.configPath]: JSON.stringify(withDoh), [paths.metaPath]: '{}' },
+    execResults: { 'logread -e sing-box': { code: 0, stdout: 'ERROR dns: Post "https://dns.airport-private.net:2096/p/SeCrEtPaTh": i/o timeout\n' } },
+  })
+  const bundle = await buildDiagnostics({ store, ctx, paths })
+  const text = JSON.stringify(bundle)
+  assert.ok(!text.includes('airport-private') && !text.includes('SeCrEtPaTh'), text)
+  const doh = bundle.kernel.config.dns.servers.find((s) => s.tag === 'dns-sub-abc')
+  assert.equal(doh.server, '<host>')
+  assert.equal(doh.path, '***')
+  assert.equal(doh.server_port, 2096)
+  assert.equal(bundle.kernel.config.dns.servers.find((s) => s.tag === 'dns-sub-abc-bootstrap').server, '223.5.5.5')
+  assert.equal(bundle.kernel.config.dns.servers.find((s) => s.tag === 'dns-proxy').server, 'dns.google')
 })
 
 test('GET /api/openbox/diagnostics 返回诊断包;读不到配置 / 命令失败也不炸', async () => {
@@ -123,4 +147,25 @@ test('GET /api/openbox/diagnostics 返回诊断包;读不到配置 / 命令失�
   assert.equal(bare.versions.openBox, null)
   assert.equal(bare.system.tunDevice, false)
   assert.deepEqual(bare.system.conflictingPlugins, [])
+})
+
+test('诊断包 · 热切换:带上新开关的设置;开关文件和元数据逐个对账,对不上的点名;不是热切换结构时这一段是 null', async () => {
+  const { flipDiagnostics, flipFlagPath, flipBypassPath } = await import('../system/flip-files.mjs')
+  const { createMockContext } = await import('../system/context.mjs')
+  const { createPaths } = await import('../system/paths.mjs')
+  const p = createPaths('/opt/open-box')
+  const meta = { flip: { mode: 'hot', bypassMode: 'dynamic', flippedAt: '2026-09-19T01:00:00.000Z', names: { 国内: 'obflip-aaa', Google: 'obflip-bbb', 其他: 'obflip-fallback' }, flags: { 'obflip-aaa': false, 'obflip-bbb': true, 'obflip-fallback': false }, bypass: { 'geoip-cn': true } } }
+  const c = createMockContext({ files: {
+    [flipFlagPath(p, 'obflip-aaa')]: '{"version":3,"rules":[{"domain":["obflip-off.invalid"]}]}',
+    // 元数据说 ON,文件却是 OFF:翻面写到一半出过错的样子
+    [flipFlagPath(p, 'obflip-bbb')]: '{"version":3,"rules":[{"domain":["obflip-off.invalid"]}]}',
+    [flipBypassPath(p, 'geoip-cn')]: 'SRS',
+  } })
+  const d = await flipDiagnostics(c, p, meta)
+  assert.equal(d.mode, 'hot')
+  assert.deepEqual(d.flags.map((f) => [f.policy, f.meta, f.file]), [['国内', 'off', 'off'], ['Google', 'on', 'off'], ['其他', 'off', 'missing']])
+  assert.deepEqual(d.mismatched, ['Google', '其他'])
+  assert.deepEqual(d.bypass, [{ set: 'geoip-cn', meta: 'full', fileExists: true }])
+  assert.equal(await flipDiagnostics(c, p, { dnsMode: 'hijack' }), null)
+  assert.equal(await flipDiagnostics(c, p, null), null)
 })

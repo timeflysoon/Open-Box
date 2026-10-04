@@ -3,6 +3,49 @@ import test from 'node:test'
 import express from 'express'
 import { buildMonthView, parseDhcpLeases, registerTrafficRoutes } from './traffic.mjs'
 import { createMockContext } from '../system/context.mjs'
+import { DatabaseSync } from 'node:sqlite'
+import { createTrafficCollector, createTrafficStore } from '../system/traffic-collector.mjs'
+
+test('统计接口读取未落盘增量，反复查询不写盘；flush 后总量、排行、小时与下钻完全一致', async (t) => {
+  const db = new DatabaseSync(':memory:')
+  t.after(() => db.close())
+  const store = createTrafficStore(db)
+  let writes = 0
+  const add = store.add
+  store.add = (rows) => { writes++; add(rows) }
+  const now = () => new Date(2026, 8, 3, 12)
+  const collector = createTrafficCollector({ store, now })
+  const c = (id, n, host, node = '节点') => ({ id, upload: n, download: n * 10, chains: [node], metadata: { sourceIP: '10.0.0.9', host } })
+  collector.applySnapshot({ uploadTotal: 0, downloadTotal: 0, connections: [] })
+  collector.applySnapshot({ uploadTotal: 100, downloadTotal: 1000, connections: [c('a', 90, 'a.com'), c('b', 10, 'b.com')] })
+  collector.flush()
+  collector.applySnapshot({ uploadTotal: 530, downloadTotal: 5300, connections: [c('a', 90, 'a.com'), c('b', 400, 'b.com'), c('new', 40, 'c.com', '直连')] })
+  const changes = db.prepare('SELECT total_changes() AS n').get().n
+  const app = await startApp(collector, now)
+  t.after(app.close)
+  const queries = ['traffic/month?month=2026-09', 'traffic/month?month=2026-09&direct=0', 'traffic/day?day=2026-09-03&limit=1', 'traffic/day?day=2026-09-03&hour=12', 'traffic/day?day=2026-09-03&direct=0', 'traffic/drill?day=2026-09-03&kind=client&key=10.0.0.9&by=host&limit=1', 'traffic/drill?day=2026-09-03&kind=host&key=b.com&by=node', 'clients']
+  const read = () => Promise.all(queries.map(async (q) => { const r = await fetch(`${app.base}/api/openbox/${q}`); assert.equal(r.status, 200); return r.json() }))
+  const before = await read()
+  assert.equal(before[0].total.up, 530)
+  assert.equal(before[1].total.up, 490)
+  assert.equal(before[2].hosts[0].key, 'b.com', '持久化排行之外的旧行，加入增量后应升到第一位')
+  assert.equal(before[2].hosts[0].up, 400, '必须合并持久化的 10 和新增的 390')
+  assert.equal(before[2].hostsCount, 3)
+  assert.equal(before[5].count, 3)
+  assert.equal(before[5].rows[0].key, 'b.com')
+  assert.deepEqual(await read(), before)
+  assert.equal(writes, 1)
+  assert.equal(db.prepare('SELECT total_changes() AS n').get().n, changes, 'HTTP 查询不得修改数据库')
+  const pending = collector.pendingSize
+  store.add = () => { throw new Error('disk full') }
+  assert.equal(collector.flush(), 0)
+  assert.equal(collector.pendingSize, pending)
+  assert.deepEqual(await read(), before, '写失败后内存统计仍可读')
+  store.add = add
+  collector.flush()
+  assert.equal(collector.pendingSize, 0)
+  assert.deepEqual(await read(), before, '落盘后不能重复计算或丢失增量')
+})
 
 const startApp = async (collector, now, extra = {}) => {
   const app = express()
@@ -77,7 +120,7 @@ const fakeCollector = () => {
   }
 }
 
-test('buildMonthView:整月补零;日均按已过天数(往月整月、当月到今天、未来 0)', () => {
+test('buildMonthView:整月补零;日均按已过天数（往月整月、当月到今天、未来 0）', () => {
   const rows = [{ day: '2026-09-03', up: 100, down: 900, conns: 7 }]
   const cur = buildMonthView('2026-09', rows, '2026-09-10')
   assert.equal(cur.days.length, 30)
@@ -89,7 +132,7 @@ test('buildMonthView:整月补零;日均按已过天数(往月整月、当月到
   assert.equal(buildMonthView('2026-10', [], '2026-09-10').avgDays, 0)
 })
 
-test('GET /traffic/month:缺参数用当月,格式错 400,读之前先 flush', async () => {
+test('GET /traffic/month:缺参数用当月,格式错 400,读取不触发磁盘 flush', async () => {
   const collector = fakeCollector()
   const { base, close } = await startApp(collector, () => new Date(2026, 8, 3, 10))
   try {
@@ -98,7 +141,7 @@ test('GET /traffic/month:缺参数用当月,格式错 400,读之前先 flush', a
     assert.equal(body.month, '2026-09')
     assert.equal(body.today, '2026-09-03')
     assert.deepEqual(body.total, { up: 100, down: 900, conns: 7 })
-    assert.equal(collector.flushed(), 1)
+    assert.equal(collector.flushed(), 0)
     assert.equal((await fetch(`${base}/api/openbox/traffic/month?month=2026-13`)).status, 400)
     assert.equal((await fetch(`${base}/api/openbox/traffic/month?month=2026/09`)).status, 400)
   } finally {
@@ -150,7 +193,7 @@ test('GET /traffic/drill:一条记录按另一维拆;按终端拆时带主机名
     assert.equal(byClient.count, 2)
     assert.deepEqual(byClient.rows[0], { key: '10.0.0.209', up: 60, down: 500, conns: 5, name: 'WIN11-VM' })
     assert.equal(byClient.rows[1].name, '')
-    assert.equal(collector.flushed(), 1)
+    assert.equal(collector.flushed(), 0)
     const byNode = await (await q('day=2026-09-03&kind=host&key=a.com&by=node&limit=1')).json()
     assert.deepEqual(byNode.rows, [{ key: 'A', up: 60, down: 500, conns: 4 }])
     assert.deepEqual(collector.drills.at(-1), { day: '2026-09-03', kind: 'host', key: 'a.com', by: 'node', limit: 1 })
@@ -172,12 +215,31 @@ test('parseDhcpLeases:主机名为 * 的不算', () => {
 
 test('GET /clients:租约里的设备 + 今天流量里的来源 IP', async () => {
   const collector = fakeCollector()
-  const ctx = createMockContext({ files: { '/tmp/dhcp.leases': '1 m1 10.0.0.209 WIN11 01\n' } })
+  // 第三行是 dnsmasq 的 DHCPv6 租约(Debian / Ubuntu):第二列是 IAID,不能当 MAC 给终端分流挑
+  const leases = '1 AA:BB:CC:DD:EE:01 10.0.0.209 WIN11 01\nduid 00:01:00:01:2c:5f:aa:bb\n1 1234567 fd00::209 WIN11 00:01:00:01\n'
+  const ctx = createMockContext({ files: { '/tmp/dhcp.leases': leases } })
   const { base, close } = await startApp(collector, () => new Date(2026, 8, 3, 10), { ctx, paths: { dhcpLeases: '/tmp/dhcp.leases' } })
   try {
     const body = await (await fetch(`${base}/api/openbox/clients`)).json()
     // 租约里的设备带 MAC(终端分流「不进内核」按它放行),只在流量里见过的没有
-    assert.deepEqual(body.clients, [{ ip: '10.0.0.209', name: 'WIN11', mac: 'm1' }, { ip: '10.0.0.7', name: '', mac: '' }])
+    assert.deepEqual(body.clients, [
+      { ip: '10.0.0.209', name: 'WIN11', mac: 'aa:bb:cc:dd:ee:01' },
+      { ip: 'fd00::209', name: 'WIN11', mac: '' },
+      { ip: '10.0.0.7', name: '', mac: '' },
+    ])
+  } finally {
+    await close()
+  }
+})
+
+test('GET /traffic/day:Debian / Ubuntu 上路由器自己的地址按平台认(不问 ubus、按地址猜局域网口)', async () => {
+  const collector = fakeCollector()
+  const ctx = createMockContext({ execResults: { 'ip -4 -o addr': { code: 0, stdout: '2: enp1s0    inet 10.0.0.7/24 brd 10.0.0.255 scope global enp1s0\n' } } })
+  const { base, close } = await startApp(collector, () => new Date(2026, 8, 3, 10), { ctx, paths: { platform: 'systemd' } })
+  try {
+    const body = await (await fetch(`${base}/api/openbox/traffic/day?day=2026-09-03`)).json()
+    assert.deepEqual(body.clients.find((r) => r.key === '10.0.0.7').self, { iface: 'enp1s0', kind: 'lan' })
+    assert.equal(body.clients.find((r) => r.key === '10.0.0.209').self, undefined)
   } finally {
     await close()
   }
@@ -258,4 +320,32 @@ test('direct=0:「统计直连流量」关掉——月 / 日总量、小时桶�
   } finally {
     await close()
   }
+})
+
+test('用量接口:近 30 天和更早(合并过长尾)的日子分开给日增量;还没有老数据时 oldPerDay 按比例估', async (t) => {
+  const db = new DatabaseSync(':memory:')
+  t.after(() => db.close())
+  const store = createTrafficStore(db)
+  const now = () => new Date(2026, 8, 20, 12)
+  const collector = createTrafficCollector({ store, now })
+  const rows = (day, n) => Array.from({ length: n }, (_, i) => ({ day, kind: 'host', key: `h${String(i).padStart(4, '0')}.com`, up: 1, down: 1, conns: 1 }))
+  // 近期两天各 100 行;老的一天(8 月 1 日,早于 8 月 21 日这条线)只有 10 行
+  store.add([...rows('2026-09-19', 100), ...rows('2026-09-18', 100)])
+  const app = await startApp(collector, now)
+  t.after(app.close)
+  const get = async () => (await fetch(`${app.base}/api/openbox/traffic/usage`)).json()
+  const fresh = await get()
+  assert.equal(fresh.days, 2)
+  assert.equal(fresh.oldDays, 0)
+  assert.equal(fresh.collapseAfterDays, 30)
+  assert.equal(fresh.collapseKeepHosts, 300)
+  assert.equal(fresh.perDay, Math.round(fresh.dayBytes / 2))
+  assert.equal(fresh.oldPerDay, Math.round(fresh.perDay * 0.12), '没有合并过的日子时按实测比例估')
+  store.add(rows('2026-08-01', 10))
+  const mixed = await get()
+  assert.equal(mixed.days, 3)
+  assert.equal(mixed.oldDays, 1)
+  assert.equal(mixed.perDay, fresh.perDay, '近期的日增量不被老日子摊薄')
+  assert.equal(mixed.oldPerDay, mixed.oldBytes)
+  assert.ok(mixed.oldPerDay < mixed.perDay / 5)
 })

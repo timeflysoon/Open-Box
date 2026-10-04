@@ -15,6 +15,17 @@ test('createNode 保留显式 originalTag 与 fields', () => {
   assert.equal(n.fields.uuid, 'u')
 })
 
+test('createNode 不校验节点名称,原样保留特殊字符和标量名称', () => {
+  const tag = 'Disaster Backup² HK 2x / [备用]（测试）'
+  const n = createNode({ tag, type: 'trojan', server: 'a.com', server_port: 443, source: 'clash' })
+  assert.equal(n.tag, tag)
+  assert.equal(n.originalTag, tag)
+
+  const numeric = createNode({ tag: 123, originalTag: false, type: 'trojan', server: 'b.com', server_port: 443, source: 'clash' })
+  assert.equal(numeric.tag, '123')
+  assert.equal(numeric.originalTag, 'false')
+})
+
 test('createNode 缺 server 抛错', () => {
   assert.throws(() => createNode({ tag: 'x', type: 'trojan', server_port: 1, source: 'clash' }), /server/)
 })
@@ -23,8 +34,10 @@ test('createNode 非法端口抛错', () => {
   assert.throws(() => createNode({ tag: 'x', type: 'trojan', server: 'a', server_port: 'abc', source: 'clash' }), /port/)
 })
 
-test('NODE_TYPES 覆盖九协议,isNodeType 判定', () => {
-  assert.deepEqual([...NODE_TYPES].sort(), ['anytls','hysteria2','shadowsocks','socks','trojan','tuic','vless','vmess','wireguard'])
+test('NODE_TYPES 覆盖十协议,isNodeType 判定', () => {
+  assert.deepEqual([...NODE_TYPES].sort(), ['anytls','http','hysteria2','shadowsocks','socks','trojan','tuic','vless','vmess','wireguard'])
+  // http 是第十个:住宅代理商给的 HTTP / HTTPS 代理账号(链式代理用)
+  assert.equal(isNodeType('http'), true)
   assert.equal(isNodeType('vless'), true)
   // anytls 是第八个:真机上遇到过整个订阅 35 个节点全是 anytls 的机场,不支持就是 0 个节点
   assert.equal(isNodeType('anytls'), true)

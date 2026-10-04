@@ -12,12 +12,13 @@
 //   1. GET /proxies 确认内核可达、父组和页签引用都在(部署到一半、内核正在重启时不动手);
 //   2. 组内所有有效节点各测一次 GET /proxies/<节点>/delay(内核用这个节点出站真去访问测速地址,
 //      端到端;有界并发;同一节点被几个页签共用只测一次,同轮结果复用);
-//   3. 多节点页签有节点通过时调 GET /group/<子组>/delay 让内核按刚才的结果重选,再读回 now 确认
+//   3. 多节点页签只让内核消费已有结果重选(reselect_only),再读回 now 确认
 //      内核实际选中的是通过检测的节点——确认不了的页签这轮算「未知」,不算恢复也不算失败;
 //   4. 页签健康:通过 = 有节点通过;失败 = 所有有效节点都明确失败;其余 = 未知(有节点没测到 /
 //      探测服务报错)。空页签(有效节点为 0)永远是不可用。
-//   5. 决策:当前页签仍通过就留着(备用延迟更低不是切换理由);当前页签连续 failureThreshold 轮
-//      确认失败才按页签顺序转到第一个通过的候选;当前不是主用、主用连续通过满 recoveryHoldMs 且
+//   5. 决策:当前页签仍通过就留着(备用延迟更低不是切换理由)。当前页签确认失败(用户 2026-09-30 定的规则):
+//      不通 → 过 RECHECK_DELAY_MS(10 秒)强制复查当前页签的节点一次 → 复查通过就回到正常周期,复查仍不通
+//      才按页签顺序转到第一个通过的候选(档案里的 failureThreshold 不再起作用);当前不是主用、主用连续通过满 recoveryHoldMs 且
 //      开了「恢复后切回」就切回主用;全部候选都确认失败就切到兜底拒绝(不转直连),之后继续定期
 //      检查,有候选恢复再切回去;未知不触发任何切换。
 //      用户改了页签顺序(按稳定页签 id 的先后比,改名 / 换图标 / 别的原因重新生成配置都不算)是一次
@@ -34,6 +35,8 @@ import { configMetaPath } from './deploy.mjs'
 import { processUptime } from './service.mjs'
 
 export const FAILOVER_STATE_KEY = 'openbox/failover-state'
+// 当前页签不通之后多久复查一次(用户 2026-09-30 定的规则:不通 → 10 秒后再测一次 → 仍不通才换页签)
+export const RECHECK_DELAY_MS = 10_000
 
 const withTimeout = async (fetchImpl, url, init, timeoutMs) => {
   const controller = new AbortController()
@@ -66,7 +69,7 @@ const sameOrder = (a, b) => Array.isArray(a) && Array.isArray(b) && a.length ===
 
 export const createFailoverManager = ({
   store, ctx, paths, history = null, fetchImpl = globalThis.fetch, now = () => Date.now(),
-  tickMs = 5000, probeConcurrency = 4, log = () => {},
+  probeCoordinator = null, tickMs = 5000, probeConcurrency = 4, log = () => {},
 }) => {
   const headers = () => {
     const secret = store.getClashSecret ? store.getClashSecret() : ''
@@ -97,6 +100,7 @@ export const createFailoverManager = ({
   let stopped = false
   let timer = null
   let inTick = false
+  const registeredOwners = new Set()
   let lastError = ''
   let paused = '' // '' | 'config' | 'kernel'
   const states = new Map() // groupId → state
@@ -191,27 +195,41 @@ export const createFailoverManager = ({
   // 单个节点的端到端探测。内核用这个节点出站访问测速地址:200 = 通过;503 / 504 = 这个节点失败
   // (超时 / 出错);别的情况(接口不可达、404、5xx)是探测基础设施的问题,记未知,不算节点失败。
   // 随包内核的 Clash API 保留 HTTP / HTTPS 地址，与内部子组的定时探测使用同一配置。
-  const probeNode = async (tag, url, timeoutMs) => {
+  // 优先级(内核 1.14.1-openbox-tcp14 起全内核一份测速额度):例行检测 interactive——排在后台大批测速(定时测速、组自己的
+  // 间隔检测)前面,几个节点而已;10 秒复查 critical——保流量,排在最前(内核里后台最多占 3 个名额,总有一个给它)。排队不占节点自己的超时(内核拿到名额才开始计),
+  // 本地等回话要给排队留时间;老内核不认 priority 参数也照常测
+  // since(毫秒):复查时带上这一次失败的时刻——内核自己对正在用的节点也会在 10 秒后复查(tcp14),两边都是「比这次失败更新的
+  // 一个结果」:谁先到谁真测,后到的直接用那个结果(正在测就等它),同一个节点只多测一次
+  const probeNode = async (tag, url, timeoutMs, intervalMs, force = false, since = 0) => {
     const at = now()
+    const priority = force ? 'critical' : 'interactive'
+    const sinceQuery = force && since > 0 ? `&since=${Math.floor(since)}` : ''
     try {
-      const res = await withTimeout(fetchImpl, api(`/proxies/${encodeURIComponent(tag)}/delay?url=${encodeURIComponent(url)}&timeout=${timeoutMs}`), { headers: headers() }, timeoutMs + 5000)
+      const res = await withTimeout(fetchImpl, api(`/proxies/${encodeURIComponent(tag)}/delay?url=${encodeURIComponent(url)}&timeout=${timeoutMs}&force=${force}&interval=${intervalMs}&priority=${priority}${sinceQuery}`), { headers: headers() }, timeoutMs + (force ? 20_000 : 60_000))
       if (!res) return { ok: null, at, reason: 'no-response' }
+      let body = null
+      try { body = await res.json() } catch { /* handled as zero delay or unavailable below */ }
+      // 内核复用结果时必须保留原始完成时间,不能把缓存读取记成一次新探测。reused:这次是内核缓存里别的使用者
+      // (自动优选、内核自己的定时检测、手动测速)刚测完的结果,不是这一轮新发的请求
+      const completedAt = Date.parse(body?.time)
+      const observedAt = Number.isFinite(completedAt) && completedAt > 0 ? completedAt : now()
+      const reused = Boolean(body && body.reused === true)
       if (res.ok) {
-        let body = null
-        try { body = await res.json() } catch { /* 空体也算通过 */ }
         const delay = body && Number.isFinite(Number(body.delay)) ? Number(body.delay) : 0
-        return delay > 0 ? { ok: true, delay, at } : { ok: false, delay: 0, at, reason: 'zero-delay' }
+        return delay > 0 ? { ok: true, delay, at: observedAt, reused } : { ok: false, delay: 0, at: observedAt, reused, reason: 'zero-delay' }
       }
-      if (res.status === 503 || res.status === 504) return { ok: false, delay: 0, at, reason: res.status === 504 ? 'timeout' : 'failed' }
+      if (res.status === 503 || res.status === 504) return { ok: false, delay: 0, at: observedAt, reused, reason: res.status === 504 ? 'timeout' : 'failed' }
       return { ok: null, at, reason: `http-${res.status}` }
     } catch (err) {
+      // 测速接口自己没在期限内应答:探测基础设施的问题,记未知(不算节点失败、不复查、不切换)
       return { ok: null, at, reason: err && err.name === 'AbortError' ? 'probe-timeout' : errText(err) }
     }
   }
-  // 让内核按最新结果给多节点页签重选(force=false:刚测过的成员它会跳过,所以这一步很便宜)
+  // 只更新选择。即使节点刚超时、没有成功 history,这里也不允许偷偷再发请求。
   const retestSub = async (subTag, url, timeoutMs, memberCount) => {
     try {
-      const res = await withTimeout(fetchImpl, api(`/group/${encodeURIComponent(subTag)}/delay?url=${encodeURIComponent(url)}&timeout=${timeoutMs}`), { headers: headers() }, Math.ceil(memberCount / 10) * timeoutMs + 5000)
+      // reselect_only:只按已有结果重选,不测
+      const res = await withTimeout(fetchImpl, api(`/group/${encodeURIComponent(subTag)}/delay?url=${encodeURIComponent(url)}&timeout=${timeoutMs}&force=false&reselect_only=true`), { headers: headers() }, Math.ceil(memberCount / 10) * timeoutMs + 5000)
       return Boolean(res && res.ok)
     } catch { return false }
   }
@@ -234,6 +252,19 @@ export const createFailoverManager = ({
     return state.lanes.find((l) => l.ref === kernelNow) || null
   }
 
+  // 复查看哪几个节点:外层 selector 此刻选的那个页签(当前页签)。手动选择的页签只看用户选中的那个节点,
+  // 别的看全部有效节点;兜底拒绝 / 认不出当前页签 / 空页签都不复查
+  const recheckTargets = (state, proxies) => {
+    const parentNow = proxies[state.tag] && typeof proxies[state.tag].now === 'string' ? proxies[state.tag].now : ''
+    const lane = laneForNow(state, parentNow)
+    if (!lane || lane.mode === 'empty') return []
+    if (lane.mode === 'selector') {
+      const picked = proxies[lane.subTag] && typeof proxies[lane.subTag].now === 'string' ? proxies[lane.subTag].now : ''
+      return picked && lane.valid.includes(picked) ? [picked] : []
+    }
+    return [...lane.valid]
+  }
+
   // 跑一轮:探测 → 页签健康 → 决策 → 切换。返回摘要给日志 / 测试看
   const runRound = async (state, proxies, kernelStartedAt) => {
     const roundVersion = version
@@ -241,7 +272,6 @@ export const createFailoverManager = ({
     const s = state.settings || {}
     const url = kernelTestUrl(s.testUrl || '')
     const timeoutMs = Number(s.timeoutMs) || 5000
-    const threshold = Math.max(1, Number(s.failureThreshold) || 1)
     const restorePrimary = s.restorePrimary !== false
     const holdMs = Math.max(0, Number(s.recoveryHoldMs) || 0)
     const startedAt = now()
@@ -255,8 +285,24 @@ export const createFailoverManager = ({
     // 1. 节点探测(去重、有界并发)
     const tags = [...new Set(state.lanes.flatMap((l) => l.valid))]
     const results = new Map()
+    const ownInterval = Number(s.intervalMs) || 300_000
+    const probeInterval = (tag) => (probeCoordinator ? probeCoordinator.intervalFor(probeCoordinator.keyOf(tag, url), ownInterval) : ownInterval)
+    // 复查轮(上一轮当前页签确认失败,RECHECK_DELAY_MS 之后):当前页签的节点强制重测,不复用上一轮的失败;
+    // 别的页签照常复用间隔内的结果——复查只针对正在用的页签,不多测别处
+    const recheckRound = Boolean(state.recheckPending)
+    const forced = new Set(recheckRound ? recheckTargets(state, proxies) : [])
     if (url && tags.length) {
-      const list = await mapLimit(tags, probeConcurrency, (tag) => probeNode(tag, url, timeoutMs))
+      const at = now()
+      const list = await mapLimit(tags, probeConcurrency, async (tag) => {
+        const force = forced.has(tag)
+        // 复查:这个节点上一轮那次失败的完成时刻(内核回的 time);没有就用上一轮开始的时刻
+        const since = force ? (state.nodes[tag] && state.nodes[tag].ok === false && Number.isFinite(state.nodes[tag].at) ? state.nodes[tag].at : state.lastRoundAt || 0) : 0
+        const run = () => probeNode(tag, url, timeoutMs, probeInterval(tag), force, since)
+        const r = probeCoordinator
+          ? await probeCoordinator.request(force ? { tag, url, intervalMs: probeInterval(tag), run, force: true } : { tag, url, intervalMs: ownInterval, run })
+          : await run()
+        return r || { ok: null, at, reason: 'no-result' }
+      })
       list.forEach((r, i) => results.set(tags[i], r))
     }
     const stale = () => stopped || version !== roundVersion || states.get(state.id) !== state
@@ -265,7 +311,8 @@ export const createFailoverManager = ({
     // 探测结果进公共延迟历史(失败的记一笔超时,通过的内核自己已经记了,scheduler 同步时会看到)
     if (history) {
       try {
-        const samples = [...results].filter(([, r]) => r.ok === false).map(([name, r]) => ({ name, time: new Date(r.at).toISOString(), delay: 0 }))
+        // 复用来的(自动优选 / 内核缓存 / 之前轮次已经记过的)不再记:同一次失败只记一笔
+        const samples = [...results].filter(([, r]) => r.ok === false && !r.reused).map(([name, r]) => ({ name, time: new Date(r.at).toISOString(), delay: 0 }))
         if (samples.length) history.recordSamples(samples)
       } catch { /* 历史记不上不影响决策 */ }
     }
@@ -285,6 +332,18 @@ export const createFailoverManager = ({
         lane.health = okNodes.length ? 'up' : allFailed ? 'down' : 'unknown'
         continue
       }
+      // 手动选择的页签(内部 selector,GitHub #188):不让内核重选,就看用户选中的那个节点这轮通没通过
+      if (lane.mode === 'selector') {
+        let sub = null
+        try { sub = await fetchProxy(lane.subTag) } catch { /* 读不到就按未确认 */ }
+        if (stale()) return { skipped: 'stale' }
+        const kernelNow = sub && typeof sub.now === 'string' ? sub.now : ''
+        lane.kernelNow = kernelNow || null
+        const r = kernelNow ? results.get(kernelNow) : null
+        lane.confirmed = Boolean(kernelNow)
+        lane.health = r && r.ok === true ? 'up' : r && r.ok === false ? 'down' : 'unknown'
+        continue
+      }
       // 多节点页签:有通过的节点就让内核重选,再确认它实际选中的是通过的节点
       if (!okNodes.length) { lane.health = allFailed ? 'down' : 'unknown'; continue }
       await retestSub(lane.subTag, url, timeoutMs, lane.valid.length)
@@ -293,14 +352,18 @@ export const createFailoverManager = ({
       try { sub = await fetchProxy(lane.subTag) } catch { /* 读不到就按未确认 */ }
       const kernelNow = sub && typeof sub.now === 'string' ? sub.now : ''
       lane.kernelNow = kernelNow || null
-      // 内核可能在刚才那次组内重测里自己又测通了一个我们判失败的节点(探测偶发超时很常见):它有这轮开始
-      // 之后的新鲜结果也算确认。要重测之后再读这个节点,重测前的 /proxies 快照里没有那条新结果
+      // 并发的手动测速等显式操作可能让节点恢复;有本轮开始之后的新鲜结果也算确认。内核(1.14.1-openbox-tcp14 起)
+      // 对正在用的节点也是「不通 → 10 秒后复查」:这一轮拿到的是它的失败,内核复查通过后留着它、记了一笔更新的通过——
+      // 比这一轮的失败还新的通过同样算确认,不然要一直「未确认」到这个节点的失败结果过期
       const kernelFresh = await (async () => {
         if (!kernelNow || okNodes.includes(kernelNow)) return false
         let p = null
         try { p = await fetchProxy(kernelNow) } catch { return false }
         const h = p && Array.isArray(p.history) ? p.history[p.history.length - 1] : null
-        return Boolean(h && Number.isFinite(Date.parse(h.time)) && Date.parse(h.time) >= startedAt - 1000 && Number(h.delay) > 0)
+        const t = h ? Date.parse(h.time) : NaN
+        if (!h || !Number.isFinite(t) || !(Number(h.delay) > 0)) return false
+        const seen = results.get(kernelNow)
+        return t >= startedAt - 1000 || Boolean(seen && seen.ok === false && Number.isFinite(seen.at) && t > seen.at)
       })()
       lane.confirmed = Boolean(kernelNow && (okNodes.includes(kernelNow) || kernelFresh))
       lane.health = lane.confirmed ? 'up' : 'unknown'
@@ -345,7 +408,7 @@ export const createFailoverManager = ({
     const unknownAbove = (lane) => state.lanes.some((l) => l.health === 'unknown' && l.index < lane.index)
     const settleReorder = (why) => {
       if (!state.reorder) return
-      log(`[failover] ${state.tag}:按页签顺序重选已落定(${why})`)
+      log(`[failover] ${state.tag}:按页签顺序重选已落定（${why}）`)
       state.reorder = null
     }
     // 当前页签就是新顺序里第一个通过的:落定(或记为已判断)。决策前和切换后各看一次,切到位就当轮落定
@@ -384,7 +447,8 @@ export const createFailoverManager = ({
         if (restorePrimary && primary && current.id !== primary.id && primary.health === 'up' && state.primaryUpSince !== null && at - state.primaryUpSince >= holdMs) {
           target = primary; reason = 'restore-primary'
         }
-      } else if (current.health === 'down' && current.failStreak >= threshold) {
+      } else if (current.health === 'down' && recheckRound) {
+        // 复查仍不通:换页签
         const next = firstUp(current.id)
         if (next) { target = next; reason = 'lane-failed' } else if (!anyUnknown && state.rejectTag) { target = { id: null, ref: state.rejectTag }; reason = 'all-failed' }
       }
@@ -405,7 +469,7 @@ export const createFailoverManager = ({
         state.lastError = ''
         switched = { from: from.ref, to: nowRef, reason }
         if (reorderMove && state.reorder) state.reorder.evaluated = true
-        log(`[failover] ${state.tag}:${from.ref || '(空)'} → ${nowRef}(${reason})`)
+        log(`[failover] ${state.tag}:${from.ref || '(空)'} → ${nowRef}（${reason}）`)
       } catch (err) {
         // 切换失败:保留实际状态,下一轮再试(按顺序重选的待办也原样留着,不算已经判断过)
         state.lastError = `切换失败:${errText(err)}`
@@ -416,8 +480,13 @@ export const createFailoverManager = ({
       state.currentLaneId = target.id
       state.currentSince = at
       if (reorderMove && state.reorder) state.reorder.evaluated = true
-      log(`[failover] ${state.tag}:关联改到页签 ${laneRole(target.index)},出站不变(${reason})`)
+      log(`[failover] ${state.tag}:关联改到页签 ${laneRole(target.index)},出站不变（${reason}）`)
     }
+    // 当前页签不通(第一次)→ RECHECK_DELAY_MS 后复查(runTick 按 recheck 排下一轮)。复查通过回到正常周期;复查仍不通就换
+    // 页签,新页签从正常周期开始。没换成(候选都还未知、切换被拒)或复查本身没测出结果(未知)的,继续每 RECHECK_DELAY_MS
+    // 复查一次,不在坏页签上干等一个完整周期
+    const moved = Boolean(switched) || Boolean(target && target.id && target.ref === parentNow)
+    state.recheckPending = Boolean(current && !moved && (current.health === 'down' || (recheckRound && current.health === 'unknown')))
     settleIfDone()
     // 4. 状态
     const cur = state.currentLaneId ? laneById(state, state.currentLaneId) : null
@@ -430,16 +499,37 @@ export const createFailoverManager = ({
     state.lastRoundResult = switched ? `${switched.reason}` : 'kept'
     persist()
     if (history && kernelStartedAt !== undefined) {
-      try { history.recordFromProxies(await fetchProxies(), { kernelStartedAt, at: now() }) } catch { /* 忽略 */ }
+      try {
+        const groupIntervals = Object.fromEntries([...states.values()].flatMap((g) => {
+          const interval = Number(g.settings?.intervalMs) || 300_000
+          return [[g.tag, interval], ...g.lanes.filter((l) => l.subTag).map((l) => [l.subTag, interval])]
+        }))
+        history.recordFromProxies(await fetchProxies(), { kernelStartedAt, at: now(), groupIntervals })
+      } catch { /* 忽略 */ }
     }
     // 有页签这轮没能确认内核的选择(内核刚启动、子组自己的首轮检测还没跑完):不等整个 interval,很快再看一次
     const unconfirmed = state.lanes.some((l) => l.confirmed === false)
-    return { switched, unconfirmed, status: state.status, lanes: state.lanes.map((l) => [l.id, l.health]) }
+    return { switched, unconfirmed, recheck: state.recheckPending, status: state.status, lanes: state.lanes.map((l) => [l.id, l.health]) }
   }
 
   const runTick = async () => {
     if (!(await syncMap())) return { skipped: 'config' }
     if (!states.size) return { skipped: 'none' }
+    if (probeCoordinator) {
+      const currentOwners = new Set([...states.values()].map((g) => `failover:${g.id}`))
+      for (const id of registeredOwners) if (!currentOwners.has(id)) {
+        probeCoordinator.unregisterOwner(id)
+        registeredOwners.delete(id)
+      }
+      for (const g of states.values()) {
+        const id = `failover:${g.id}`
+        probeCoordinator.unregisterOwner(id)
+        const intervalMs = Math.max(5000, Number(g.settings?.intervalMs) || 300_000)
+        const url = kernelTestUrl(g.settings?.testUrl || '')
+        for (const lane of g.lanes) for (const tag of lane.valid) probeCoordinator.register(id, tag, url, intervalMs)
+        registeredOwners.add(id)
+      }
+    }
     const due = [...states.values()].filter((g) => !g.inFlight && now() >= g.nextRoundAt)
     if (!due.length) return { skipped: 'idle' }
     let proxies
@@ -467,7 +557,7 @@ export const createFailoverManager = ({
           if (r.skipped !== 'stale') g.nextRoundAt = now() + Math.min(10_000, intervalMs)
         } else {
           g.paused = ''
-          g.nextRoundAt = now() + (r && r.unconfirmed ? Math.min(10_000, intervalMs) : intervalMs)
+          g.nextRoundAt = now() + (r && r.recheck ? Math.min(RECHECK_DELAY_MS, intervalMs) : r && r.unconfirmed ? Math.min(10_000, intervalMs) : intervalMs)
         }
       } catch (err) {
         g.lastError = errText(err)

@@ -90,7 +90,7 @@ test('GET /api/openbox/config/preview 用 store 中现存节点组装分组', as
   }
 })
 
-test('POST /api/openbox/deploy 成功路径 → 200,持久化部署态,内核开机自启(enable)', async () => {
+test('POST /api/openbox/deploy 成功路径 → 200,持久化部署态,内核开机自启（enable）', async () => {
   const ctx = okCtx()
   const { baseUrl, store, close } = await startApp(ctx)
   try {
@@ -114,7 +114,7 @@ test('POST /api/openbox/deploy 成功路径 → 200,持久化部署态,内核开
 // 已经落盘之后。此前它们和主逻辑共用同一个 try/catch,一旦抛错,外层 catch 会把刚刚
 // 写入的成功状态(stage:'running')整个改写成 'error'——但配置其实已经部署成功、
 // 内核也已经在跑,只是"开机自启"这一件小事没标上,不该覆盖已经落盘的成功结果。
-test('POST /api/openbox/deploy 部署成功但 enableService 抛错 → 响应仍是 200/running,GET /deploy/state 也仍是 running(不被误标为 error)', async () => {
+test('POST /api/openbox/deploy 部署成功但 enableService 抛错 → 响应仍是 200/running,GET /deploy/state 也仍是 running（不被误标为 error）', async () => {
   const ctx = okCtx()
   const originalExec = ctx.exec.bind(ctx)
   ctx.exec = async (cmd, args = []) => {
@@ -141,7 +141,7 @@ test('POST /api/openbox/deploy 部署成功但 enableService 抛错 → 响应�
   }
 })
 
-test('POST /api/openbox/rollback 中 disableService 抛错 → 500 JSON(handler 级 try/catch,而不是未处理异常)', async () => {
+test('POST /api/openbox/rollback 中 disableService 抛错 → 500 JSON（handler 级 try/catch,而不是未处理异常）', async () => {
   const ctx = createMockContext({ defaultExec: { code: 0 } })
   const originalExec = ctx.exec.bind(ctx)
   ctx.exec = async (cmd, args = []) => {
@@ -213,7 +213,7 @@ test('POST /api/openbox/deploy 校验失败 → 409,给 badTags,不写正式配�
   }
 })
 
-test('POST /api/openbox/deploy 校验失败但旧内核还在跑(比如点的是重启)→ 不动开机自启', async () => {
+test('POST /api/openbox/deploy 校验失败但旧内核还在跑（比如点的是重启）→ 不动开机自启', async () => {
   const ctx = createMockContext({
     files: { [`${paths.geoDir}/geosite-cn.srs`]: 'SRS', [`${paths.geoDir}/geoip-cn.srs`]: 'SRS' },
     defaultExec: { code: 1, stderr: 'FATAL: unknown method: x' },
@@ -257,7 +257,7 @@ test('POST /api/openbox/deploy 重启失败 → 500,回滚命令出现,disable �
   }
 })
 
-test('POST /api/openbox/deploy 启动后未 running(verify 阶段)→ 500,同样 disable', async () => {
+test('POST /api/openbox/deploy 启动后未 running（verify 阶段）→ 500,同样 disable', async () => {
   const ctx = createMockContext({
     files: { [paths.singbox]: '#!/bin/sh\n', [TUN_DEVICE]: '', [`${paths.geoDir}/geosite-cn.srs`]: 'SRS', [`${paths.geoDir}/geoip-cn.srs`]: 'SRS' },
     execResults: { '/etc/init.d/openbox status': { code: 1, stdout: 'inactive' } },
@@ -274,7 +274,7 @@ test('POST /api/openbox/deploy 启动后未 running(verify 阶段)→ 500,同样
   }
 })
 
-test('POST /api/openbox/deploy 落盘前步骤(mkdirp)抛出异常 → 500 JSON(不是默认 HTML 错误页),部署态标记 error', async () => {
+test('POST /api/openbox/deploy 落盘前步骤（mkdirp）抛出异常 → 500 JSON（不是默认 HTML 错误页）,部署态标记 error', async () => {
   const ctx = okCtx()
   // mkdirp 在 deployConfig 里排在"冲突检测"之后、"落盘"之前——这一段目前没有被
   // deployConfig 内部的 try/catch 覆盖(那段只包住落盘之后的步骤),异常会直接冒泡。
@@ -336,7 +336,7 @@ test('POST /api/openbox/rollback → 恢复直连并 disable 内核开机自启'
   }
 })
 
-test('POST /api/openbox/rollback 命令全失败:不抛、200,但 ok:false 且逐步列出失败(含关自启)', async () => {
+test('POST /api/openbox/rollback 命令全失败:不抛、200,但 ok:false 且逐步列出失败（含关自启）', async () => {
   const ctx = createMockContext({ defaultExec: { code: 1, stderr: 'boom' } })
   const { baseUrl, close } = await startApp(ctx)
   try {
@@ -353,7 +353,7 @@ test('POST /api/openbox/rollback 命令全失败:不抛、200,但 ok:false 且�
 
 // 有一类错误 `sing-box check` 查不出来、进程起来之后才 FATAL,procd 随即把它拉起来
 // 形成死循环。只看第一眼正好撞上"刚起来还没死"的瞬间,会报成"启动成功"。
-test('POST /api/openbox/deploy 起来之后又死了(死循环)→ verify 失败,带上内核最后那句 FATAL', async () => {
+test('POST /api/openbox/deploy 起来之后又死了（死循环）→ verify 失败,带上内核最后那句 FATAL', async () => {
   const statuses = [
     { code: 0, stdout: 'running' }, // 第一眼:刚起来
     { code: 1, stdout: 'not running' }, // 等几秒再看:已经崩了

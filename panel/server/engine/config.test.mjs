@@ -1,8 +1,11 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { buildConfig } from './config.mjs'
+import { FLIP_FALLBACK_TAG, andRule, flipFlagTag } from './flip.mjs'
+import { buildConfig, buildConfigDetailed } from './config.mjs'
 import { createNode } from './node-model.mjs'
 import { cidrContains } from '../system/local-subnets.mjs'
+import { fakeIpCachePath } from './dns.mjs'
+import { noDomainGuard, splitNoDomainGuard } from './routing-model.mjs'
 
 const nodes = [
   createNode({ tag: '美国-01', type: 'shadowsocks', server: 'a.com', server_port: 8388, fields: { method: 'aes-256-gcm', password: 'pw' }, source: 'clash' }),
@@ -40,7 +43,7 @@ test('ipv6 关:tun address 仅 v4', () => {
   assert.equal(c.dns.strategy, 'ipv4_only')
 })
 
-test('兜底改名后 route.final、DNS 和 selector 使用同一名称(GitHub #46)', () => {
+test('兜底改名后 route.final、DNS 和 selector 使用同一名称（GitHub #46）', () => {
   for (const fallbackName of ['漏网之鱼', 'Fallback']) {
     const c = buildConfig({ nodes, regionGroups, profile: {
       ...profile,
@@ -130,7 +133,7 @@ test('内置直连改名后,内网直连规则和空组占位都跟着新名字'
   assert.deepEqual(c.outbounds.find((o) => o.tag === '空组').outbounds, ['国内直出'])
 })
 
-test('tun:私网 / 链路本地 / 组播目标排除在 TUN 之外(ipv6 开时含 v6 范围),UDP 会话 60 秒超时', async () => {
+test('tun:私网 / 链路本地 / 组播目标排除在 TUN 之外（ipv6 开时含 v6 范围）,UDP 会话 60 秒超时', async () => {
   const c4 = buildConfig({ nodes, regionGroups, profile: { ...profile, ipv6: false } })
   const ex4 = c4.inbounds[0].route_exclude_address
   for (const p of ['10.0.0.0/8', '100.64.0.0/10', '169.254.0.0/16', '192.168.0.0/16', '224.0.0.0/4']) assert.ok(ex4.includes(p), p)
@@ -158,7 +161,7 @@ test('tun:本机接口网段从私网排除表里挖出来,局域网发给路由
   assert.ok(ex.some((x) => cidrContains(x, '192.168.9.9')), '同属 192.168/16 但不是本机网段的仍然排除')
 })
 
-test('tun:没有 auto_redirect(禁用模式 / 关掉 autoRedirect)时本机接口网段必须整段排除,否则路由器回包被吞、整机失联', async () => {
+test('tun:没有 auto_redirect（禁用模式 / 关掉 autoRedirect）时本机接口网段必须整段排除,否则路由器回包被吞、整机失联', async () => {
   const { cidrContains } = await import('../system/local-subnets.mjs')
   const subnets = ['192.168.3.0/24', '172.17.0.0/16', '172.19.0.0/30']
   const off = buildConfig({ nodes, regionGroups, profile: { ...profile, ipv6: false, tun: { autoRedirect: true }, dns: { ...profile.dns, mode: 'off' } }, localSubnets: subnets })
@@ -179,14 +182,14 @@ test('tun.autoRedirect 默认关闭,可开启', () => {
   assert.equal(c2.inbounds[0].auto_redirect, true)
 })
 
-test('dns.mode=hijack(默认)生成全局 hijack-dns 路由规则;dns-in 入站三种模式都有且监听所有地址', () => {
+test('dns.mode=hijack（默认）生成全局 hijack-dns 路由规则;dns-in 入站三种模式都有且监听所有地址', () => {
   const c = buildConfig({ nodes, regionGroups, profile })
   assert.ok(c.route.rules.some((r) => r.action === 'hijack-dns' && r.protocol === 'dns'))
   const dnsIn = c.inbounds.find((i) => i.tag === 'dns-in')
   assert.deepEqual(dnsIn, { type: 'direct', tag: 'dns-in', listen: '::', listen_port: 7853 })
 })
 
-test('dns.mode=off:不改写任何 DNS(只劫持 dns-in 自己收到的查询),保留 dns-in 入站,且即使开了 tun.autoRedirect 也不写 auto_redirect', () => {
+test('dns.mode=off:不改写任何 DNS（只劫持 dns-in 自己收到的查询）,保留 dns-in 入站,且即使开了 tun.autoRedirect 也不写 auto_redirect', () => {
   const c = buildConfig({ nodes, regionGroups, profile: { ...profile, tun: { autoRedirect: true }, dns: { ...profile.dns, mode: 'off' } } })
   const hijacks = c.route.rules.filter((r) => r.action === 'hijack-dns')
   assert.deepEqual(hijacks, [{ inbound: ['dns-in'], action: 'hijack-dns' }])
@@ -196,7 +199,7 @@ test('dns.mode=off:不改写任何 DNS(只劫持 dns-in 自己收到的查询),�
   assert.ok(!c.outbounds.some((o) => o.tag === 'dnsmasq'))
 })
 
-test('dns.mode=dnsmasq: hijack 规则仅限 dns-in 入站(不自环),DNS 入站监听 :7853(开 v6 时双栈)', () => {
+test('dns.mode=dnsmasq: hijack 规则仅限 dns-in 入站（不自环）,DNS 入站监听 :7853（开 v6 时双栈）', () => {
   const c = buildConfig({ nodes, regionGroups, profile: { ...profile, dns: { ...profile.dns, mode: 'dnsmasq' } } })
   const hijack = c.route.rules.find((r) => r.action === 'hijack-dns')
   assert.ok(hijack)
@@ -225,14 +228,47 @@ test('订阅有多个地址时每个地址的主机名都直连;老记录只有 
   assert.deepEqual(hosts.domains, ['a.example.com', 'b.example.com', 'old.example.com'])
 })
 
-test('directHostCidrs:部署时解析出来的节点 IP 并进直连规则的 ip_cidr(去重),关掉直连开关就不生成', () => {
-  const c = buildConfig({ nodes, regionGroups, profile, directHostCidrs: ['38.47.107.167/32', '38.47.107.167/32', '2001:db8::5/128'] })
-  const rule = c.route.rules.find((r) => r.outbound === '直连' && Array.isArray(r.domain))
-  assert.ok(rule, '应有节点站点直连规则')
-  assert.ok(rule.ip_cidr.includes('38.47.107.167/32'))
-  assert.equal(rule.ip_cidr.filter((x) => x === '38.47.107.167/32').length, 1)
-  const off = buildConfig({ nodes, regionGroups, profile: { ...profile, directForNodes: false }, directHostCidrs: ['38.47.107.167/32'] })
-  assert.ok(!off.route.rules.some((r) => Array.isArray(r.ip_cidr) && r.ip_cidr.includes('38.47.107.167/32')))
+test('directHostCidrs:部署时解析出来的节点 IP 并进直连那份规则集的内容（去重）;配置里只引用两份规则集(地址变了只换文件,不重启内核);关掉直连开关就都不生成', () => {
+  const { config: c, directHosts } = buildConfigDetailed({ nodes, regionGroups, profile, directHostCidrs: ['38.47.107.167/32', '38.47.107.167/32', '2001:db8::5/128'] })
+  const rule = c.route.rules.find((r) => r.outbound === '直连' && Array.isArray(r.rule_set) && r.rule_set.includes('obnode-direct'))
+  assert.deepEqual(rule, { rule_set: ['obnode-direct', 'obnode-direct-ip'], outbound: '直连' }, '应有节点站点直连规则,只引用规则集')
+  assert.ok(!JSON.stringify(c.route.rules).includes('38.47.107.167'), '地址不写死在规则里')
+  assert.deepEqual(c.route.rule_set.filter((r) => r.tag.startsWith('obnode-')).map((r) => [r.tag, r.format, r.path]), [
+    ['obnode-direct', 'source', '/opt/open-box/data/rulesets/obnode-direct.json'],
+    ['obnode-direct-ip', 'source', '/opt/open-box/data/rulesets/obnode-direct-ip.json'],
+  ])
+  assert.ok(c.dns.rules.some((r) => Array.isArray(r.rule_set) && r.rule_set[0] === 'obnode-direct' && r.server === 'dns-direct'), 'DNS 按域名那份交直连侧解析')
+  assert.ok(directHosts.cidrs.includes('38.47.107.167/32'))
+  assert.equal(directHosts.cidrs.filter((x) => x === '38.47.107.167/32').length, 1)
+  const off = buildConfigDetailed({ nodes, regionGroups, profile: { ...profile, directForNodes: false }, directHostCidrs: ['38.47.107.167/32'] })
+  assert.equal(off.directHosts, null)
+  assert.ok(!JSON.stringify(off.config).includes('obnode-direct'))
+  // 规则页推算 / 手机 App:地址直接写进规则
+  const inline = buildConfig({ nodes, regionGroups, profile, directHostCidrs: ['38.47.107.167/32'], inlineDirectHosts: true })
+  const inlineRule = inline.route.rules.find((r) => r.outbound === '直连' && Array.isArray(r.domain))
+  assert.ok(inlineRule.ip_cidr.includes('38.47.107.167/32'))
+  assert.ok(!JSON.stringify(inline).includes('obnode-direct'))
+})
+
+test('推算用的内联写法(aligned)地址是空的也占一条永远不会命中的规则,和部署的配置条数一样', () => {
+  const empty = { ...profile, directForNodes: true }
+  const deployed = buildConfig({ nodes: [], regionGroups: [], profile: empty })
+  const aligned = buildConfig({ nodes: [], regionGroups: [], profile: empty, inlineDirectHosts: 'aligned' })
+  assert.equal(aligned.route.rules.length, deployed.route.rules.length)
+  assert.equal(aligned.dns.rules.length, deployed.dns.rules.length)
+  assert.ok(JSON.stringify(aligned.route.rules).includes('obnode-direct.invalid'))
+  const phone = buildConfig({ nodes: [], regionGroups: [], profile: empty, inlineDirectHosts: true })
+  assert.ok(!JSON.stringify(phone).includes('obnode-direct'), '手机 App 的配置不带占位')
+})
+
+test('节点站点直连不收 Cloudflare 的共享地址(#304):优选 IP 节点和解析到 Cloudflare 的节点域名只按域名直连,不按 IP', () => {
+  const cfNodes = [...nodes, { ...nodes[0], tag: '优选-01', server: '104.18.32.47' }]
+  const { config: c, directHosts } = buildConfigDetailed({ nodes: cfNodes, regionGroups, profile, directHostCidrs: ['172.67.1.2/32', '38.47.107.167/32', '2606:4700::6810:1/128'] })
+  assert.ok(directHosts.cidrs.includes('38.47.107.167/32'), '普通节点 IP 照旧直连')
+  for (const cf of ['104.18.32.47/32', '172.67.1.2/32', '2606:4700::6810:1/128']) {
+    assert.ok(!directHosts.cidrs.includes(cf), `${cf} 是 Cloudflare 的共享地址,不能按 IP 直连`)
+    assert.ok(!JSON.stringify(c.route.rules.filter((r) => r.action === 'bypass')).includes(cf.split('/')[0]), `${cf} 也不能进首包预判放行`)
+  }
 })
 
 test('防回环:目标是 tun 自己网段的连接直接拒绝,且排在 ip_is_private 之前', () => {
@@ -267,14 +303,14 @@ test('出站 tag 撞名 → 生成配置时直接报人话,而不是让内核 du
   assert.throws(() => buildConfig({ nodes, regionGroups, profile: policyClash }), /出站名称重复:「美国-01」/)
 })
 
-test('dns-in 监听地址:开 IPv6 双栈 ::(AdGuard 用路由器 v6 地址当上游也到得了),关 IPv6 只监听 0.0.0.0', () => {
+test('dns-in 监听地址:开 IPv6 双栈 ::（AdGuard 用路由器 v6 地址当上游也到得了）,关 IPv6 只监听 0.0.0.0', () => {
   const on = buildConfig({ nodes, regionGroups, profile: { ...profile, ipv6: true } }).inbounds.find((i) => i.tag === 'dns-in')
   const off = buildConfig({ nodes, regionGroups, profile: { ...profile, ipv6: false } }).inbounds.find((i) => i.tag === 'dns-in')
   assert.equal(on.listen, '::')
   assert.equal(off.listen, '0.0.0.0')
 })
 
-test('回归:任何 DNS 规则都不引用含 IP 的规则集(geoip-* / 规则集链接的 -ip 那份),路由规则照旧两边都引用', () => {
+test('回归:任何 DNS 规则都不引用含 IP 的规则集（geoip-* / 规则集链接的 -ip 那份）,路由规则照旧两边都引用', () => {
   const tag = 'list-' + (() => { let h = 0x811c9dc5; for (const ch of 'https://x.test/Check.list') { h ^= ch.charCodeAt(0); h = Math.imul(h, 0x01000193) >>> 0 } return h.toString(16).padStart(8, '0') })()
   const c = buildConfig({
     nodes,
@@ -294,12 +330,16 @@ test('回归:任何 DNS 规则都不引用含 IP 的规则集(geoip-* / 规则�
       },
     },
   })
-  const dnsTags = c.dns.rules.flatMap((r) => [].concat(r.rule_set || []))
+  // 成对规则(热切换)里的条件在 logical 的子规则里,一并收;开关规则集本身不算
+  const tagsOf = (r) => [...[].concat(r.rule_set || []), ...(Array.isArray(r.rules) ? r.rules.flatMap(tagsOf) : [])]
+  const dnsTags = c.dns.rules.flatMap(tagsOf).filter((t) => !t.startsWith('obflip-'))
   assert.ok(dnsTags.length > 0)
   assert.ok(dnsTags.every((t) => !t.startsWith('geoip-') && !t.endsWith('-ip')), `DNS 规则里混进了含 IP 的规则集:${dnsTags.join(',')}`)
-  assert.deepEqual(c.route.rules.find((r) => r.outbound === 'Netflix').rule_set, ['geosite-netflix', 'geoip-netflix'])
-  assert.deepEqual(c.route.rules.find((r) => r.outbound === 'Speed').rule_set, [tag, `${tag}-ip`])
-  assert.deepEqual(c.dns.rules.find((r) => r.server === 'dns-direct' && r.rule_set)?.rule_set, ['geosite-cn'])
+  // 路由规则两边都引用:看域名的一条、看 IP 的一条(带「连接没有域名」的前提)
+  const partsOf = (name) => c.route.rules.filter((r) => r.outbound === name).map((r) => splitNoDomainGuard(r)).map((x) => [x.rule.rule_set, x.noDomain])
+  assert.deepEqual(partsOf('Netflix'), [[['geosite-netflix'], false], [['geoip-netflix'], true]])
+  assert.deepEqual(partsOf('Speed'), [[[tag], false], [[`${tag}-ip`], true]])
+  assert.ok(c.dns.rules.some((r) => r.server === 'dns-direct' && JSON.stringify(r.rule_set) === '["geosite-cn"]'), '国内的直连支只引用域名那份')
 })
 
 // ---------- 第一层整改:入口排除表与原生旁路 ----------
@@ -314,7 +354,7 @@ const firstLayerProfile = (over = {}) => ({
   ...over,
 })
 
-test('前置自定义分流把私网段送去节点时,这段要从入口排除表里挖出来,否则永远到不了那条规则(审核 B5)', () => {
+test('前置自定义分流把私网段送去节点时,这段要从入口排除表里挖出来,否则永远到不了那条规则（审核 B5）', () => {
   const c = buildConfig({
     nodes, regionGroups, userGroups: firstLayerGroups, localSubnets: subnets,
     profile: firstLayerProfile({ routing: { fallbackDefault: 'direct', policies: [], custom: { rules: [
@@ -330,10 +370,11 @@ test('前置自定义分流把私网段送去节点时,这段要从入口排除�
   assert.ok(ex.some((x) => cidrContains(x, '10.88.0.1')), '直连的私网段照旧排除')
   assert.ok(ex.some((x) => cidrContains(x, '10.99.0.1')), '出口不存在的不挖')
   assert.ok(ex.some((x) => cidrContains(x, '10.1.0.1')), '别的 10/8 仍然排除')
-  assert.ok(c.route.rules.some((r) => r.ip_cidr && r.ip_cidr[0] === '10.77.0.0/16' && r.outbound === '香港-自动'))
+  // IP 只管 IP:这一行带「连接没有域名」的前提
+  assert.ok(c.route.rules.some((r) => { const x = splitNoDomainGuard(r); return x.noDomain && x.rule.ip_cidr && x.rule.ip_cidr[0] === '10.77.0.0/16' && x.rule.outbound === '香港-自动' }))
 })
 
-test('dnsmasq 转发模式不再把本机网段挖出排除表:局域网发给路由器的 DNS 在入口就 return,不进内核绕一圈(审核 A2);劫持模式照旧要挖', () => {
+test('dnsmasq 转发模式不再把本机网段挖出排除表:局域网发给路由器的 DNS 在入口就 return,不进内核绕一圈（审核 A2）;劫持模式照旧要挖', () => {
   const dnsmasq = buildConfig({ nodes, regionGroups, userGroups: firstLayerGroups, localSubnets: subnets, profile: firstLayerProfile() })
   assert.equal(dnsmasq.inbounds[0].auto_redirect, true)
   assert.ok(dnsmasq.inbounds[0].route_exclude_address.some((x) => cidrContains(x, '192.168.1.1')), 'dnsmasq 模式:本机网段留在排除表里')
@@ -343,24 +384,62 @@ test('dnsmasq 转发模式不再把本机网段挖出排除表:局域网发给�
   for (const c of [dnsmasq, hijack]) assert.ok(!c.inbounds[0].route_exclude_address.some((x) => cidrContains(x, '172.19.0.2')))
 })
 
-test('原生旁路:走直连的站点集里的 geoip 集合写进 route_exclude_address_set,并且那个集合在 route.rule_set 里登记过;条件不满足就不写(审核 A1)', () => {
-  const on = buildConfig({ nodes, regionGroups, userGroups: firstLayerGroups, localSubnets: subnets, profile: firstLayerProfile() })
-  assert.deepEqual(on.inbounds[0].route_exclude_address_set, ['geoip-cn'])
-  assert.ok(on.route.rule_set.some((r) => r.tag === 'geoip-cn'))
-  // 有前置自定义分流 → 不写
-  const custom = buildConfig({ nodes, regionGroups, userGroups: firstLayerGroups, localSubnets: subnets, profile: firstLayerProfile({ routing: { ...firstLayerProfile().routing, custom: { rules: [{ type: 'domainSuffix', value: 'a.cn', outbound: '美国' }] } } }) })
-  assert.equal(custom.inbounds[0].route_exclude_address_set, undefined)
-  // 走代理的终端分流 → 不写;指向直连(终端分流存的是真实出站名)的不妨碍
-  const cr = buildConfig({ nodes, regionGroups, userGroups: firstLayerGroups, localSubnets: subnets, profile: firstLayerProfile({ clientRoutes: [{ id: 'a', name: 'a', sources: ['192.168.1.9'], outbound: '香港-自动' }] }) })
-  assert.equal(cr.inbounds[0].route_exclude_address_set, undefined)
-  const crDirect = buildConfig({ nodes, regionGroups, userGroups: firstLayerGroups, localSubnets: subnets, profile: firstLayerProfile({ clientRoutes: [{ id: 'a', name: 'a', sources: ['192.168.1.9'], outbound: '直连' }] }) })
-  assert.deepEqual(crDirect.inbounds[0].route_exclude_address_set, ['geoip-cn'])
-  // 代理页把「国内」切到代理(selections)→ 不写
-  const flipped = buildConfig({ nodes, regionGroups, userGroups: firstLayerGroups, localSubnets: subnets, profile: firstLayerProfile(), selections: { '国内': '香港-自动' } })
-  assert.equal(flipped.inbounds[0].route_exclude_address_set, undefined)
+test('原生旁路 · 有 nft 重定向:入口旁路是静态候选表——每个 geoip 一份内容可换的动态集,配置不随类别 / 条件变(此刻放不放满由部署 / 翻面流程写文件决定);站点集自己的规则仍引用原集合', () => {
+  const build = (over, selections) => buildConfig({ nodes, regionGroups, userGroups: firstLayerGroups, localSubnets: subnets, profile: firstLayerProfile(over), ...(selections ? { selections } : {}) })
+  const variants = [
+    build(),
+    build({ routing: { ...firstLayerProfile().routing, custom: { rules: [{ type: 'domainSuffix', value: 'a.com', outbound: '香港-自动' }] } } }),
+    build({ clientRoutes: [{ id: 'a', name: 'a', sources: ['192.168.1.9'], outbound: '香港-自动' }] }),
+    build({}, { '国内': '香港-自动' }),
+  ]
+  for (const c of variants) {
+    assert.deepEqual(c.inbounds[0].route_exclude_address_set, ['obflip-byp-geoip-cn'])
+    const entry = c.route.rule_set.find((r) => r.tag === 'obflip-byp-geoip-cn')
+    assert.equal(entry.format, 'binary')
+    assert.match(entry.path, /\/flip\/obflip-byp-geoip-cn\.srs$/)
+    assert.ok(c.route.rule_set.some((r) => r.tag === 'geoip-cn'), '原集合照旧登记')
+    assert.deepEqual(c.route.rules.filter((r) => r.outbound === '国内').map((r) => splitNoDomainGuard(r).rule.rule_set), [['geosite-cn'], ['geoip-cn']])
+    // 白名单那一侧同时挂着:固定三份 + 每个 geoip 候选一份"必须进内核"的动态集,同样不随类别 / 条件变
+    assert.deepEqual(c.inbounds[0].route_address_set, ['obflip-need-all', 'obflip-need-fakeip', 'obflip-need-cidr', 'obflip-need-geoip-cn'])
+    for (const tag of c.inbounds[0].route_address_set) {
+      const entry = c.route.rule_set.find((r) => r.tag === tag)
+      assert.ok(entry && entry.type === 'local' && entry.format === 'binary' && entry.path.endsWith(`/flip/${tag}.srs`), tag)
+    }
+  }
 })
 
-test('例外挖洞永远不挖本机网段 / tun / 回环 / 链路本地:10.0.0.0/8 → 节点 时 LAN 10.0.0.0/24 仍在排除表里,纯 tun 模式管理通道不断(复审 R6a)', () => {
+test('原生旁路 · 纯 tun(没有 nft 重定向):集合是编进路由表的,换不了,维持静态写法——走直连的站点集里的 geoip 集合写进 route_exclude_address_set;条件不满足就不写（审核 A1）', () => {
+  const pure = (over = {}) => firstLayerProfile({ tun: { autoRedirect: false }, ...over })
+  const build = (prof, selections) => buildConfig({ nodes, regionGroups, userGroups: firstLayerGroups, localSubnets: subnets, profile: prof, ...(selections ? { selections } : {}) })
+  const on = build(pure())
+  assert.deepEqual(on.inbounds[0].route_exclude_address_set, ['geoip-cn'])
+  assert.equal(on.inbounds[0].route_address_set, undefined, '纯 tun 没有白名单那一侧')
+  assert.ok(on.route.rule_set.some((r) => r.tag === 'geoip-cn'))
+  assert.ok(!on.route.rule_set.some((r) => r.tag.startsWith('obflip-byp-')), '纯 tun 不建动态集')
+  // 有前置自定义分流 → 不写
+  assert.equal(build(pure({ routing: { ...firstLayerProfile().routing, custom: { rules: [{ type: 'domainSuffix', value: 'a.com', outbound: '香港-自动' }] } } })).inbounds[0].route_exclude_address_set, undefined)
+  // 走代理的终端分流 → 不写;指向直连(终端分流存的是真实出站名)的不妨碍
+  assert.equal(build(pure({ clientRoutes: [{ id: 'a', name: 'a', sources: ['192.168.1.9'], outbound: '香港-自动' }] })).inbounds[0].route_exclude_address_set, undefined)
+  assert.deepEqual(build(pure({ clientRoutes: [{ id: 'a', name: 'a', sources: ['192.168.1.9'], outbound: '直连' }] })).inbounds[0].route_exclude_address_set, ['geoip-cn'])
+  // 代理页把「国内」切到代理(selections)→ 不写
+  assert.equal(build(pure(), { '国内': '香港-自动' }).inbounds[0].route_exclude_address_set, undefined)
+})
+
+// GitHub #225:以前纯 tun 把裁剪过的集合整份丢掉,默认配置的 geoip-cn / geoip-private 都是裁剪过的,等于一份都没旁路
+test('原生旁路 · 纯 tun + 核对过的裁剪集合:裁剪过的引用部署时编好的 obflip-byp-* 文件,原样的直接引用 geoip-*;仍没有白名单那一侧', () => {
+  const pure = firstLayerProfile({ tun: { autoRedirect: false } })
+  const build = (nativeBypass) => buildConfig({ nodes, regionGroups, userGroups: firstLayerGroups, localSubnets: subnets, profile: pure, nativeBypass })
+  const trimmed = build({ enabled: true, sets: ['geoip-cn'], trimmed: { 'geoip-cn': { cidrs: ['1.0.1.0/24'], removed: ['x'], original: 2 } }, pending: [], reason: '' })
+  assert.deepEqual(trimmed.inbounds[0].route_exclude_address_set, ['obflip-byp-geoip-cn'])
+  const entry = trimmed.route.rule_set.find((r) => r.tag === 'obflip-byp-geoip-cn')
+  assert.ok(entry && entry.type === 'local' && entry.format === 'binary' && entry.path.endsWith('/flip/obflip-byp-geoip-cn.srs'))
+  assert.equal(trimmed.inbounds[0].route_address_set, undefined)
+  const whole = build({ enabled: true, sets: ['geoip-cn'], trimmed: {}, pending: [], reason: '' })
+  assert.deepEqual(whole.inbounds[0].route_exclude_address_set, ['geoip-cn'])
+  assert.ok(!whole.route.rule_set.some((r) => r.tag.startsWith('obflip-byp-')))
+})
+
+test('例外挖洞永远不挖本机网段 / tun / 回环 / 链路本地:10.0.0.0/8 → 节点 时 LAN 10.0.0.0/24 仍在排除表里,纯 tun 模式管理通道不断（复审 R6a）', () => {
   for (const autoRedirect of [false, true]) {
     const c = buildConfig({
       nodes, regionGroups, userGroups: firstLayerGroups, localSubnets: ['10.0.0.0/24'],
@@ -368,13 +447,13 @@ test('例外挖洞永远不挖本机网段 / tun / 回环 / 链路本地:10.0.0.
     })
     const ex = c.inbounds[0].route_exclude_address
     assert.ok(ex.some((x) => cidrContains(x, '10.0.0.209')), `autoRedirect=${autoRedirect}:LAN 里的终端必须还在排除表里`)
-    assert.ok(ex.some((x) => cidrContains(x, '172.19.0.2')) === false, 'tun 网段照旧挖出来(内核自己要用)')
+    assert.ok(ex.some((x) => cidrContains(x, '172.19.0.2')) === false, 'tun 网段照旧挖出来（内核自己要用）')
     assert.ok(!ex.some((x) => cidrContains(x, '10.77.0.1')), '10/8 里 LAN 之外的部分才挖出来送节点')
-    assert.ok(c.route.rules.some((r) => r.ip_cidr && r.ip_cidr[0] === '10.0.0.0/8'))
+    assert.ok(c.route.rules.map((r) => splitNoDomainGuard(r).rule).some((r) => r.ip_cidr && r.ip_cidr[0] === '10.0.0.0/8'))
   }
 })
 
-test('例外规则比排除段还大(10.0.0.0/7 盖住 10/8)也要挖:看的是有没有交集,不是谁包含谁(复审 R6b)', () => {
+test('例外规则比排除段还大（10.0.0.0/7 盖住 10/8）也要挖:看的是有没有交集,不是谁包含谁（复审 R6b）', () => {
   const c = buildConfig({
     nodes, regionGroups, userGroups: firstLayerGroups, localSubnets: ['192.168.3.0/24'],
     profile: firstLayerProfile({ routing: { fallbackDefault: 'direct', policies: [], custom: { rules: [{ type: 'ipCidr', value: '10.0.0.0/7', outbound: '香港-自动' }] } } }),
@@ -385,24 +464,39 @@ test('例外规则比排除段还大(10.0.0.0/7 盖住 10/8)也要挖:看的是�
   assert.ok(ex.some((x) => cidrContains(x, '172.20.0.1')), '别的私网段照旧排除')
 })
 
-test('FakeIP 原型:cache_file 存占位映射;开了 IPv6 时把 fc00::/18 从 tun 排除表挖出来;部署给的旁路结论优先于纯函数(第三轮 阶段 3)', () => {
+test('FakeIP 原型:cache_file 存占位映射;开了 IPv6 时把 fc00::/18 从 tun 排除表挖出来;部署给的旁路结论优先于纯函数（第三轮 阶段 3）', () => {
   const on = buildConfig({ nodes, regionGroups, userGroups: firstLayerGroups, localSubnets: subnets, profile: firstLayerProfile({ dns: { split: true, mode: 'dnsmasq', direct: '223.5.5.5', proxy: '1.1.1.1', fakeIpForProxy: true } }) })
   assert.equal(on.experimental.cache_file.store_fakeip, true)
   assert.ok(on.dns.servers.some((s) => s.type === 'fakeip'))
   const ex6 = on.inbounds[0].route_exclude_address
+  assert.ok(!ex6.some((x) => cidrContains(x, '198.19.0.1')), '新的 IPv4 占位池必须进入 TUN')
   assert.ok(!ex6.some((x) => cidrContains(x, 'fc00::1')), 'v6 占位段要挖出来,不然走代理域名的 v6 连接在入口就被放走')
   assert.ok(ex6.some((x) => cidrContains(x, 'fd00::1')), 'fc00::/7 剩下的部分还在排除表里')
   const off = buildConfig({ nodes, regionGroups, userGroups: firstLayerGroups, localSubnets: subnets, profile: firstLayerProfile() })
   assert.equal(off.experimental.cache_file.store_fakeip, false)
   assert.ok(off.inbounds[0].route_exclude_address.some((x) => cidrContains(x, 'fc00::1')))
   // 部署时带来的结论(做过重叠核对)直接用;空集合就不写字段
-  const given = buildConfig({ nodes, regionGroups, userGroups: firstLayerGroups, localSubnets: subnets, profile: firstLayerProfile(), nativeBypass: { enabled: true, sets: ['geoip-cn', 'geoip-hk'], reason: '' } })
+  // (纯 tun 才走静态写法;有 nft 重定向时是动态集,见上面「原生旁路」两条)
+  const given = buildConfig({ nodes, regionGroups, userGroups: firstLayerGroups, localSubnets: subnets, profile: firstLayerProfile({ tun: { autoRedirect: false } }), nativeBypass: { enabled: true, sets: ['geoip-cn', 'geoip-hk'], reason: '' } })
   assert.deepEqual(given.inbounds[0].route_exclude_address_set, ['geoip-cn', 'geoip-hk'])
-  const none = buildConfig({ nodes, regionGroups, userGroups: firstLayerGroups, localSubnets: subnets, profile: firstLayerProfile(), nativeBypass: { enabled: false, sets: [], reason: 'x' } })
+  const none = buildConfig({ nodes, regionGroups, userGroups: firstLayerGroups, localSubnets: subnets, profile: firstLayerProfile({ tun: { autoRedirect: false } }), nativeBypass: { enabled: false, sets: [], reason: 'x' } })
   assert.equal(none.inbounds[0].route_exclude_address_set, undefined)
 })
 
-test('IPv6 分层(第三轮 阶段 5):ipv6 开 + ipv6Proxy=ipv4 时按此刻的选择给代理出口插 v6 拒绝、DNS 代理规则只解析 A;站点集切到直连就不插;老开关语义不变', () => {
+test('FakeIP 换池使用独立缓存并保留当前手动选择，禁用时沿用普通缓存', () => {
+  const args = { nodes: [], userGroups: [], cacheFilePath: '/tmp/custom-cache.db', profile: { ipv6: false, dns: { fakeIpForProxy: true }, routing: { fallbackDefault: 'direct', policies: [] } }, selections: { 其他: '拒绝' } }
+  const on = buildConfig(args)
+  assert.equal(on.experimental.cache_file.path, fakeIpCachePath(args.cacheFilePath))
+  assert.match(on.experimental.cache_file.path, /198_19_0_0_16/)
+  assert.notEqual(on.experimental.cache_file.path, args.cacheFilePath)
+  assert.equal(on.outbounds.find((o) => o.tag === '其他').default, '拒绝')
+  const invalid = buildConfig({ ...args, selections: { 其他: '已删除的节点' } })
+  assert.equal(invalid.outbounds.find((o) => o.tag === '其他').default, '直连')
+  const off = buildConfig({ ...args, profile: { ...args.profile, dns: { fakeIpForProxy: false } } })
+  assert.equal(off.experimental.cache_file.path, args.cacheFilePath)
+})
+
+test('IPv6 分层（第三轮 阶段 5）:ipv6 开 + ipv6Proxy=ipv4 时,出口是站点集的规则前恒定有一条挂着开关的 v6 拒绝、DNS 的代理支只解析 A——配置与此刻的选择无关,生效与否看开关;node / 关着时一条都没有', () => {
   const p = (over = {}) => firstLayerProfile({
     ipv6: true, ipv6Proxy: 'ipv4',
     routing: { fallbackDefault: 'direct', policies: [
@@ -411,33 +505,41 @@ test('IPv6 分层(第三轮 阶段 5):ipv6 开 + ipv6Proxy=ipv4 时按此刻的�
     ] },
     ...over,
   })
+  const G = flipFlagTag({ id: 'g' })
+  const CN = flipFlagTag({ id: 'cn' })
   const split = buildConfig({ nodes, regionGroups, userGroups: firstLayerGroups, localSubnets: subnets, profile: p() })
   const g = split.route.rules.findIndex((r) => r.outbound === 'Google')
-  assert.deepEqual(split.route.rules[g - 1], { rule_set: ['geosite-google', 'geoip-google'], ip_version: 6, action: 'reject' })
-  assert.ok(!split.route.rules.some((r) => r.ip_version === 6 && r.rule_set && r.rule_set.includes('geoip-cn')), '直连站点集前不插')
-  assert.ok(!split.route.rules.some((r) => r.ip_version === 6 && !r.rule_set), '兜底直连:没有裸 v6 拒绝')
-  const gi = split.dns.rules.findIndex((r) => r.server === 'dns-policy-0')
-  assert.deepEqual(split.dns.rules[gi - 1], { rule_set: ['geosite-google'], query_type: ['AAAA'], action: 'predefined', rcode: 'NOERROR' })
-  assert.deepEqual(split.dns.rules[gi], { rule_set: ['geosite-google'], server: 'dns-policy-0' })
+  assert.deepEqual(split.route.rules[g - 1], andRule([{ rule_set: ['geosite-google'] }, { rule_set: [G] }, { ip_version: 6 }], { action: 'reject' }))
+  // 看 IP 的那份和它的 v6 拒绝都带「连接没有域名」的前提
+  assert.deepEqual(split.route.rules.slice(g + 1, g + 3), [
+    andRule([{ rule_set: ['geoip-google'] }, noDomainGuard(), { rule_set: [G] }, { ip_version: 6 }], { action: 'reject' }),
+    andRule([{ rule_set: ['geoip-google'] }, noDomainGuard()], { outbound: 'Google' }),
+  ])
+  // 此刻直连的「国内」也有,挂它自己的开关(OFF → 不命中);兜底同理
+  const cn = split.route.rules.findIndex((r) => r.outbound === '国内')
+  assert.deepEqual(split.route.rules[cn - 1], andRule([{ rule_set: ['geosite-cn'] }, { rule_set: [CN] }, { ip_version: 6 }], { action: 'reject' }))
+  assert.deepEqual(split.route.rules.at(-1), andRule([{ rule_set: [FLIP_FALLBACK_TAG] }, { ip_version: 6 }], { action: 'reject' }))
+  assert.ok(!split.route.rules.some((r) => r.ip_version === 6), '没有不带开关的裸 v6 拒绝')
+  const gi = split.dns.rules.findIndex((r) => r.server === 'dns-proxy' && r.rules && r.rules.some((x) => x.rule_set && x.rule_set[0] === 'geosite-google'))
+  assert.deepEqual(split.dns.rules[gi - 1], andRule([{ rule_set: ['geosite-google'] }, { rule_set: [G] }, { query_type: ['AAAA'] }], { action: 'predefined', rcode: 'NOERROR' }))
+  assert.deepEqual(split.dns.rules[gi], andRule([{ rule_set: ['geosite-google'] }, { rule_set: [G] }], { server: 'dns-proxy' }))
+  assert.deepEqual(split.dns.rules[gi + 1], { rule_set: ['geosite-google'], server: 'dns-direct' })
   assert.equal(split.dns.strategy, 'prefer_ipv4')
   assert.ok(split.inbounds[0].address.some((a) => a.includes(':')), 'tun 仍有 v6 地址:直连 v6 照常走')
-  // 代理页把 Google 切到直连:不再插;把「国内」切到代理:插
+  // 代理页把 Google 切到直连、把「国内」切到代理:配置一个字节不变——变的只是开关文件(system/flip-files.mjs)
   const flipped = buildConfig({ nodes, regionGroups, userGroups: firstLayerGroups, localSubnets: subnets, profile: p(), selections: { Google: '直连', 国内: '香港-自动' } })
-  assert.ok(!flipped.route.rules.some((r) => r.ip_version === 6 && r.rule_set && r.rule_set.includes('geosite-google')))
-  assert.ok(flipped.route.rules.some((r) => r.ip_version === 6 && r.rule_set && r.rule_set.includes('geoip-cn')))
-  // 兜底走代理:收尾裸 v6 拒绝
-  const fb = buildConfig({ nodes, regionGroups, userGroups: firstLayerGroups, localSubnets: subnets, profile: p({ routing: { ...p().routing, fallbackDefault: 'proxy' } }) })
-  assert.deepEqual(fb.route.rules.at(-1), { ip_version: 6, action: 'reject' })
-  // node(老"开启")/ ipv6 关(老"关闭"):一条 ip_version 都没有;关着仍是 ipv4_only + 无 v6 地址
+  assert.deepEqual(flipped.route.rules, split.route.rules)
+  assert.deepEqual(flipped.dns.rules, split.dns.rules)
+  // node(老"开启")/ ipv6 关(老"关闭"):一条 ip_version 都没有(成对规则里也没有);关着仍是 ipv4_only + 无 v6 地址
   const node = buildConfig({ nodes, regionGroups, userGroups: firstLayerGroups, localSubnets: subnets, profile: p({ ipv6Proxy: 'node' }) })
-  assert.ok(!node.route.rules.some((r) => r.ip_version))
+  assert.ok(!JSON.stringify(node.route.rules).includes('ip_version'))
   const off = buildConfig({ nodes, regionGroups, userGroups: firstLayerGroups, localSubnets: subnets, profile: p({ ipv6: false }) })
-  assert.ok(!off.route.rules.some((r) => r.ip_version))
+  assert.ok(!JSON.stringify(off.route.rules).includes('ip_version'))
   assert.equal(off.dns.strategy, 'ipv4_only')
   assert.ok(!off.inbounds[0].address.some((a) => a.includes(':')))
 })
 
-test('tun 的 v6 排除表(第四轮 T6):组播 ff00::/8 全段照排,auto_redirect 下只把全 1 的最后一个地址挖掉让 nft 区间可编码;纯 tun 原样', () => {
+test('tun 的 v6 排除表（第四轮 T6）:组播 ff00::/8 全段照排,auto_redirect 下只把全 1 的最后一个地址挖掉让 nft 区间可编码;纯 tun 原样', () => {
   const on = buildConfig({ nodes, regionGroups, profile: { ...profile, ipv6: true, tun: { autoRedirect: true } } })
   const ex6 = on.inbounds[0].route_exclude_address.filter((x) => x.includes(':'))
   // 两半组播都还在(ff3e::/ffbe:: 分别落在 ff00::/9 和 ff80::/9)
@@ -457,8 +559,11 @@ test('tun 的 v6 排除表(第四轮 T6):组播 ff00::/8 全段照排,auto_redir
   for (const c of [on, pure]) assert.ok(c.inbounds[0].route_exclude_address.includes('224.0.0.0/4'))
 })
 
-test('第四轮 T4:DNS 禁用模式下即使开着 FakeIP 试验,较早的域名代理站点集也要挡住后面的直连集合(终端不一定经内核解析)', () => {
+test('第四轮 T4:DNS 禁用模式下即使开着 FakeIP 试验,较早的域名代理站点集也要挡住后面的直连集合（终端不一定经内核解析）', () => {
+  // 旁路计划的结论只有纯 tun 才直接写进配置(有 nft 重定向时配置里是静态候选表,结论体现在动态集文件的内容上),
+  // 这里要验的是计划本身,用纯 tun 看
   const p = firstLayerProfile({
+    tun: { autoRedirect: false },
     dns: { split: true, mode: 'off', direct: '223.5.5.5', proxy: '1.1.1.1', fakeIpForProxy: true },
     routing: { fallbackDefault: 'direct', policies: [
       { id: 'a', name: '任意域名策略', domainSuffix: ['example.test'], default: '香港-自动' },
@@ -475,7 +580,7 @@ test('第四轮 T4:DNS 禁用模式下即使开着 FakeIP 试验,较早的域名
   assert.equal(real.inbounds[0].route_exclude_address_set, undefined)
 })
 
-test('预解析本轮不进正式配置(收尾验收):即使按目标 IP 判的规则排在域名站点集前面,buildConfig 也不注入 resolve;DNS 规则和解析器不受影响', () => {
+test('预解析本轮不进正式配置（收尾验收）:即使按目标 IP 判的规则排在域名站点集前面,buildConfig 也不注入 resolve;DNS 规则和解析器不受影响', () => {
   const p = firstLayerProfile({
     routing: { fallbackDefault: 'direct', policies: [
       { id: 'g', name: 'Google', default: '香港-自动', rulesets: ['geosite-google'] },
@@ -486,13 +591,14 @@ test('预解析本轮不进正式配置(收尾验收):即使按目标 IP 判的�
   for (const profile of [p, { ...p, dns: { ...p.dns, fakeIpForProxy: true } }]) {
     const c = buildConfig({ nodes, regionGroups, userGroups: firstLayerGroups, localSubnets: subnets, profile })
     assert.ok(!c.route.rules.some((r) => r.action === 'resolve'), '正式配置里不能有 resolve 动作')
-    // 分流规则原样:域名规则在前、IP 规则在后、直连在最后
-    assert.deepEqual(c.route.rules.filter((r) => r.outbound && r.rule_set).map((r) => r.outbound), ['Google', '电报', '国内'])
-    assert.ok(c.dns.servers.some((s) => s.tag === 'dns-policy-0' && s.detour === 'Google'))
+    // 分流规则原样:域名规则在前、IP 规则在后、直连在最后(「国内」看域名一条、看 IP 一条);订阅和节点站点直连那条不算站点集
+    assert.deepEqual(c.route.rules.map((r) => splitNoDomainGuard(r).rule).filter((r) => r.outbound && r.rule_set && !r.rule_set.includes('obnode-direct')).map((r) => r.outbound), ['Google', '电报', '国内', '国内'])
+    // 代理侧只有一组解析器(连上游走哪条线路部署时按目标分流判,engine/dns.mjs 的 applyProxyUpstreamRoutes)
+    assert.deepEqual(c.dns.servers.filter((s) => /^dns-(proxy|policy)/.test(s.tag)).map((s) => s.tag), ['dns-proxy'])
   }
 })
 
-test('sing-box 1.14 的 tun DNS 接管(dns_mode):开着 auto_redirect 的劫持 / dnsmasq 模式写 hijack + 显式对端地址(关掉内核自动交给 DNS 模块);禁用模式和没有 auto_redirect 时 disabled', () => {
+test('sing-box 1.14 的 tun DNS 接管（dns_mode）:开着 auto_redirect 的劫持 / dnsmasq 模式写 hijack + 显式对端地址（关掉内核自动交给 DNS 模块）;禁用模式和没有 auto_redirect 时 disabled', () => {
   const tun = (over) => buildConfig({ nodes, regionGroups, profile: { ...profile, ...over } }).inbounds[0]
   const dm = tun({ ipv6: false, tun: { autoRedirect: true }, dns: { ...profile.dns, mode: 'dnsmasq' } })
   assert.equal(dm.dns_mode, 'hijack')
@@ -509,7 +615,7 @@ test('sing-box 1.14 的 tun DNS 接管(dns_mode):开着 auto_redirect 的劫持 
   assert.equal(pure.dns_address, undefined)
 })
 
-test('IPv6「不进内核,直连放行」(ipv6Proxy=bypass):tun 不给 v6 地址、不劫 v6、不插 v6 拒绝;DNS 照常双栈解析;FakeIP 不给 v6 占位段', () => {
+test('IPv6「不进内核,直连放行」（ipv6Proxy=bypass）:tun 不给 v6 地址、不劫 v6、不插 v6 拒绝;DNS 照常双栈解析;FakeIP 不给 v6 占位段', () => {
   const p = firstLayerProfile({
     ipv6: true, ipv6Proxy: 'bypass',
     routing: { fallbackDefault: 'proxy', policies: [{ id: 'g', name: 'Google', default: '香港-自动', rulesets: ['geosite-google'] }] },
@@ -521,7 +627,8 @@ test('IPv6「不进内核,直连放行」(ipv6Proxy=bypass):tun 不给 v6 地址
   assert.deepEqual(tun.dns_address, ['172.19.0.2'])
   assert.ok(!c.route.rules.some((r) => r.ip_version === 6), '不插 v6 拒绝')
   assert.equal(c.dns.strategy, 'prefer_ipv4', 'DNS 照常给 AAAA')
-  assert.ok(!c.dns.rules.some((r) => r.action === 'predefined'))
+  // 不插 v6 拒绝(AAAA 回空);HTTPS / SVCB 回空那条(#135)是分流模式固定带的,不算
+  assert.ok(!c.dns.rules.some((r) => r.action === 'predefined' && Array.isArray(r.query_type) && r.query_type.includes('AAAA')))
   // 防回环那条只管 v4 的 tun 网段
   assert.deepEqual(c.route.rules.find((r) => r.action === 'reject' && r.ip_cidr), { ip_cidr: ['172.19.0.0/30'], action: 'reject' })
   const fake = buildConfig({ nodes, regionGroups, userGroups: firstLayerGroups, localSubnets: subnets, profile: firstLayerProfile({ ipv6: true, ipv6Proxy: 'bypass', dns: { split: true, mode: 'dnsmasq', direct: '223.5.5.5', proxy: '1.1.1.1', fakeIpForProxy: true }, routing: p.routing }) })
@@ -530,7 +637,7 @@ test('IPv6「不进内核,直连放行」(ipv6Proxy=bypass):tun 不给 v6 地址
 
 // 单栈 tun + strict_route 会让 sing-tun 为未接管的地址族写 unreachable / nft reject。
 // GitHub #47:必须同时验证这个开关,只检查 route.rules 没有 ip_version:6 拦不住系统层误拦。
-test('IPv6 bypass 不生成严格路由拒绝,其他 IPv6 模式保持严格路由(GitHub #47)', () => {
+test('IPv6 bypass 不生成严格路由拒绝,其他 IPv6 模式保持严格路由（GitHub #47）', () => {
   for (const mode of ['dnsmasq', 'hijack', 'off']) {
     for (const autoRedirect of [true, false]) {
       for (const ipv6 of [true, false]) {
@@ -553,7 +660,7 @@ test('IPv6 bypass 不生成严格路由拒绝,其他 IPv6 模式保持严格路�
   }
 })
 
-test('终端「不进内核」(GitHub #39):开着 auto_redirect 时 tun 写 exclude_mac_address(去重);纯 tun / 没有这类规则时不写;路由里仍有一条直连兜底', () => {
+test('终端「不进内核」（GitHub #39）:开着 auto_redirect 时 tun 写 exclude_mac_address（去重）;纯 tun / 没有这类规则时不写;路由里仍有一条直连兜底', () => {
   const routes = [
     { id: 'sw', enabled: true, name: 'Switch', sources: ['10.0.0.9'], bypass: true, macs: ['AA:BB:CC:DD:EE:FF'] },
     { id: 'ps', enabled: true, name: 'PS5', sources: ['10.0.0.10'], bypass: true, macs: ['aa:bb:cc:dd:ee:ff', '00:15:5d:03:0a:28'] },
@@ -562,9 +669,76 @@ test('终端「不进内核」(GitHub #39):开着 auto_redirect 时 tun 写 excl
   const on = buildConfig({ nodes, regionGroups, userGroups: firstLayerGroups, localSubnets: subnets, profile: firstLayerProfile({ tun: { autoRedirect: true }, clientRoutes: routes }) })
   assert.deepEqual(on.inbounds[0].exclude_mac_address, ['aa:bb:cc:dd:ee:ff', '00:15:5d:03:0a:28'])
   const direct = on.outbounds.find((o) => o.type === 'direct').tag
-  assert.ok(on.route.rules.some((r) => r.source_ip_cidr && r.source_ip_cidr[0] === '10.0.0.9/32' && r.outbound === direct), '兜底一条直连')
+  // 老档案的这两条按 MAC 认:纯 tun 兼容模式靠的那条直连规则也按 MAC 写
+  assert.ok(on.route.rules.some((r) => r.source_mac_address && r.source_mac_address[0] === 'aa:bb:cc:dd:ee:ff' && r.outbound === direct), '兜底一条直连')
   const off = buildConfig({ nodes, regionGroups, userGroups: firstLayerGroups, localSubnets: subnets, profile: firstLayerProfile({ tun: { autoRedirect: false }, clientRoutes: routes }) })
   assert.equal(off.inbounds[0].exclude_mac_address, undefined)
   const none = buildConfig({ nodes, regionGroups, userGroups: firstLayerGroups, localSubnets: subnets, profile: firstLayerProfile({ tun: { autoRedirect: true }, clientRoutes: [routes[2]] }) })
   assert.equal(none.inbounds[0].exclude_mac_address, undefined)
+})
+
+test('终端分流按 MAC(二选一的 MAC 页签):路由 / DNS 规则写 source_mac_address;按 IP 的白名单交给 nft,不写 include_mac_address', () => {
+  const tv = { id: 'tv', enabled: true, name: 'TV', match: 'mac', macs: ['aa:bb:cc:00:00:09'], outbound: '香港-自动' }
+  const c = buildConfig({ nodes, regionGroups, userGroups: firstLayerGroups, localSubnets: subnets, profile: firstLayerProfile({ tun: { autoRedirect: true }, dns: { split: true, mode: 'hijack', direct: '223.5.5.5', proxy: '1.1.1.1' }, clientRoutes: [tv] }) })
+  assert.ok(c.route.rules.some((r) => r.source_mac_address && r.source_mac_address[0] === 'aa:bb:cc:00:00:09' && r.outbound === '香港-自动'))
+  assert.ok(!c.route.rules.some((r) => r.source_ip_cidr))
+  assert.ok(c.dns.rules.some((r) => r.source_mac_address && r.source_mac_address[0] === 'aa:bb:cc:00:00:09'), '劫持模式下 DNS 也按 MAC 分')
+  const mixed = [
+    { id: 'pc', enabled: true, name: '电脑', match: 'ip', sources: ['10.0.0.20'], admit: true },
+    { id: 'ph', enabled: true, name: '手机', match: 'mac', macs: ['aa:bb:cc:00:00:01'], admit: true },
+  ]
+  const m = buildConfig({ nodes, regionGroups, userGroups: firstLayerGroups, localSubnets: subnets, profile: firstLayerProfile({ tun: { autoRedirect: true }, clientRoutes: mixed }) })
+  assert.equal(m.inbounds[0].include_mac_address, undefined, '有按 IP 的就整个交给 nft')
+  const bl = buildConfig({ nodes, regionGroups, userGroups: firstLayerGroups, localSubnets: subnets, profile: firstLayerProfile({ tun: { autoRedirect: true }, clientRoutes: [{ id: 'sw', name: 'Switch', match: 'ip', sources: ['10.0.0.9'], bypass: true }] }) })
+  assert.equal(bl.inbounds[0].exclude_mac_address, undefined, '按 IP 的不进内核不写 exclude_mac_address')
+  assert.ok(bl.route.rules.some((r) => r.source_ip_cidr && r.source_ip_cidr[0] === '10.0.0.9/32'), '纯 tun 兜底的直连规则按 IP 写')
+})
+
+test('「只让这些终端进内核」（GitHub #187,白名单）:开着 auto_redirect 时 tun 写 include_mac_address（合并去重、停用的不算）;不生成任何路由 / DNS 规则;纯 tun 时不写', () => {
+  const routes = [
+    { id: 'pc', enabled: true, name: '电脑', sources: ['10.0.0.20'], admit: true, macs: ['AA-BB-CC-00-00-01'] },
+    { id: 'ph', enabled: true, name: '手机', sources: ['10.0.0.21'], admit: true, macs: ['aa:bb:cc:00:00:01', 'aa:bb:cc:00:00:02'] },
+    { id: 'old', enabled: false, name: '停用的', sources: ['10.0.0.22'], admit: true, macs: ['aa:bb:cc:00:00:03'] },
+  ]
+  const on = buildConfig({ nodes, regionGroups, userGroups: firstLayerGroups, localSubnets: subnets, profile: firstLayerProfile({ tun: { autoRedirect: true }, clientRoutes: routes }) })
+  assert.deepEqual(on.inbounds[0].include_mac_address, ['aa:bb:cc:00:00:01', 'aa:bb:cc:00:00:02'])
+  assert.ok(!on.route.rules.some((r) => r.source_ip_cidr), '白名单不是分流规则,不生成按来源的路由规则')
+  assert.ok(!JSON.stringify(on.dns.rules).includes('10.0.0.20'), '也不生成按来源的 DNS 规则')
+  const off = buildConfig({ nodes, regionGroups, userGroups: firstLayerGroups, localSubnets: subnets, profile: firstLayerProfile({ tun: { autoRedirect: false }, clientRoutes: routes }) })
+  assert.equal(off.inbounds[0].include_mac_address, undefined)
+  const disabled = buildConfig({ nodes, regionGroups, userGroups: firstLayerGroups, localSubnets: subnets, profile: firstLayerProfile({ tun: { autoRedirect: true }, clientRoutes: [routes[2]] }) })
+  assert.equal(disabled.inbounds[0].include_mac_address, undefined)
+})
+
+test('节点专用解析器(GitHub #136):配了的订阅,它的节点(服务器是域名的)出站带 domain_resolver,DoH + bootstrap 进 dns.servers;别的订阅不动', () => {
+  const doh = createNode({ tag: 'AT-01', type: 'shadowsocks', server: 'hk.airport.example', server_port: 443, fields: { method: 'aes-256-gcm', password: 'pw' }, source: 'clash' })
+  const byIp = createNode({ tag: 'AT-02', type: 'shadowsocks', server: '203.0.113.7', server_port: 443, fields: { method: 'aes-256-gcm', password: 'pw' }, source: 'clash' })
+  const c = buildConfig({
+    nodes: [{ ...doh, subscriptionId: 'air' }, { ...byIp, subscriptionId: 'air' }, { ...nodes[0], subscriptionId: 'other' }],
+    regionGroups, userGroups: firstLayerGroups, localSubnets: subnets, profile: firstLayerProfile(),
+    subscriptions: [{ id: 'air', nodeDns: { url: 'https://dns.airport.example:2096/private', bootstrap: '223.5.5.5' } }, { id: 'other' }],
+  })
+  const out = (tag) => c.outbounds.find((o) => o.tag === tag)
+  assert.equal(out('AT-01').domain_resolver, 'dns-sub-air')
+  assert.equal(out('AT-02').domain_resolver, undefined, '服务器是 IP 的不带')
+  assert.equal(out('美国-01').domain_resolver, undefined, '别的订阅的节点不带')
+  const doh1 = c.dns.servers.find((s) => s.tag === 'dns-sub-air')
+  assert.deepEqual(doh1, { type: 'https', tag: 'dns-sub-air', server: 'dns.airport.example', server_port: 2096, path: '/private', domain_resolver: 'dns-sub-air-bootstrap' })
+  assert.ok(c.dns.servers.some((s) => s.tag === 'dns-sub-air-bootstrap' && s.server === '223.5.5.5'))
+  assert.ok(!JSON.stringify(c.dns.rules).includes('dns-sub-'), '只给节点拨号用,不进 dns.rules')
+})
+
+
+test('TUN 参数(#236 #239):协议栈按档案写,默认 mixed;MTU 只在设了时写', async () => {
+  const { buildConfig } = await import('./config.mjs')
+  const base = { ipv6: false, dns: { mode: 'hijack' }, routing: { policies: [] } }
+  const tunOf = (profile) => buildConfig({ profile, nodes: [], groups: [] }).inbounds.find((i) => i.type === 'tun')
+  const def = tunOf(base)
+  assert.equal(def.stack, 'mixed')
+  assert.equal('mtu' in def, false)
+  const g = tunOf({ ...base, tun: { autoRedirect: true, stack: 'gvisor', mtu: 1500 } })
+  assert.equal(g.stack, 'gvisor')
+  assert.equal(g.mtu, 1500)
+  // 档案里写了不认识的值(老备份 / 手改)按默认
+  assert.equal(tunOf({ ...base, tun: { stack: 'lwip', mtu: 12 } }).stack, 'mixed')
 })

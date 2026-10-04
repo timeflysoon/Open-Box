@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { createLatencyHistory, LATENCY_HISTORY_KEY, MAX_SAMPLES } from './latency-history.mjs'
+import { createLatencyHistory, LATENCY_HISTORY_KEY, MAX_SAMPLES, SITE_MAX_SAMPLES } from './latency-history.mjs'
 
 const memStore = () => {
   const m = new Map()
@@ -56,7 +56,7 @@ test('内核重启清空历史不算超时;拿不到启动时刻时大面积同�
   assert.deepEqual(m.get().D.map((s) => s.delay), [1, 0])
 })
 
-test('同一节点 60 秒内的两笔超时当一笔(不同来源在同一事件上各记一笔);recordSamples 批量;prune 只留现存节点', () => {
+test('同一节点 60 秒内的两笔超时当一笔（不同来源在同一事件上各记一笔）;recordSamples 批量;prune 只留现存节点', () => {
   const h = createLatencyHistory({ store: memStore() })
   h.record('A', { time: at(0), delay: 100 })
   assert.equal(h.recordSamples([{ name: 'A', time: at(5), delay: 0 }, { name: 'B', time: at(5), delay: 50 }, { name: 'C', time: 'x', delay: 1 }]), true)
@@ -100,6 +100,23 @@ test('组按当时选中的节点记:切了节点下一笔是新节点的;切到
   assert.ok(h.get().A.every((s) => s.node === undefined))
 })
 
+test('共享节点被其它组更新时,组时间线按配置 interval 去重（5 分钟）', () => {
+  const h = createLatencyHistory({ store: memStore() })
+  const K = T0 - 3_600_000
+  const proxies = (nodeTime, delay = 100) => ({
+    A: node([{ time: nodeTime, delay }]),
+    B: node([{ time: at(0), delay: 200 }]),
+    G: { type: 'URLTest', all: ['A', 'B'], now: 'A', history: [] },
+  })
+  const groupIntervals = { G: 5 * 60_000 }
+  h.recordFromProxies(proxies(at(0)), { kernelStartedAt: K, at: T0, groupIntervals })
+  h.recordFromProxies(proxies(new Date(T0 + 20_000).toISOString(), 101), { kernelStartedAt: K, at: T0 + 20_000, groupIntervals })
+  h.recordFromProxies(proxies(new Date(T0 + 4 * 60_000).toISOString(), 102), { kernelStartedAt: K, at: T0 + 4 * 60_000, groupIntervals })
+  assert.deepEqual(h.get().G.map((s) => [s.time, s.delay, s.node]), [[at(0), 100, 'A']])
+  h.recordFromProxies(proxies(new Date(T0 + 5 * 60_000).toISOString(), 103), { kernelStartedAt: K, at: T0 + 5 * 60_000, groupIntervals })
+  assert.deepEqual(h.get().G.map((s) => [s.time, s.delay, s.node]), [[at(0), 100, 'A'], [new Date(T0 + 5 * 60_000).toISOString(), 103, 'A']])
+})
+
 test('组不记超时:选中节点超时、别的成员还有结果 → 等它切走记新节点那笔;成员是组的也一路看到叶子', () => {
   const h = createLatencyHistory({ store: memStore() })
   const K = T0 - 3_600_000
@@ -118,4 +135,49 @@ test('组不记超时:选中节点超时、别的成员还有结果 → 等它�
   nested.recordFromProxies(p2('A', [{ time: at(0), delay: 100 }], [{ time: at(0), delay: 120 }]), { kernelStartedAt: K, at: T0 })
   nested.recordFromProxies(p2('A', [], [{ time: at(0), delay: 120 }]), { kernelStartedAt: K, at: T0 + 60_000 })
   assert.deepEqual(nested.get().S.map((s) => [s.delay, s.node]), [[100, 'A']])
+})
+
+test('站点那份留得更多(柱子按卡片宽度铺满,宽屏一排就要几十根)', () => {
+  const store = memStore()
+  const h = createLatencyHistory({ store, key: 'openbox/site-latency-history', maxSamples: SITE_MAX_SAMPLES })
+  for (let i = 0; i < SITE_MAX_SAMPLES + 15; i++) h.record('baidu', { time: at(i), delay: 100 + i })
+  assert.equal(h.get().baidu.length, SITE_MAX_SAMPLES, '站点历史按 SITE_MAX_SAMPLES 截断')
+  assert.ok(SITE_MAX_SAMPLES > MAX_SAMPLES, '要比节点那份多,否则宽屏铺不满')
+  // 节点那份不受影响:两处用同一个模块,别把节点的 10 条也放大(代理页时间线只画 10 格)
+  const nodeHistory = createLatencyHistory({ store: memStore() })
+  for (let i = 0; i < MAX_SAMPLES + 5; i++) nodeHistory.record('A', { time: at(i), delay: i })
+  assert.equal(nodeHistory.get().A.length, MAX_SAMPLES)
+})
+
+test('测速实例的样本(src:probe)照记并带失败原因;从内核观察来的样本碰到「内核用的是旧定义」的节点不记', () => {
+  const stale = new Set(['多宝 | 美国-01'])
+  const h = createLatencyHistory({ store: memStore(), skip: (tag) => stale.has(tag) })
+  h.recordSamples([{ name: '多宝 | 美国-01', time: '2026-09-22T08:00:00.000Z', delay: 0, reason: 'closed', src: 'probe' }])
+  assert.deepEqual(h.get()['多宝 | 美国-01'], [{ time: '2026-09-22T08:00:00.000Z', delay: 0, reason: 'closed', src: 'probe' }])
+  // 内核那边:有结果的不记,没结果(内核删了 = 超时)也不补 0
+  h.recordFromProxies({ '多宝 | 美国-01': { history: [{ time: '2026-09-22T08:05:00.000Z', delay: 300 }] } })
+  h.recordFromProxies({ '多宝 | 美国-01': { history: [] } }, { at: Date.parse('2026-09-22T08:10:00.000Z') })
+  assert.equal(h.get()['多宝 | 美国-01'].length, 1)
+  // 组当时选中的是它,组的时间线也不记
+  h.recordFromProxies({ '所有-自动': { now: '多宝 | 美国-01', all: ['多宝 | 美国-01'] }, '多宝 | 美国-01': { history: [{ time: '2026-09-22T08:06:00.000Z', delay: 300 }] } })
+  assert.equal(h.get()['所有-自动'], undefined)
+})
+
+test('测速实例测完一分钟内内核自己又测了一次(手动测自动组时让内核重选):内核那笔不重复记;超过一分钟照记', () => {
+  const h = createLatencyHistory({ store: memStore() })
+  h.recordSamples([{ name: 'HK', time: '2026-09-22T08:00:00.000Z', delay: 60, src: 'probe' }])
+  h.recordFromProxies({ HK: { history: [{ time: '2026-09-22T08:00:03.000Z', delay: 58 }] } })
+  assert.equal(h.get().HK.length, 1)
+  h.recordFromProxies({ HK: { history: [{ time: '2026-09-22T08:05:00.000Z', delay: 61 }] } })
+  assert.deepEqual(h.get().HK.map((x) => x.delay), [60, 61])
+})
+
+test('失败原因只存认得的那几类,成功的样本不带原因', () => {
+  const h = createLatencyHistory({ store: memStore() })
+  h.recordSamples([
+    { name: 'A', time: '2026-09-22T08:00:00.000Z', delay: 0, reason: '<script>', src: 'probe' },
+    { name: 'B', time: '2026-09-22T08:00:00.000Z', delay: 80, reason: 'closed', src: 'probe' },
+  ])
+  assert.deepEqual(h.get().A, [{ time: '2026-09-22T08:00:00.000Z', delay: 0, src: 'probe' }])
+  assert.deepEqual(h.get().B, [{ time: '2026-09-22T08:00:00.000Z', delay: 80, src: 'probe' }])
 })

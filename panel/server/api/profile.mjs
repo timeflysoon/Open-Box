@@ -1,11 +1,17 @@
 import express from 'express'
+import { TUN_STACKS, TUN_MTU_MIN, TUN_MTU_MAX, TUN_MSS_MIN, TUN_MSS_MAX, isTunStack, isTunMtu, isTunMss } from '../engine/tun-options.mjs'
 import { validateDnsFilter } from '../engine/dns-filter.mjs'
 import { DNS_REWRITE_DEFAULTS, validateDnsRewrite } from '../engine/dns-rewrite.mjs'
 import { RESERVED_PORTS, SERVER_PROTOCOLS, SS_METHODS } from '../engine/servers.mjs'
-import { isIpOrCidr, isMac } from '../engine/client-routes.mjs'
-import { CUSTOM_RULE_TYPES, FALLBACK_TAG, normalizeRouting, parsePortSpec } from '../engine/routing-model.mjs'
+import { validateShareRegions } from '../engine/share-regions.mjs'
+import { clientMatch, isIpOrCidr, isMac } from '../engine/client-routes.mjs'
+import { validateChainProxies } from '../engine/chain-proxy.mjs'
+import { CUSTOM_RULE_TYPES, FALLBACK_TAG, parsePortSpec } from '../engine/routing-model.mjs'
+import { normalizeDnsUpstream, DNS_PROTOCOLS, DNS_REGIONS, MAX_DNS_EXTRAS, isValidDnsPort, isValidDnsUpstream, isWanUpstream, regionDnsError } from '../engine/dns-upstream.mjs'
+import { cancelRegionDetect } from '../system/router-region.mjs'
 import { ICON_SCALE_LIMIT, builtinTags, normalizeGroups } from '../engine/user-groups.mjs'
 import { DNSMASQ_OUTBOUND_TAG } from '../engine/config.mjs'
+import { appliedSummary } from './subscriptions.mjs'
 
 // 站点集不能叫的名字:节点组名、内置直连/拒绝现在的名字、dnsmasq 回送出站——都是同一个出站命名空间
 export const reservedPolicyNames = (groups) => {
@@ -22,7 +28,7 @@ const isStringArray = (v) => Array.isArray(v) && v.every(isString)
 const DNS_MODES = new Set(['off', 'hijack', 'dnsmasq'])
 const isHttpUrl = (v) => isString(v) && /^https?:\/\/[^\s]+$/.test(v.trim())
 
-// 规则集 tag(directRulesets[]/adRuleset/categories[].ruleset)最终会原样拼进生成配置的
+// 规则集 tag(policies[].rulesets / 前置自定义分流的规则集行)最终会原样拼进生成配置的
 // rule_set.path,并作为参数传给 `sing-box rule-set match`(见 engine/routing.mjs、
 // api/penetration.mjs)。execFile 不经 shell,所以不是命令注入,但放过 "../../../etc/passwd"
 // 这类值意味着任意路径读取尝试 + 生成配置本身被写坏,必须在写入 store 之前拦截。
@@ -31,11 +37,6 @@ const isHttpUrl = (v) => isString(v) && /^https?:\/\/[^\s]+$/.test(v.trim())
 // ——那才是路径穿越。
 const RULESET_TAG_PATTERN = /^[A-Za-z0-9._!@-]+$/
 const isValidRulesetTag = (v) => isString(v) && RULESET_TAG_PATTERN.test(v)
-
-// rulesetDir 同理会被拼进每个规则集的 .srs 文件路径——必须是绝对路径,且不含 ".." 路径段
-// (避免 "/tmp/../etc" 这类逃出预期目录的写法)。
-const containsPathTraversalSegment = (p) => /(^|\/)\.\.(\/|$)/.test(p)
-const isValidRulesetDir = (v) => isString(v) && v.startsWith('/') && !containsPathTraversalSegment(v)
 
 // 只校验 patch 里"出现"的字段——深合并本身保证未提及字段维持已有值(来自 DEFAULT_PROFILE
 // 或此前已通过校验的写入),所以一个只碰 ipv6 的 patch 不应因为没带 dns 而报错。
@@ -58,12 +59,38 @@ export const validateProfilePatch = (patch, { reservedNames = [] } = {}) => {
   if ('ipv6Proxy' in patch && !['node', 'ipv4', 'bypass'].includes(patch.ipv6Proxy)) {
     return 'ipv6Proxy must be one of node, ipv4, bypass'
   }
+  if ('rejectQuic' in patch && !isBoolean(patch.rejectQuic)) {
+    return 'rejectQuic must be a boolean'
+  }
+  if ('directBypass' in patch && !isBoolean(patch.directBypass)) {
+    return 'directBypass must be a boolean'
+  }
+  // tun 参数(engine/tun-options.mjs):协议栈三选一,MTU / MSS 是 0(默认 / 不钳制)或范围内的整数
+  if ('tun' in patch) {
+    if (!isPlainObject(patch.tun)) return 'tun must be an object'
+    if ('autoRedirect' in patch.tun && !isBoolean(patch.tun.autoRedirect)) return 'tun.autoRedirect must be a boolean'
+    if ('stack' in patch.tun && !isTunStack(patch.tun.stack)) return `tun.stack must be one of ${TUN_STACKS.join(', ')}`
+    if ('mtu' in patch.tun && !isTunMtu(patch.tun.mtu)) return `tun.mtu must be 0 (kernel default) or an integer between ${TUN_MTU_MIN} and ${TUN_MTU_MAX}`
+    if ('tcpMss' in patch.tun && !isTunMss(patch.tun.tcpMss)) return `tun.tcpMss must be 0 (off) or an integer between ${TUN_MSS_MIN} and ${TUN_MSS_MAX}`
+  }
+  for (const key of ['bypassPorts', 'bypassPortsWhitelist']) {
+    if (key in patch && !(isString(patch[key]) && (!patch[key].trim() || parsePortSpec(patch[key])))) {
+      return `${key} must be empty or ports / ranges like "21114-21119, 2233"`
+    }
+  }
+  if ('bypassPortsMode' in patch && !(patch.bypassPortsMode === 'blacklist' || patch.bypassPortsMode === 'whitelist')) {
+    return 'bypassPortsMode must be "blacklist" or "whitelist"'
+  }
+  // 「直连和代理切换重启内核」开关的两个老键(v0.1.207 的 restartOnClassFlip、v0.1.208 ~ v0.1.209 的 restartOnFlip):
+  // v0.1.210 起没有这个开关、一律热切换。老版本导出的备份里会带着,放行;落库时由 store 删掉
+  if ('restartOnFlip' in patch && !isBoolean(patch.restartOnFlip)) {
+    return 'restartOnFlip must be a boolean'
+  }
+  if ('restartOnClassFlip' in patch && !isBoolean(patch.restartOnClassFlip)) {
+    return 'restartOnClassFlip must be a boolean'
+  }
   if ('directForNodes' in patch && !isBoolean(patch.directForNodes)) {
     return 'directForNodes must be a boolean'
-  }
-
-  if ('rulesetDir' in patch && !isValidRulesetDir(patch.rulesetDir)) {
-    return 'rulesetDir must be an absolute path without ".."'
   }
 
   for (const key of ['testUrl', 'directTestUrl']) {
@@ -115,6 +142,11 @@ export const validateProfilePatch = (patch, { reservedNames = [] } = {}) => {
     }
   }
 
+  // 共享网络手机客户端的「地区分流」(engine/share-regions.mjs):不进路由器内核配置
+  if ('shareRegions' in patch) {
+    const error = validateShareRegions(patch.shareRegions)
+    if (error) return error
+  }
   if ('servers' in patch) {
     const error = validateServers(patch.servers)
     if (error) return error
@@ -125,6 +157,12 @@ export const validateProfilePatch = (patch, { reservedNames = [] } = {}) => {
     if (error) return error
   }
 
+  // 链式代理(engine/chain-proxy.mjs):形状 + 节点内容解析得出来;和现有节点 / 节点组重名在下面的路由里查(要读库)
+  if ('chainProxies' in patch) {
+    const error = validateChainProxies(patch.chainProxies)
+    if (error) return error
+  }
+
   if ('dns' in patch) {
     const dns = patch.dns
     if (!isPlainObject(dns)) return 'dns must be an object'
@@ -132,6 +170,34 @@ export const validateProfilePatch = (patch, { reservedNames = [] } = {}) => {
       return 'dns.mode must be one of off, hijack, dnsmasq'
     }
     if ('fakeIpForProxy' in dns && !isBoolean(dns.fakeIpForProxy)) return 'dns.fakeIpForProxy must be a boolean'
+    // 路由器在哪:cn 中国大陆 / intl 中国大陆之外(engine/dns-upstream.mjs 的 DNS_REGIONS)
+    if ('region' in dns && !DNS_REGIONS.includes(dns.region)) return `dns.region must be one of ${DNS_REGIONS.join(', ')}`
+    // 两个上游只收裸 IP(带域名的上游还得另找 DNS 去解析它)或「上游 DNS」记号 wan(系统的上游 DNS);协议单独一个字段
+    // (engine/dns-upstream.mjs)。路由器在中国大陆时代理侧不能用上游 DNS,要和档案合并之后才判得了,在 PUT 里判(regionDnsError)
+    for (const key of ['direct', 'proxy']) {
+      if (key in dns && !isWanUpstream(dns[key]) && !isValidDnsUpstream(dns[key])) return `dns.${key} must be an IP address or "wan"`
+    }
+    for (const key of ['directProtocol', 'proxyProtocol']) {
+      if (key in dns && !DNS_PROTOCOLS.includes(dns[key])) return `dns.${key} must be one of ${DNS_PROTOCOLS.join(', ')}`
+    }
+    for (const key of ['directPort', 'proxyPort']) {
+      if (key in dns && !isValidDnsPort(dns[key])) return `dns.${key} must be an integer between 1 and 65535`
+    }
+    // 两侧的备用上游:各最多 3 个,每个和主上游一样只收裸 IP + udp/tcp + 端口,而且不能和同侧的重复
+    for (const [key, primaryKey] of [['directExtras', 'direct'], ['proxyExtras', 'proxy']]) {
+      if (!(key in dns)) continue
+      const list = dns[key]
+      if (!Array.isArray(list) || list.length > MAX_DNS_EXTRAS) return `dns.${key} must be an array of at most ${MAX_DNS_EXTRAS} upstreams`
+      for (const item of list) {
+        if (!isPlainObject(item)) return `dns.${key}[] must be objects`
+        if (!isWanUpstream(item.server) && !isValidDnsUpstream(item.server)) return `dns.${key}[].server must be an IP address or "wan"`
+        if ('protocol' in item && !DNS_PROTOCOLS.includes(item.protocol)) return `dns.${key}[].protocol must be one of ${DNS_PROTOCOLS.join(', ')}`
+        if ('port' in item && !isValidDnsPort(item.port)) return `dns.${key}[].port must be an integer between 1 and 65535`
+      }
+      const keyOf = (v) => (isWanUpstream(v) ? v : normalizeDnsUpstream(v || ''))
+      const all = [keyOf(dns[primaryKey]), ...list.map((x) => keyOf(x.server))].filter(Boolean)
+      if (new Set(all).size !== all.length) return `dns.${key}[] must not repeat an upstream address`
+    }
     if ('rewrite' in dns) {
       const bad = validateDnsRewrite(dns.rewrite)
       if (bad) return bad
@@ -142,33 +208,10 @@ export const validateProfilePatch = (patch, { reservedNames = [] } = {}) => {
     const routing = patch.routing
     if (!isPlainObject(routing)) return 'routing must be an object'
 
-    if ('fallback' in routing && !isString(routing.fallback)) {
-      return 'routing.fallback must be a string'
-    }
-
-    if ('directRulesets' in routing) {
-      if (!isStringArray(routing.directRulesets)) return 'routing.directRulesets must be an array of strings'
-      if (!routing.directRulesets.every(isValidRulesetTag)) {
-        return 'routing.directRulesets entries must match /^[A-Za-z0-9._-]+$/'
-      }
-    }
-
-    if ('adRuleset' in routing && !isValidRulesetTag(routing.adRuleset)) {
-      return 'routing.adRuleset must match /^[A-Za-z0-9._-]+$/'
-    }
-
     // 兜底站点集的默认选中项。'proxy' 是迁移留下的占位(第一个节点组),
     // 其余就是一个出站名(direct / 某个节点组 / block),叫什么由用户的组名决定。
     if ('fallbackDefault' in routing && !isString(routing.fallbackDefault)) {
       return 'routing.fallbackDefault must be a string'
-    }
-
-    if ('outboundOptions' in routing) {
-      const opts = routing.outboundOptions
-      if (!isPlainObject(opts)) return 'routing.outboundOptions must be an object'
-      for (const key of ['direct', 'reject', 'groups']) {
-        if (key in opts && !isBoolean(opts[key])) return `routing.outboundOptions.${key} must be a boolean`
-      }
     }
 
     // 兜底站点集的名字/图标。名字就是内核里的出站 tag,不能为空
@@ -197,17 +240,6 @@ export const validateProfilePatch = (patch, { reservedNames = [] } = {}) => {
       const error = validatePolicies(routing.policies, isString(routing.fallbackName) ? routing.fallbackName.trim() : '', reservedNames)
       if (error) return error
     }
-
-    if ('categories' in routing) {
-      const categories = routing.categories
-      if (!Array.isArray(categories)) return 'routing.categories must be an array'
-      const allValid = categories.every(
-        (cat) => isPlainObject(cat) && isValidRulesetTag(cat.ruleset) && isString(cat.target),
-      )
-      if (!allValid) {
-        return 'routing.categories must be an array of { ruleset, target }, ruleset matching /^[A-Za-z0-9._-]+$/'
-      }
-    }
   }
 
   return null
@@ -224,17 +256,25 @@ export const validateClientRoutes = (list) => {
     ids.add(r.id)
     if ('enabled' in r && !isBoolean(r.enabled)) return 'clientRoutes[].enabled must be a boolean'
     if (!isString(r.name) || !r.name.trim() || r.name.length > 40) return 'clientRoutes[].name must be a non-empty string (<= 40 chars)'
-    if (!isStringArray(r.sources) || !r.sources.length) return 'clientRoutes[].sources must be a non-empty array of strings'
-    const bad = r.sources.find((x) => !isIpOrCidr(x))
-    if (bad !== undefined) return `clientRoutes[].sources contains an invalid IP/CIDR: ${bad}`
-    if ('bypass' in r && !isBoolean(r.bypass)) return 'clientRoutes[].bypass must be a boolean'
+    if ('match' in r && r.match !== 'ip' && r.match !== 'mac') return 'clientRoutes[].match must be ip or mac'
+    if ('sources' in r && !isStringArray(r.sources)) return 'clientRoutes[].sources must be an array of strings'
     if ('macs' in r && !isStringArray(r.macs)) return 'clientRoutes[].macs must be an array of strings'
-    if (r.bypass === true) {
-      // 不进内核:按 MAC 放行,至少一个合法 MAC;出站不用填
-      if (!Array.isArray(r.macs) || !r.macs.length) return 'clientRoutes[].macs is required when bypass is true'
-      const badMac = r.macs.find((x) => !isMac(x))
-      if (badMac !== undefined) return `clientRoutes[].macs contains an invalid MAC: ${badMac}`
-    } else if (!isString(r.outbound) || !r.outbound.trim()) {
+    if ('bypass' in r && !isBoolean(r.bypass)) return 'clientRoutes[].bypass must be a boolean'
+    if ('admit' in r && !isBoolean(r.admit)) return 'clientRoutes[].admit must be a boolean'
+    if (r.bypass === true && r.admit === true) return 'clientRoutes[] cannot be both bypass and admit'
+    // 终端按 IP 或按 MAC 认,二选一(engine/client-routes.mjs 的 clientMatch;老档案没有 match 时按老规矩推断)。
+    // 两份都校验格式,按哪种认的那份不能空
+    const bad = (r.sources || []).find((x) => !isIpOrCidr(x))
+    if (bad !== undefined) return `clientRoutes[].sources contains an invalid IP/CIDR: ${bad}`
+    const badMac = (r.macs || []).find((x) => !isMac(x))
+    if (badMac !== undefined) return `clientRoutes[].macs contains an invalid MAC: ${badMac}`
+    if (clientMatch(r) === 'mac') {
+      if (!Array.isArray(r.macs) || !r.macs.length) return 'clientRoutes[].macs must be a non-empty array when matching by MAC'
+    } else if (!Array.isArray(r.sources) || !r.sources.length) {
+      return 'clientRoutes[].sources must be a non-empty array of strings'
+    }
+    // 不进内核 / 只让这些进内核不用填出站;指定出站的要填
+    if (r.bypass !== true && r.admit !== true && (!isString(r.outbound) || !r.outbound.trim())) {
       return 'clientRoutes[].outbound must be a non-empty string'
     }
   }
@@ -304,6 +344,7 @@ const validateCustomPolicy = (custom) => {
       }
       if (!isString(r.value) || !r.value.trim()) return 'routing.custom.rules[].value is required'
       if (!isString(r.outbound) || !r.outbound.trim()) return 'routing.custom.rules[].outbound is required'
+      if ('note' in r && !isString(r.note)) return 'routing.custom.rules[].note must be a string'
       if (r.type === 'ruleUrl' && !/^https?:\/\//i.test(r.value.trim())) {
         return 'routing.custom.rules[].value must be an http(s) URL when type is ruleUrl'
       }
@@ -352,30 +393,79 @@ const validatePolicies = (policies, fallbackName = '', reservedNames = []) => {
         return `routing.policies[].${field} must be an array of strings`
       }
     }
+    // 每条规则的备注(GitHub #238):键是「类型:值」,值是一句话;只进档案、不进内核配置
+    if ('notes' in p && !(isPlainObject(p.notes) && Object.values(p.notes).every(isString))) {
+      return 'routing.policies[].notes must be an object of strings'
+    }
   }
   return null
 }
 
-// 首次引导用的区域推荐默认值。CN 走境内直连(direct DNS + geosite/geoip-cn + PROXY 兜底);
-// 其它区域默认更保守——不启用 DNS 分流,失败时直接落回直连,直连规则集按区域代号派生。
-// 首次引导只回答一件事:"其余流量走哪"。中国大陆那些具体规则由内置的站点集种子
-// 提供(见 store/openbox-store.mjs),这里不替用户改写规则。
+// 首次引导用的区域推荐默认值。首次引导只回答一件事:"其余流量走哪"——人在国内(CN)没被站点集
+// 挑走的走代理,香港澳门 / 其他地区反过来。中国大陆那些具体规则由内置的站点集种子提供
+// (见 store/openbox-store.mjs),这里不替用户改写规则。
+const REGION_CODES = new Set(['CN', 'HKMO', 'OTHER'])
 const buildRegionDefaults = (regionParam) => {
   const raw = isString(regionParam) && regionParam.trim() ? regionParam.trim().toUpperCase() : 'CN'
-  const names = { CN: '中国大陆', HKMO: '香港澳门', OTHER: '其他地区' }
   // 不认识的地区按中国大陆算(引导页只有这三个选项,别的值只可能是手输/老链接)
-  const region = names[raw] ? raw : 'CN'
-  // 人在国内:没被站点集挑走的走代理;境外反过来
+  const region = REGION_CODES.has(raw) ? raw : 'CN'
   const fallbackDefault = region === 'CN' ? 'proxy' : 'direct'
   return {
-    region: names[region],
     fallbackDefault,
     dns: { split: true },
     routing: { fallbackDefault },
   }
 }
 
-export const registerProfileRoutes = (app, { store } = {}) => {
+// 链式代理按 id 认出改名(同 id、名字变了),把所有按旧名字引用它的地方改成新名字。节点组直接写库;
+// 档案里的引用改在 patch 上,和这次提交一起落库。返回 [{ from, to }]
+export const applyChainRenames = (store, patch) => {
+  const profile = store.getProfile() || {}
+  const previous = new Map((Array.isArray(profile.chainProxies) ? profile.chainProxies : []).map((e) => [String(e && e.id || ''), e]))
+  const renames = new Map()
+  for (const e of patch.chainProxies) {
+    if (!e || typeof e !== 'object') continue
+    const old = previous.get(String(e.id || ''))
+    const name = typeof e.name === 'string' ? e.name.trim() : ''
+    if (old && name && old.name !== name) renames.set(old.name, name)
+  }
+  if (!renames.size) return []
+  const rename = (n) => (renames.has(n) ? renames.get(n) : n)
+  store.setGroups(store.getGroups().map((g) => ({
+    ...g,
+    members: Array.isArray(g.members) ? g.members.map(rename) : g.members,
+    lanes: Array.isArray(g.lanes) ? g.lanes.map((l) => ({ ...l, members: Array.isArray(l.members) ? l.members.map(rename) : l.members })) : g.lanes,
+  })))
+  const routing = profile.routing && typeof profile.routing === 'object' ? profile.routing : {}
+  const policies = Array.isArray(patch.routing && patch.routing.policies) ? patch.routing.policies : routing.policies
+  if (Array.isArray(policies) && policies.some((x) => x && typeof x === 'object' && renames.has(x.default))) {
+    patch.routing = { ...(patch.routing || {}), policies: policies.map((x) => (x && typeof x === 'object' && renames.has(x.default) ? { ...x, default: rename(x.default) } : x)) }
+  }
+  const fallbackDefault = patch.routing && typeof patch.routing.fallbackDefault === 'string' ? patch.routing.fallbackDefault : routing.fallbackDefault
+  if (renames.has(fallbackDefault)) patch.routing = { ...(patch.routing || {}), fallbackDefault: rename(fallbackDefault) }
+  const routes = Array.isArray(patch.clientRoutes) ? patch.clientRoutes : profile.clientRoutes
+  if (Array.isArray(routes) && routes.some((r) => r && typeof r === 'object' && renames.has(r.outbound))) {
+    patch.clientRoutes = routes.map((r) => (r && typeof r === 'object' && renames.has(r.outbound) ? { ...r, outbound: rename(r.outbound) } : r))
+  }
+  patch.chainProxies = patch.chainProxies.map((e) => (e && typeof e === 'object' && renames.has(e.upstream) ? { ...e, upstream: rename(e.upstream) } : e))
+  return [...renames].map(([from, to]) => ({ from, to }))
+}
+
+// 链式代理的名字就是内核里的出站 tag:和订阅节点、节点组、站点集(含兜底)重名的话,生成配置时链式节点会被当成
+// 重复项丢掉。返回第一个撞上的名字,没有就是空串。PUT /profile 和导入(api/backup.mjs)共用
+export const chainNameClash = ({ chainProxies, nodes, groups, policies }) => {
+  const taken = new Set([
+    ...(Array.isArray(nodes) ? nodes : []).map((n) => n && n.tag),
+    ...(Array.isArray(groups) ? groups : []).map((g) => g && g.name),
+    ...(Array.isArray(policies) ? policies : []).map((p) => p && p.name),
+    FALLBACK_TAG,
+  ].filter(Boolean))
+  const hit = (Array.isArray(chainProxies) ? chainProxies : []).find((e) => e && taken.has(String(e.name || '').trim()))
+  return hit ? String(hit.name).trim() : ''
+}
+
+// applyNow:链式代理 / 测速地址 / 站点集这些落在出站上的改动,存完在线换进内核再回复(api/hot-apply.mjs)
+export const registerProfileRoutes = (app, { store, applyNow = null } = {}) => {
   const router = express.Router({ caseSensitive: true })
   router.use(express.json({ limit: '1mb' }))
 
@@ -386,31 +476,47 @@ export const registerProfileRoutes = (app, { store } = {}) => {
     res.json({ defaults: buildRegionDefaults(req.query.region), dnsRewriteDefaults: DNS_REWRITE_DEFAULTS })
   })
 
-  // 地区层退役的一次性升级:老档案里的地区被翻译成站点集(engine/routing-model.mjs),
-  // 这里把翻译结果写回档案。不写回的话,界面看到的是老的 policies 数组、内核跑的却是
-  // 翻译后的那一份——用户会在代理页看到一个界面上根本不存在的 selector。
-  // fallbackDefault 一旦落库就说明迁过了,之后这段不再动任何东西(幂等)。
-  const migrateOnce = () => {
-    const profile = store.getProfile()
-    if (isString(profile.routing?.fallbackDefault) && profile.routing.fallbackDefault) return profile
-    const conf = normalizeRouting(profile.routing)
-    return store.setProfile({
-      routing: { policies: conf.policies, fallbackDefault: conf.fallback.default },
-    })
-  }
-
+  // 老档案的翻译(地区层 → 站点集、DoH 上游 → 裸地址)在 store 读档案时做并写回,这里拿到的已经是干净的
   router.get('/', (_req, res) => {
-    res.json({ profile: migrateOnce() })
+    res.json({ profile: store.getProfile() })
   })
 
-  router.put('/', (req, res) => {
+  router.put('/', async (req, res) => {
     const patch = req.body || {}
     const error = validateProfilePatch(patch, { reservedNames: reservedPolicyNames(store.getGroups()) })
     if (error) {
       res.status(400).json({ error })
       return
     }
-    res.json({ profile: store.setProfile(patch) })
+    // 链式代理的名字就是内核里的出站 tag:不能和订阅节点、节点组(含内置直连 / 拒绝)、站点集重名
+    if (Array.isArray(patch.chainProxies)) {
+      const routing = (patch.routing && typeof patch.routing === 'object' ? patch.routing : store.getProfile().routing) || {}
+      const clash = chainNameClash({ chainProxies: patch.chainProxies, nodes: store.getNodes(), groups: store.getGroups(), policies: routing.policies })
+      if (clash) {
+        res.status(400).json({ error: `链式代理的名称「${clash}」已被节点、节点组或站点集占用,请换一个` })
+        return
+      }
+    }
+    // 链式代理改名:名字就是出站 tag,节点组成员 / 故障转移页签成员 / 站点集默认出口 / 兜底 / 终端分流 / 别的链式代理的
+    // 上游都按名字引用,和节点组改名(api/groups.mjs)一样按 id 认出改名、把引用一并迁移
+    // 路由器在中国大陆时代理 DNS 不能用上游 DNS(中国大陆的 DNS 对境外域名有污染,用户 2026-10-02):按合并之后的整份判,
+    // 只改地区、或只改代理上游都会被挡住
+    if (patch.dns && typeof patch.dns === 'object') {
+      const regionError = regionDnsError({ ...((store.getProfile() || {}).dns || {}), ...patch.dns })
+      if (regionError) {
+        res.status(400).json({ error: regionError })
+        return
+      }
+    }
+    const renamed = Array.isArray(patch.chainProxies) ? applyChainRenames(store, patch) : []
+    const profile = store.setProfile(patch)
+    // 用户自己选了地区:后台按出口 IP 自动判的那一次就不做了(system/router-region.mjs)
+    if (patch.dns && typeof patch.dns === 'object' && 'region' in patch.dns) cancelRegionDetect(store)
+    let applied
+    if (typeof applyNow === 'function' && ['chainProxies', 'testUrl', 'routing'].some((key) => key in patch)) {
+      try { applied = appliedSummary(await applyNow()) } catch (error) { applied = { ok: false, changed: 0, reason: error instanceof Error ? error.message : String(error) } }
+    }
+    res.json({ profile, ...(renamed.length ? { renamed } : {}), ...(applied ? { applied } : {}) })
   })
 
   app.use('/api/openbox/profile', router)

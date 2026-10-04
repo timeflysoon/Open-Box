@@ -1,12 +1,14 @@
 import express from 'express'
-import { reservedPolicyNames, validateProfilePatch } from './profile.mjs'
+import { chainNameClash, reservedPolicyNames, validateProfilePatch } from './profile.mjs'
 import { normalizeGroups } from '../engine/user-groups.mjs'
+import { normalizeDnsUpstream } from '../engine/dns-upstream.mjs'
 
 // 导出 / 导入:把这台路由器上「用户配出来的东西」打成一个 JSON——档案(目标分流、站点集、
-// DNS、更新计划……)、节点组,可选带上 订阅和节点 / 终端分流 / 共享网络。新设备导入就能用,
-// 不用重新配。不带面板密码、会话、clash 密钥、部署状态这些和机器绑定的东西;
-// rulesetDir 是本机路径,导出时带着(看得见),导入时不写。
-// 不勾的部分直接不出现在文件里(终端分流 / 共享网络是档案里的两个键,删掉即可);
+// DNS、更新计划……)、节点组,可选带上 订阅和节点 / 链式代理 / 终端分流 / 共享网络。新设备导入就能用,
+// 不用重新配。不带面板密码、会话、clash 密钥、部署状态这些和机器绑定的东西。
+// 老版本导出的文件里还会有 rulesetDir、routing.regions / adBlock 这些退役字段,以及 DoH 写法的 DNS 上游:
+// 校验放过它们,落库时由 store 统一翻译 / 删掉(store/openbox-store.mjs 的 cleanupStoredProfile)。
+// 不勾的部分直接不出现在文件里(链式代理 / 终端分流 / 共享网络是档案里的三个键,删掉即可);
 // 导入时档案是合并写入,文件里没有的键不动现有的——所以「没导出」等于「导入时不碰」。
 export const BACKUP_FORMAT = 'open-box-backup'
 export const BACKUP_VERSION = 1
@@ -16,22 +18,26 @@ const isPlainObject = (v) => typeof v === 'object' && v !== null && !Array.isArr
 // 面板设置(语言、主题、圆角、延迟阈值……)和背景图存在同一张 KV 表里、由浏览器同步
 // (index.mjs 的 /api/storage 和 /api/background-image),不在 store 对象上;由 index.mjs 把
 // 读写函数作为 panelStorage 传进来。密码(config/access-*)和 openbox/* 不在其中。
+// 表里只有前端当前版本认得的键:前端启动同步时按自己的键表(src/constant/panelSettingKeys.ts)
+// 把不认识的 config/* 清掉再写回,所以这里照单全收即可。
 const PANEL_KEY_PREFIX = 'config/'
 const PANEL_SECRET_PREFIX = 'config/access-'
 const isPanelKey = (k) => typeof k === 'string' && k.startsWith(PANEL_KEY_PREFIX) && !k.startsWith(PANEL_SECRET_PREFIX)
 
 export const buildBackup = (store, {
-  subscriptions = true, clientRoutes = true, servers = true, now = () => new Date(), openboxVersion = '', panelStorage = null,
+  subscriptions = true, clientRoutes = true, servers = true, chainProxies = subscriptions, now = () => new Date(), openboxVersion = '', panelStorage = null,
 } = {}) => {
   const profile = store.getProfile()
   if (!clientRoutes) delete profile.clientRoutes
+  // 链式代理有自己的勾(节点内容里有住宅 IP 的账号密码)。没传这个选项的老调用方沿用以前的规矩:跟着订阅走
+  if (!chainProxies) delete profile.chainProxies
   if (!servers) delete profile.servers
   const out = {
     format: BACKUP_FORMAT,
     version: BACKUP_VERSION,
     exportedAt: now().toISOString(),
     openboxVersion,
-    includes: { subscriptions, clientRoutes, servers },
+    includes: { subscriptions, chainProxies, clientRoutes, servers },
     profile,
     groups: store.getGroups(),
   }
@@ -64,7 +70,7 @@ export const applyBackup = (store, data, { subscriptionsMode = 'replace', panelS
   if (!(Number.isInteger(data.version) && data.version >= 1 && data.version <= BACKUP_VERSION)) {
     return { error: `不认识的备份版本:${data.version}` }
   }
-  if (!isPlainObject(data.profile)) return { error: '文件里没有档案(profile)' }
+  if (!isPlainObject(data.profile)) return { error: '文件里没有档案（profile）' }
   if (data.groups !== undefined && !Array.isArray(data.groups)) return { error: 'groups 应为数组' }
   const groups = data.groups === undefined ? null : normalizeGroups(data.groups)
   const seen = new Set()
@@ -72,8 +78,17 @@ export const applyBackup = (store, data, { subscriptionsMode = 'replace', panelS
     if (seen.has(g.name)) return { error: `分组名称重复:${g.name}` }
     seen.add(g.name)
   }
-  const { rulesetDir, ...profilePatch } = data.profile
-  void rulesetDir
+  const profilePatch = { ...data.profile }
+  // 老版本导出的 DNS 上游是 DoH 链接,现行校验只收裸地址:先折成主机名,折不出来的不导(保留现有值)
+  if (isPlainObject(profilePatch.dns)) {
+    profilePatch.dns = { ...profilePatch.dns }
+    for (const key of ['direct', 'proxy']) {
+      if (!(key in profilePatch.dns)) continue
+      const host = normalizeDnsUpstream(profilePatch.dns[key])
+      if (host) profilePatch.dns[key] = host
+      else delete profilePatch.dns[key]
+    }
+  }
   const profileError = validateProfilePatch(profilePatch, { reservedNames: reservedPolicyNames(groups || store.getGroups()) })
   if (profileError) return { error: `档案不合法:${profileError}` }
 
@@ -99,6 +114,24 @@ export const applyBackup = (store, data, { subscriptionsMode = 'replace', panelS
     const subscriptionIds = new Set([...store.getSubscriptions(), ...(subscriptions || [])].map((s) => s.id))
     subscriptionShares = data.subscriptionShares.filter((share) => isPlainObject(share) && typeof share.id === 'string' && typeof share.token === 'string' && typeof share.name === 'string')
       .map((share) => ({ ...share, subscriptionIds: Array.isArray(share.subscriptionIds) ? share.subscriptionIds.filter((id) => subscriptionIds.has(id)) : [] }))
+  }
+
+  // 链式代理的名字是内核里的出站 tag,不能和节点 / 节点组 / 站点集重名(PUT /profile 同一条规则)。导入可以只带
+  // 一部分(不带链式代理、不带订阅、订阅追加),所以要按「导入之后」的样子核对:文件里有的用文件的,没有的用这台
+  // 路由器现有的。撞了就整个不导,什么都不写
+  {
+    const current = store.getProfile()
+    const finalChains = Array.isArray(profilePatch.chainProxies) ? profilePatch.chainProxies : current.chainProxies
+    const finalPolicies = isPlainObject(profilePatch.routing) && Array.isArray(profilePatch.routing.policies)
+      ? profilePatch.routing.policies
+      : (current.routing && current.routing.policies)
+    let finalNodes = store.getNodes()
+    if (subscriptions) {
+      const incoming = new Set(subscriptions.map((s) => s.id))
+      finalNodes = subscriptionsMode === 'append' ? [...finalNodes.filter((n) => !incoming.has(n.subscriptionId)), ...nodes] : nodes
+    }
+    const clash = chainNameClash({ chainProxies: finalChains, nodes: finalNodes, groups: groups || store.getGroups(), policies: finalPolicies })
+    if (clash) return { error: `链式代理「${clash}」和导入后的节点、节点组或站点集重名,请先把其中一个改名再导入` }
   }
 
   // 组先于档案落库:档案里的站点集名不能和组名撞,顺序反了校验就是拿旧组名比的
@@ -136,6 +169,7 @@ export const applyBackup = (store, data, { subscriptionsMode = 'replace', panelS
       subscriptions: subscriptions ? subscriptions.length : 0,
       nodes: nodes ? nodes.length : 0,
       ...(subscriptionShares ? { subscriptionShares: subscriptionShares.length } : {}),
+      ...(Array.isArray(profilePatch.chainProxies) ? { chainProxies: profilePatch.chainProxies.length } : {}),
       subscriptionsMode: subscriptions ? subscriptionsMode : null,
       panelSettings: panelWritten ? Object.keys(panelSettings).length : 0,
       backgroundImage: backgroundWritten,
@@ -143,18 +177,29 @@ export const applyBackup = (store, data, { subscriptionsMode = 'replace', panelS
   }
 }
 
+// 几百个节点的订阅一份就有几百 KB;背景图是 base64,一张照片就是几 MB,给足
+export const BACKUP_BODY_LIMIT = '32mb'
+
+// 备份导入的请求体要在别的 /api/openbox 路由之前解析(GitHub #303):挂在同一前缀下的路由各自 router.use(express.json)
+// 对所有经过它的请求都生效,最先注册的那个(订阅,10 MB)先解析、超了就回 413,轮不到这里的 32 MB。
+// index.mjs 在注册任何 /api/openbox 路由之前调它
+export const registerBackupBodyParser = (app) => {
+  app.use('/api/openbox/backup/import', express.json({ limit: BACKUP_BODY_LIMIT }))
+}
+
 export const registerBackupRoutes = (app, { store, readVersion = async () => '', panelStorage = null } = {}) => {
   const router = express.Router({ caseSensitive: true })
-  // 几百个节点的订阅一份就有几百 KB;背景图是 base64,一张照片就是几 MB,给足
-  router.use(express.json({ limit: '32mb' }))
+  router.use(express.json({ limit: BACKUP_BODY_LIMIT }))
 
-  // GET /api/openbox/backup?subscriptions=1|0&clientRoutes=1|0&servers=1|0(都默认 1)
+  // GET /api/openbox/backup?subscriptions=1|0&chainProxies=1|0&clientRoutes=1|0&servers=1|0(都默认 1;
+  // 没带 chainProxies 的老前端按以前的规矩跟着 subscriptions 走)
   router.get('/backup', async (req, res) => {
     const flag = (name) => String(req.query[name] ?? '1') !== '0'
     let openboxVersion = ''
     try { openboxVersion = (await readVersion()) || '' } catch { /* 拿不到就空着 */ }
     res.json(buildBackup(store, {
       subscriptions: flag('subscriptions'),
+      chainProxies: req.query.chainProxies === undefined ? flag('subscriptions') : flag('chainProxies'),
       clientRoutes: flag('clientRoutes'),
       servers: flag('servers'),
       openboxVersion,

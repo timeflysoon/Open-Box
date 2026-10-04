@@ -1,7 +1,11 @@
 import express from 'express'
-import { loadRuleList } from '../system/rule-lists.mjs'
+import { assertPublicUrl } from './net-guard.mjs'
+import { loadRuleList, refreshRuleList, srsDecompiler } from '../system/rule-lists.mjs'
+import { isRuleListTag, listTagForUrl, ruleListIpTag } from '../engine/rule-list.mjs'
+import { dropRuleSetIndex } from '../system/ruleset-index.mjs'
 import { normalizeRouting } from '../engine/routing-model.mjs'
 import { rulesetPath, isSafeRulesetTag } from '../system/rulesets.mjs'
+import { isNodeDirectTag, nodeDirectFile } from '../engine/direct-hosts.mjs'
 
 // 「详情」:一个 geosite/geoip 分类里到底有哪些域名/IP。
 //
@@ -38,6 +42,8 @@ const flatten = (json) => {
 export const loadEntries = async (ctx, paths, tag) => {
   const hit = cache.get(tag)
   if (hit && Date.now() - hit.at < CACHE_TTL_MS) return hit.entries
+  // 订阅和节点站点直连的两份规则集是 source 格式的 JSON(engine/direct-hosts.mjs),内容随订阅变,不缓存
+  if (isNodeDirectTag(tag)) return flatten(JSON.parse(await ctx.readFile(nodeDirectFile(paths.rulesetDir, tag))))
 
   const srsPath = rulesetPath(paths, tag)
   if (!(await ctx.exists(srsPath))) throw new Error(`安装包缺少规则集 ${tag}，请更新或重新安装 Open-Box`)
@@ -61,19 +67,44 @@ export const loadEntries = async (ctx, paths, tag) => {
 }
 
 // 「域名穿透」:一个站点集到底会命中哪些域名/IP。规则集展开成条目,手写的条件原样列出;
-// 每条带来源(哪个规则集 / 自定义),按 全部/域名/IP 分档,可搜索、可排序、分页。
+// 每条带来源(哪个规则集 / 自定义 / 规则集链接的网址),按 全部/域名/IP 分档,可搜索、可排序、分页。
 const FAMILY_OF = (type) => (type.startsWith('domain') ? 'domain' : type.startsWith('ip') ? 'ip' : 'other')
 const CUSTOM_SOURCE = 'custom'
+// 规则集链接(list-xxxxxxxx):部署时编成域名一份 list-xxx.srs、IP 一份 list-xxx-ip.srs(system/rule-lists.mjs),
+// 哪份有就解哪份;一份都没有(还没部署过)就按网址现拉一次解析(.srs 交给内核解)
+const loadRuleListEntries = async (ctx, paths, tag, url, fetchImpl) => {
+  const out = []
+  let found = false
+  for (const part of [tag, ruleListIpTag(tag)]) {
+    if (!(await ctx.exists(rulesetPath(paths, part)))) continue
+    found = true
+    out.push(...await loadEntries(ctx, paths, part))
+  }
+  if (found) return out
+  if (!url) throw new Error(`规则集链接 ${tag} 还没有编译,也不知道网址`)
+  const parsed = await loadRuleList(fetchImpl, url, { decompile: srsDecompiler(ctx, paths, `penetration-${tag}`) })
+  for (const [type, values] of Object.entries(parsed)) for (const value of values) out.push({ type, value })
+  return out
+}
 const buildPolicyEntries = async (ctx, paths, policy, fetchImpl) => {
   const out = []
   const missing = []
   for (const [type, list] of [['domain', policy.domain], ['domain_suffix', policy.domainSuffix], ['domain_keyword', policy.domainKeyword], ['ip_cidr', policy.ipCidr]]) {
     for (const value of list || []) out.push({ type, family: FAMILY_OF(type), content: value, source: CUSTOM_SOURCE })
   }
+  const urlOfTag = new Map((policy.ruleUrls || []).map((u) => [listTagForUrl(u), u]))
   for (const tag of policy.rulesets || []) {
-    if (!isSafeRulesetTag(tag) || !/^(geosite|geoip)-/.test(tag)) { missing.push(tag); continue }
+    if (!isSafeRulesetTag(tag)) { missing.push(tag); continue }
     try {
-      for (const e of await loadEntries(ctx, paths, tag, fetchImpl)) {
+      if (isRuleListTag(tag)) {
+        const url = urlOfTag.get(tag) || ''
+        for (const e of await loadRuleListEntries(ctx, paths, tag, url, fetchImpl)) {
+          out.push({ type: e.type, family: FAMILY_OF(e.type), content: e.value, source: url || tag })
+        }
+        continue
+      }
+      if (!/^(geosite|geoip)-/.test(tag)) { missing.push(tag); continue }
+      for (const e of await loadEntries(ctx, paths, tag)) {
         out.push({ type: e.type, family: FAMILY_OF(e.type), content: e.value, source: tag })
       }
     } catch {
@@ -136,7 +167,7 @@ export const registerRulesetRoutes = (app, { ctx, paths, store, fetchImpl = glob
   router.get('/rulesets/preview', async (req, res) => {
     const url = String(req.query.url || '').trim()
     if (!/^https?:\/\/[^\s]+$/i.test(url) || url.length > 2048) {
-      return res.status(400).json({ message: '规则集链接必须是 http(s) 网址' })
+      return res.status(400).json({ message: '规则集链接必须是 http 或 https 网址' })
     }
     const q = String(req.query.q || '').trim().toLowerCase()
     const offset = intParam(req.query.offset, 0)
@@ -148,7 +179,7 @@ export const registerRulesetRoutes = (app, { ctx, paths, store, fetchImpl = glob
       if (hit && Date.now() - hit.at < CACHE_TTL_MS) {
         entries = hit.entries
       } else {
-        const parsed = await loadRuleList(fetchImpl, url)
+        const parsed = await loadRuleList(fetchImpl, url, { decompile: srsDecompiler(ctx, paths, `preview-${listTagForUrl(url)}`) })
         entries = []
         for (const [type, values] of Object.entries(parsed)) for (const value of values) entries.push({ type, value })
         cache.set(key, { entries, at: Date.now() })
@@ -161,16 +192,42 @@ export const registerRulesetRoutes = (app, { ctx, paths, store, fetchImpl = glob
     }
   })
 
+  // POST /api/openbox/rulesets/refresh { url }:规则集链接「立即更新」(#155)。
+  // 名单平时 24 小时才随部署重拉一次;自己维护名单的人改完点这个,立刻重拉重编。内核盯着本地 .srs,变了自己
+  // 重新加载;只有名单的构成变了(多出 / 少了 IP 或域名那一份)才要重启内核(needsRestart)。
+  // 几个人同时点同一条链接只拉一次。
+  const refreshing = new Map()
+  router.post('/rulesets/refresh', express.json({ limit: '8kb' }), async (req, res) => {
+    const url = String((req.body && req.body.url) || '').trim()
+    if (!/^https?:\/\/[^\s]+$/i.test(url) || url.length > 2048) {
+      return res.status(400).json({ message: '规则集链接必须是 http 或 https 网址' })
+    }
+    try {
+      if (!refreshing.has(url)) {
+        refreshing.set(url, refreshRuleList(ctx, paths, url, { fetchImpl, log: (m) => console.log(m) }).finally(() => refreshing.delete(url)))
+      }
+      const r = await refreshing.get(url)
+      // 预览缓存和规则页推算用的索引都是旧内容,一起作废
+      cache.delete(`url:${url}`)
+      for (const tag of r.tags) cache.delete(tag)
+      dropRuleSetIndex(r.tags)
+      res.json({ url, tag: r.tag, total: r.total, counts: r.counts, needsRestart: r.shapeChanged })
+    } catch (error) {
+      res.status(503).json({ message: error instanceof Error ? error.message : String(error) })
+    }
+  })
+
   // 导入规则:把远程名单一次解析成明细,交给站点集编辑器转成本地规则。
   // 这里只负责下载和解析,不写档案、不编译 .srs;用户点编辑器的「保存」时才会随站点集
   // 一起落库,这样导入完成后启动不再依赖这个 URL。
   router.get('/rulesets/import', async (req, res) => {
     const url = String(req.query.url || '').trim()
     if (!/^https?:\/\/[^\s]+$/i.test(url) || url.length > 2048) {
-      return res.status(400).json({ message: '规则集链接必须是 http(s) 网址' })
+      return res.status(400).json({ message: '规则集链接必须是 http 或 https 网址' })
     }
     try {
-      const parsed = await loadRuleList(fetchImpl, url)
+      await assertPublicUrl(url, { allowPrivate: true })
+      const parsed = await loadRuleList(fetchImpl, url, { decompile: srsDecompiler(ctx, paths, `import-${listTagForUrl(url)}`) })
       const entries = []
       for (const [type, values] of Object.entries(parsed)) {
         for (const value of values) entries.push({ type, value })

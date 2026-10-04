@@ -1,6 +1,9 @@
+import { flipDiagnostics } from '../system/flip-files.mjs'
 import express from 'express'
 import path from 'node:path'
 import { configMetaPath, TUN_DEVICE } from '../system/deploy.mjs'
+import { NODE_DNS_TAG_PREFIX } from '../engine/node-dns.mjs'
+import { detectDnsHolders } from '../system/conflicts.mjs'
 
 // 「导出诊断包」:把定位一个问题需要的东西一次打成一个 JSON——面板 / 内核版本、固件和架构、
 // 内存和存储、内核在不在跑、脱敏后的内核配置、分流设置、最近一次部署结果、nft 表、有没有别的
@@ -54,6 +57,28 @@ const collectNodeHosts = (config) => {
   return [...hosts].filter((h) => h.length >= 4)
 }
 
+// 节点专用解析器(#136,engine/node-dns.mjs):机场给的 DoH 带私有路径,相当于口令;主机名也能认出是哪家机场。
+// dns 段一般不脱敏(见 redact 的说明),这几台例外:配置里换成占位,主机名和路径另外收进替换表,
+// 日志里万一带出完整地址(Go 的 HTTP 报错会打印 URL)也一并抹掉
+const isNodeDnsServer = (s) => s && typeof s === 'object' && typeof s.tag === 'string' && s.tag.startsWith(NODE_DNS_TAG_PREFIX)
+const nodeDnsKnown = (config) => {
+  const hosts = []
+  const secrets = []
+  for (const s of Array.isArray(config?.dns?.servers) ? config.dns.servers : []) {
+    if (!isNodeDnsServer(s) || s.type !== 'https') continue
+    if (typeof s.server === 'string' && s.server.length >= 4) hosts.push(s.server)
+    if (typeof s.path === 'string' && s.path.length >= 6) secrets.push(s.path)
+  }
+  return { hosts, secrets }
+}
+const maskNodeDns = (config) => {
+  if (!Array.isArray(config?.dns?.servers)) return config
+  const servers = config.dns.servers.map((s) => (isNodeDnsServer(s) && s.type === 'https'
+    ? { ...s, server: '<host>', ...(s.path ? { path: '***' } : {}) }
+    : s))
+  return { ...config, dns: { ...config.dns, servers } }
+}
+
 // 出站里的秘密原文(密码 / UUID / 密钥 / clash 密钥):正常情况日志里不会有,但万一某条错误
 // 把它打出来了,也得在整个包里抹掉,不能只靠字段名
 const collectSecrets = (value, key = '', out = new Set()) => {
@@ -100,9 +125,10 @@ export const buildDiagnostics = async ({ store, ctx, paths, now = () => new Date
   const config = await readJson(ctx, paths.configPath)
   const profile = (store.getProfile && store.getProfile()) || {}
   // 主机名和秘密从内核配置和档案两边收:档案里有订阅地址、节点密码,内核配置里有 clash 密钥
+  const nodeDns = nodeDnsKnown(config)
   const known = {
-    hosts: collectNodeHosts(config),
-    secrets: [...collectSecrets(config), ...collectSecrets(profile)],
+    hosts: [...collectNodeHosts(config), ...nodeDns.hosts],
+    secrets: [...collectSecrets(config), ...collectSecrets(profile), ...nodeDns.secrets],
   }
   const scrub = (v) => (typeof v === 'string' ? scrubText(v, known) : v)
   const installRoot = path.dirname(paths.metaPath)
@@ -149,22 +175,34 @@ export const buildDiagnostics = async ({ store, ctx, paths, now = () => new Date
       disk: df.out,
       tunDevice: await ctx.exists(TUN_DEVICE),
       conflictingPlugins: conflicts,
+      // 面板是不是带着 madvise 兼容库在跑(内核缺这个系统调用的设备,安装脚本自动带上,GitHub #290 #293)
+      nodePreload: process.env.LD_PRELOAD || null,
     },
     kernel: {
       status: status.out,
       processes: scrub(procs.out),
       nftTables: nft.out,
       configMeta,
-      config: config ? scrubJson(redact(config), known) : null,
+      // 热切换:开关 / 旁路动态集的文件和元数据对不对得上(运行中的还是老版本生成的老结构就是 null)
+      flip: await flipDiagnostics(ctx, paths, configMeta),
+      config: config ? scrubJson(redact(maskNodeDns(config)), known) : null,
     },
     settings: {
       dns: profile.dns ?? null,
       ipv6: profile.ipv6 ?? null,
       tun: profile.tun ?? null,
       directForNodes: profile.directForNodes ?? null,
+      rejectQuic: profile.rejectQuic ?? null,
+      directBypass: profile.directBypass ?? null,
+      bypassPorts: profile.bypassPorts ?? null,
+      bypassPortsWhitelist: profile.bypassPortsWhitelist ?? null,
+      bypassPortsMode: profile.bypassPortsMode ?? null,
       routing: scrubJson(redact(profile.routing ?? null), known),
       clientRoutes: profile.clientRoutes ?? null,
     },
+    // 谁占着 53:AdGuard Home、GL.iNet 的「覆盖客户端 DNS」这类东西不是代理插件、不拦部署,
+    // 但它们抢了 53 终端查询就不经内核(GitHub #200)。如实记下来,排查时一眼能看见
+    dnsPort53: await detectDnsHolders(ctx).catch(() => []),
     lastDeploy: store.getDeployState ? store.getDeployState() : null,
     logs: {
       kernel: scrub(tail(kernelLog.out, 200)),

@@ -20,7 +20,7 @@ test('resolveSelections:内核在跑就用它的选择并存快照;读不到就�
   assert.deepEqual(resolveSelections({}, {}), {})
 })
 
-test('fetchSelections:内核没起来(fetch 抛错 / 非 2xx)返回空对象', async () => {
+test('fetchSelections:内核没起来（fetch 抛错 / 非 2xx）返回空对象', async () => {
   assert.deepEqual(await fetchSelections(async () => { throw new Error('ECONNREFUSED') }, 's'), {})
   assert.deepEqual(await fetchSelections(async () => ({ ok: false }), 's'), {})
   assert.deepEqual(await fetchSelections(async () => ({ ok: true, json: async () => ({ proxies: { Google: { now: '美国-手动' }, 节点A: { type: 'VLESS' } } }) }), 's'), { Google: '美国-手动' })
@@ -123,7 +123,7 @@ test('withDeployLock:持有者按心跳刷新时间戳,另一进程看到锁龄�
   const sleeps = []
   await assert.rejects(
     () => withDeployLock(store, async () => 'stolen', { sleep: async (ms) => { sleeps.push(ms); t += ms }, now, pid: 202, alive: () => true, waitMs: 2000, setIntervalImpl, clearIntervalImpl }),
-    /另一个部署\(pid 101\)/,
+    /另一个部署（pid 101）/,
   )
   assert.ok(sleeps.length > 0)
   // 持有者放手后再抢就能进;持有者退出时清了心跳、删了锁
@@ -152,7 +152,7 @@ test('runExclusive:排在部署队列里按顺序执行,前一个没完后一个
   assert.deepEqual(order, ['first', 'second'])
 })
 
-test('firstLayerChanged:只按 IP 分流的站点集从直连切到代理,DNS 分类表看不出来,但入口旁路的集合变了 → 要重新生成(复审 R3)', async () => {
+test('firstLayerChanged:只按 IP 分流的站点集从直连切到代理,DNS 分类表看不出来,但入口旁路的集合变了 → 要重新生成（复审 R3）', async () => {
   const paths = createPaths('/opt/open-box')
   const routing = { fallbackDefault: 'direct', policies: [{ name: '国内', default: 'direct', rulesets: ['geoip-cn'] }] }
   const store = { getProfile: () => ({ routing, clientRoutes: [] }), getGroups: () => [{ id: 'g', name: '香港-自动', type: 'urltest', mode: 'dynamic', keywords: [] }] }
@@ -176,7 +176,26 @@ test('firstLayerChanged:只按 IP 分流的站点集从直连切到代理,DNS �
   assert.equal(await firstLayerChanged(createMockContext({ files: { [configMetaPath(paths)]: JSON.stringify({ ...meta, firstLayer: undefined }) } }), paths, store, { 国内: '香港-自动' }), false)
 })
 
-test('firstLayerChanged / currentBypassPlan:FakeIP 下旁路结论按计划阶段(含 pending)比,不按部署核对后的结果比', async () => {
+test('firstLayerChanged:屏蔽 QUIC 开着时,纯 IP 站点集翻面也要重新生成(拒绝规则按出口类别插);没开就不因为它重生成', async () => {
+  const paths = createPaths('/opt/open-box')
+  // 用不进入口旁路的 IP 段,免得被旁路指纹先判出来:只剩「出口类别变了」这一个理由
+  const routing = { fallbackDefault: 'direct', policies: [{ name: '内网段', default: 'direct', ipCidr: ['203.0.113.0/24'] }] }
+  const groups = [{ id: 'g', name: '香港-自动', type: 'urltest', mode: 'dynamic', keywords: [] }]
+  const { bypassPlanKey, nativeBypassPlan } = await import('../engine/routing-model.mjs')
+  const members = ['直连', '香港-自动', '拒绝']
+  const planKey = bypassPlanKey(nativeBypassPlan(routing, { members, builtin: { direct: '直连', block: '拒绝', directEnabled: true, blockEnabled: true }, selections: {}, clientRoutes: [], fakeIp: false, dnsMode: 'hijack' }))
+  const metaOf = (rejectQuic) => ({
+    dnsMode: 'hijack', dnsPolicyMembers: members, dnsPolicyClasses: { 其他: 'direct' },
+    firstLayer: { dnsMode: 'hijack', dnsForward: 'all', nativeBypass: { enabled: false, sets: [] }, nativeBypassPlanned: { sets: [], pending: [] }, nativeBypassPlanKey: planKey, policyClasses: { 内网段: 'direct', 其他: 'direct' }, ipv6: 'off', rejectQuic, dnsSourceRules: false },
+  })
+  const storeOf = (rejectQuic) => ({ getProfile: () => ({ routing, clientRoutes: [], rejectQuic }), getGroups: () => groups })
+  const ctxOf = (rejectQuic) => createMockContext({ files: { [configMetaPath(paths)]: JSON.stringify(metaOf(rejectQuic)) } })
+  assert.equal(await firstLayerChanged(ctxOf(true), paths, storeOf(true), { 内网段: '香港-自动' }), true, '开着:直连 → 代理要重生成')
+  assert.equal(await firstLayerChanged(ctxOf(true), paths, storeOf(true), { 内网段: '直连' }), false, '没翻面不动')
+  assert.equal(await firstLayerChanged(ctxOf(false), paths, storeOf(false), { 内网段: '香港-自动' }), false, '没开屏蔽 QUIC:路由里没有按类别插的东西,不用重生成')
+})
+
+test('firstLayerChanged / currentBypassPlan:FakeIP 下旁路结论按计划阶段（含 pending）比,不按部署核对后的结果比', async () => {
   const { currentBypassPlan } = await import('./deploy-runner.mjs')
   const paths = createPaths('/opt/open-box')
   const routing = { fallbackDefault: 'direct', policies: [
@@ -201,7 +220,7 @@ test('firstLayerChanged / currentBypassPlan:FakeIP 下旁路结论按计划阶�
   assert.equal(await firstLayerChanged(ctx, paths, store, { 国内: '香港-自动' }), true)
 })
 
-test('firstLayerChanged(第四轮 T2):pending 的核对对象从一条变成两条(前置乙 直连 → 代理)→ 指纹不同 → 要重新生成;切回来 → 不动', async () => {
+test('firstLayerChanged（第四轮 T2）:pending 的核对对象从一条变成两条（前置乙 直连 → 代理）→ 指纹不同 → 要重新生成;切回来 → 不动', async () => {
   const { currentBypassPlan } = await import('./deploy-runner.mjs')
   const { bypassPlanKey } = await import('../engine/routing-model.mjs')
   const paths = createPaths('/opt/open-box')
@@ -233,7 +252,7 @@ test('firstLayerChanged(第四轮 T2):pending 的核对对象从一条变成两�
   assert.equal(await firstLayerChanged(createMockContext({ files: { [configMetaPath(paths)]: JSON.stringify(plainMeta) } }), paths, plainStore, {}), false)
 })
 
-test('firstLayerChanged(第四轮 T3):代理 v6 降为 IPv4 时,纯 IP 站点集 直连 → 代理 → 直连 每次都要重新生成(v6 保护跟着变);node 模式不看它', async () => {
+test('firstLayerChanged（第四轮 T3）:代理 v6 降为 IPv4 时,纯 IP 站点集 直连 → 代理 → 直连 每次都要重新生成（v6 保护跟着变）;node 模式不看它', async () => {
   const paths = createPaths('/opt/open-box')
   const groups = [{ id: 'g', name: '任意出口甲', type: 'selector', mode: 'static', members: ['n'] }]
   const routing = { fallbackDefault: 'direct', policies: [{ name: '纯IP策略', ipCidr: ['2606:4700::/32'], default: 'direct' }] }
@@ -258,7 +277,7 @@ test('firstLayerChanged(第四轮 T3):代理 v6 降为 IPv4 时,纯 IP 站点集
   assert.equal(await firstLayerChanged(nodeCtx, paths, nodeStore, { 纯IP策略: '任意出口甲' }), false)
 })
 
-test('regenerateIfPlanChanged:判断没变就什么都不做;变了就真的走 runDeploy(调用方不必再各自判断)', async () => {
+test('regenerateIfPlanChanged:判断没变就什么都不做;变了就真的走 runDeploy（调用方不必再各自判断）', async () => {
   const { regenerateIfPlanChanged } = await import('./deploy-runner.mjs')
   const paths = createPaths('/opt/open-box')
   const routing = { fallbackDefault: 'direct', policies: [{ name: '国内', default: 'direct', rulesets: ['geoip-cn'] }] }

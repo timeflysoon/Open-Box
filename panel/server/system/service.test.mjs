@@ -14,7 +14,7 @@ test('createPaths 默认根与派生路径', () => {
   assert.equal(p.initd.panel, '/etc/init.d/openbox-panel')
 })
 
-test('createPaths 可注入根(测试用)', () => {
+test('createPaths 可注入根（测试用）', () => {
   const p = createPaths('/tmp/ob')
   assert.equal(p.configPath, '/tmp/ob/etc/config.json')
 })
@@ -50,7 +50,7 @@ test('serviceStatus 判定 running', async () => {
   assert.equal((await serviceStatus(no, '/etc/init.d/openbox')).running, false)
 })
 
-test('procd "active with no instances"(已注册但零进程)不算 running', async () => {
+test('procd "active with no instances"（已注册但零进程）不算 running', async () => {
   const ctx = createMockContext({ execResults: { '/etc/init.d/openbox status': { code: 0, stdout: 'active with no instances' } } })
   const r = await serviceStatus(ctx, '/etc/init.d/openbox')
   assert.equal(r.running, false)

@@ -14,7 +14,7 @@ const tmpDir = () => {
   return dir
 }
 
-test('loadStorageDefaults:只收 config/*(排除 access-*)的字符串值;背景必须是 data:image', () => {
+test('loadStorageDefaults:只收 config/*（排除 access-*）的字符串值;背景必须是 data:image', () => {
   const { entries, background } = loadStorageDefaults(tmpDir())
   assert.deepEqual(entries, { 'config/theme-mode': 'light' })
   assert.equal(background, 'data:image/jpeg;base64,AAAA')
@@ -41,12 +41,19 @@ test('随包的默认值文件本身合法:有主题等关键项,背景是 data:
   assert.ok(background.startsWith('data:image/'))
 })
 
-test('全新安装同时写入默认档案(目标分流);已有 openbox/profile 或已有 config/* 时不动', async () => {
+test('全新安装同时写入默认档案（目标分流）;已有 openbox/profile 或已有 config/* 时不动', async () => {
   const { loadProfileDefaults, PROFILE_KEY } = await import('./seed-defaults.mjs')
   const defaults = loadProfileDefaults()
   assert.ok(defaults && defaults.routing && defaults.routing.policies.length >= 5, '随包的 profile-defaults.json 要有一套站点集')
   const names = defaults.routing.policies.map((p) => p.name)
-  for (const n of ['AI', 'Youtube', 'Google', 'Microsoft', 'Apple', 'Games', '国内']) assert.ok(names.includes(n), n)
+  for (const n of ['Speed', 'AI', 'Youtube', 'Google', 'Microsoft', 'Apple', 'Games', '国内']) assert.ok(names.includes(n), n)
+  // Speed 必须排最前:站点集是从上往下先命中先生效,排在「国外」后面的话 speedtest.net
+  // 这类会被「国外」先接走,测速就不走指定线路了(用户明确要求提到最上面)
+  assert.equal(names[0], 'Speed', `Speed 要排第一,实际顺序:${names.join(' / ')}`)
+  const speed = defaults.routing.policies[0]
+  assert.ok((speed.domain.length + speed.domainSuffix.length) >= 50, '测速站点名单不该是空的')
+  // 出口必须是占位符:新装机器上没有作者的节点组,写死组名会指向一个不存在的出口
+  for (const p of defaults.routing.policies) assert.ok(['proxy', 'direct'].includes(p.default), `${p.name} 的出口要用占位符,实际 ${p.default}`)
   assert.equal(defaults.routing.fallbackName, '其他')
   // 不带任何个人域名
   // 默认档案取自作者自己的路由器,发出去之前必须把个人域名摘干净

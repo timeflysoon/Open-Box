@@ -11,7 +11,7 @@ const emitUser = (groups, ns) => {
   return { ...r, outbounds: userOnly(r.outbounds) }
 }
 
-test('组类型:内核只有 urltest / selector,failover 是应用层类型(内核里落成 selector + 内部 urltest)', () => {
+test('组类型:内核只有 urltest / selector,failover 是应用层类型（内核里落成 selector + 内部 urltest）', () => {
   assert.deepEqual([...GROUP_TYPES], ['urltest', 'selector', 'failover'])
 })
 
@@ -77,6 +77,15 @@ test('故障转移:单节点页签直接引用节点,多节点页签生成内部
   assert.equal(failover[0].settings.failureThreshold, 2)
 })
 
+test('故障转移·手动选择的页签(#188):多节点页签生成内部 selector(默认第一个节点),运行映射 mode=selector;单节点页签不受影响', () => {
+  const g = failoverGroup()
+  g.lanes = g.lanes.map((l) => (l.id === 'B' ? { ...l, manual: true } : l))
+  const { outbounds, failover } = emitUser([...defaultGroups(), g], nodes)
+  const sub = outbounds.find((o) => o.tag === '__fo:fo1:B')
+  assert.deepEqual(sub, { type: 'selector', tag: '__fo:fo1:B', outbounds: ['香港-02', '美国-01'], default: '香港-02' })
+  assert.deepEqual(failover[0].lanes.map((l) => [l.id, l.mode, l.ref]), [['A', 'single', '香港-01'], ['B', 'selector', '__fo:fo1:B']])
+})
+
 test('故障转移:失效节点不算有效成员;页签全空的组只剩兜底拒绝,不补直连;内置拒绝停用时用内部 block', () => {
   const groups = [
     ...defaultGroups().map((g) => (g.id === BUILTIN_IDS.block ? { ...g, enabled: false } : g)),
@@ -118,7 +127,7 @@ test('故障转移:别的组可以把故障转移父组当成员,但拿不到内
   assert.deepEqual(outbounds.find((o) => o.tag === '手动').outbounds, ['主备'])
 })
 
-test('默认两个组:所有-自动(urltest) 与 所有-手动(selector),成员都是全部节点', () => {
+test('默认两个组:所有-自动（urltest）与 所有-手动（selector）,成员都是全部节点', () => {
   const { outbounds, dropped } = emitUser(defaultGroups(), nodes)
   assert.equal(dropped.length, 0)
   assert.deepEqual(outbounds.map((o) => [o.tag, o.type]), [
@@ -141,7 +150,7 @@ test('allNodes 是动态的:节点变了,组的成员跟着变', () => {
 })
 
 // 以下三条是 sing-box check 挡不住、必须由生成器自己保证的(见模块头注释)
-test('成员为空的组挂 direct 占位:照样写进配置,但不能是空 outbounds(内核会 FATAL)', () => {
+test('成员为空的组挂 direct 占位:照样写进配置,但不能是空 outbounds（内核会 FATAL）', () => {
   const { outbounds, dropped, placeholders } = emitUser(
     [{ id: 'g', name: '空组', type: 'selector', members: [] }], nodes,
   )
@@ -173,7 +182,7 @@ test('两个组互相引用 → 整对丢弃,不生成会在运行时打转的�
   assert.deepEqual(dropped.map((d) => d.reason), ['cycle', 'cycle'])
 })
 
-test('组可以引用别的组(非环),按依赖顺序都能生成', () => {
+test('组可以引用别的组（非环）,按依赖顺序都能生成', () => {
   const { outbounds, dropped } = emitUser([
     { id: 'a', name: '上层', type: 'selector', members: ['下层'] },
     { id: 'b', name: '下层', type: 'selector', members: ['香港-01'] },
@@ -182,7 +191,7 @@ test('组可以引用别的组(非环),按依赖顺序都能生成', () => {
   assert.deepEqual(outbounds.map((o) => o.tag).sort(), ['上层', '下层'])
 })
 
-test('重复成员去重(sing-box 自己不去重)', () => {
+test('重复成员去重（sing-box 自己不去重）', () => {
   const { outbounds } = emitUser(
     [{ id: 'g', name: 'G', type: 'selector', members: ['香港-01', '香港-01'] }], nodes,
   )
@@ -218,7 +227,7 @@ test('动态组不带关键词 = 全部节点', () => {
   assert.deepEqual(outbounds[0].outbounds, ['A', 'B'])
 })
 
-test('动态组只认节点,不会把同名命中的别的组吸进来(否则凭空成环)', () => {
+test('动态组只认节点,不会把同名命中的别的组吸进来（否则凭空成环）', () => {
   const { outbounds } = emitUser(
     [
       { id: 'g1', name: '香港-自动', type: 'urltest', mode: 'dynamic', keywords: ['香港'] },
@@ -295,7 +304,7 @@ test('默认列表:直连、拒绝两个内置出站在前,两个默认组自带
 
 // -------- 内置出站:直连 / 拒绝 --------
 
-test('内置出站永远在列表里:老档案没有就补上(直连最前、拒绝最后),有就照用户排的位置', () => {
+test('内置出站永远在列表里:老档案没有就补上（直连最前、拒绝最后）,有就照用户排的位置', () => {
   const fresh = normalizeGroups([{ id: 'g', name: 'G', type: 'selector', members: [] }])
   assert.deepEqual(fresh.map((g) => g.kind || g.name), ['direct', 'G', 'block'])
   const reordered = normalizeGroups([
@@ -323,7 +332,7 @@ test('内置出站按名字出 tag:改名之后内核里的出站就叫那个名
   assert.deepEqual(outbounds[2].outbounds, ['国内直出'])
 })
 
-test('停用的组不进配置;停用的拒绝也不进;停用的直连仍然要在(内核离不开它)', () => {
+test('停用的组不进配置;停用的拒绝也不进;停用的直连仍然要在（内核离不开它）', () => {
   const { outbounds, builtin } = emitUserGroups([
     { id: BUILTIN_IDS.direct, name: '直连', enabled: false },
     { id: BUILTIN_IDS.block, name: '拒绝', enabled: false },
@@ -336,7 +345,7 @@ test('停用的组不进配置;停用的拒绝也不进;停用的直连仍然要
   assert.deepEqual(builtinTags([]), { direct: '直连', block: '拒绝', directEnabled: true, blockEnabled: true })
 })
 
-test('内置出站的图标:用户存了什么就用什么(含 misc:direct / misc:reject 这两个变体),只有空的才补默认', () => {
+test('内置出站的图标:用户存了什么就用什么（含 misc:direct / misc:reject 这两个变体）,只有空的才补默认', () => {
   const [direct] = normalizeGroups([{ id: BUILTIN_IDS.direct, name: '直连', icon: 'misc:direct' }])
   assert.equal(direct.icon, 'misc:direct')
   const list = normalizeGroups([{ id: BUILTIN_IDS.block, name: '拒绝', icon: 'misc:reject' }])
@@ -388,7 +397,7 @@ test('图标缩放:整数、限在 ±20,缺省 0', async () => {
   assert.equal(normalizeGroup({ name: 'x' }).iconScale, 0)
 })
 
-test('interval 比 idle_timeout 长时 idle_timeout 抬到和 interval 一样(sing-box 要求 interval ≤ idle_timeout,check 查不出、启动才炸)', async () => {
+test('interval 比 idle_timeout 长时 idle_timeout 抬到和 interval 一样（sing-box 要求 interval ≤ idle_timeout,check 查不出、启动才炸）', async () => {
   const { emitUserGroups, idleTimeoutFor } = await import('./user-groups.mjs')
   assert.equal(idleTimeoutFor('12h', '5m'), '12h')
   assert.equal(idleTimeoutFor('12h', '1440m'), '1440m')

@@ -131,3 +131,77 @@ test('DNS record pagination bounds invalid sizes and allows pages beyond 1000 at
   assert.deepEqual(last.rows.map((row) => row.id), [1])
   for (const page of [0, -1, 'bad', 'Infinity']) assert.equal(data.records({ page }).page, 1)
 })
+
+// dnsmasq 转发模式:内核那条来源是本机的记录,落库前按 dnsmasq 查询日志对回终端;dnsmasq 自己答掉的补成记录(system/dnsmasq-query-log.mjs)
+const fakeDnsmasq = ({ clients = {}, answered = [] } = {}) => {
+  let polls = 0
+  const queue = [...answered]
+  return {
+    active: () => true,
+    poll: () => { polls++ },
+    resolve: (row) => { const c = clients[row.domain]; delete clients[row.domain]; return c || '' },
+    takeAnswered: () => queue.splice(0),
+    set: (domain, client) => { clients[domain] = client },
+    polls: () => polls,
+  }
+}
+
+test('dnsmasq-forwarded records get their device from the query log; dnsmasq answers are stored and counted', () => {
+  const db = new DatabaseSync(':memory:')
+  let clock = 1700000000000
+  const now = () => clock
+  const dnsmasq = fakeDnsmasq({
+    clients: { 'a.example': '10.0.0.20', 'self.example': '127.0.0.1' },
+    answered: [{ at: clock, domain: 'cached.example', qtype: 'A', source: '10.0.0.21', result: 'cached', list: '', elapsed: null, via: 'dnsmasq' }],
+  })
+  const data = createDnsFilterStore(db, { now, dnsmasq })
+  for (const [domain, source] of [['a.example', '127.0.0.1'], ['self.example', '127.0.0.1'], ['late.example', '127.0.0.1'], ['direct.example', '192.168.3.18']]) {
+    data.start(clock)
+    data.finish({ at: clock, domain, qtype: 'A', source, result: 'allowed', list: '', elapsed: 5 })
+  }
+  const first = data.records({})
+  assert.ok(dnsmasq.polls() >= 1, '落库前先读 dnsmasq 日志')
+  assert.deepEqual(first.rows.map((r) => [r.domain, r.source, r.via]).sort(), [
+    ['a.example', '10.0.0.20', 'dnsmasq'],
+    ['cached.example', '10.0.0.21', 'dnsmasq'],
+    ['direct.example', '192.168.3.18', ''],
+    ['self.example', '127.0.0.1', 'dnsmasq'],
+  ], '还没对上的那条先等着')
+  // 日志晚到:下一轮对上
+  dnsmasq.set('late.example', '10.0.0.22')
+  clock += 1000
+  assert.equal(data.records({}).rows.find((r) => r.domain === 'late.example').source, '10.0.0.22')
+  // dnsmasq 自己答的也算进查询量,不计耗时
+  const summary = data.summary()
+  assert.equal(summary.queries, 5)
+  assert.equal(summary.timed, 4)
+  assert.equal(data.records({ result: 'dnsmasq' }).total, 1)
+  assert.equal(data.records({ result: 'cached' }).total, 1)
+  assert.equal(data.records({ result: 'allowed' }).total, 4)
+  db.close()
+})
+
+test('unmatched dnsmasq-forwarded records are written as router forwarding after a short wait or on stop', () => {
+  const db = new DatabaseSync(':memory:')
+  let clock = 1700000000000
+  const data = createDnsFilterStore(db, { now: () => clock, dnsmasq: fakeDnsmasq() })
+  data.finish({ at: clock, domain: 'x.example', qtype: 'A', source: '127.0.0.1', result: 'allowed', list: '', elapsed: 1 })
+  assert.equal(data.records({}).total, 0)
+  clock += 6000
+  const rows = data.records({}).rows
+  assert.deepEqual(rows.map((r) => [r.source, r.via]), [['127.0.0.1', '']])
+  data.finish({ at: clock, domain: 'y.example', qtype: 'A', source: '127.0.0.1', result: 'allowed', list: '', elapsed: 1 })
+  data.flush({ force: true })
+  assert.equal(data.records({}).total, 2, '面板停止时不再等')
+  db.close()
+})
+
+test('old record tables gain the via column and keep their rows', () => {
+  const db = new DatabaseSync(':memory:')
+  db.exec('CREATE TABLE dns_filter_records (id INTEGER PRIMARY KEY, at INTEGER, domain TEXT, qtype TEXT, source TEXT, result TEXT, list TEXT, elapsed REAL)')
+  db.prepare('INSERT INTO dns_filter_records (at,domain,qtype,source,result,list,elapsed) VALUES (?,?,?,?,?,?,?)').run(1700000000000, 'old.example', 'A', '127.0.0.1', 'allowed', '', 3)
+  const data = createDnsFilterStore(db, { now: () => 1700000001000 })
+  const rows = data.records({}).rows
+  assert.deepEqual(rows.map((r) => [r.domain, r.via]), [['old.example', '']])
+  db.close()
+})

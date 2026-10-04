@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import net from 'node:net'
 import test from 'node:test'
 import express from 'express'
-import { registerSubscriptionRoutes, dedupeNodeTags } from './subscriptions.mjs'
+import { registerSubscriptionRoutes, dedupeNodeTags, normalizeAutoUpdate, describeRejection } from './subscriptions.mjs'
 import { createStore } from '../store/openbox-store.mjs'
 
 const memStore = () => {
@@ -15,7 +15,7 @@ const memStore = () => {
 }
 
 // 测试环境不能依赖真实 DNS:沙箱/CI 网络里常见"任意域名都被解析成某个地址"的透明代理/
-// 合成 resolver(实测过——不存在的域名被解析到 198.15.0.0/15 基准测试网段),真连外网也
+// 合成 resolver(实测过——不存在的域名被解析到 198.18.0.0/15 基准测试网段),真连外网也
 // 慢且不确定。这里注入一个假 lookup:字面 IP 原样透传(SSRF 负向用例靠它验证回环/内网
 // 地址仍被拒绝),域名一律解析成一个真正的公网地址(8.8.8.8)。
 const fakePublicLookup = async (hostname) => {
@@ -62,7 +62,7 @@ const SHARELINK_MULTI = [HK_LINE, VMESS_US].join('\n')
 
 // -------- dedupeNodeTags 单测 --------
 
-test('dedupeNodeTags 无重复保持原样(同引用)', () => {
+test('dedupeNodeTags 无重复保持原样（同引用）', () => {
   const a = { tag: 'A' }
   const b = { tag: 'B' }
   const out = dedupeNodeTags([a, b])
@@ -94,7 +94,7 @@ test('dedupeNodeTags 不修改原节点对象,仅重复项产出新对象', () =
 
 // -------- HTTP 路由集成测试 --------
 
-test('POST preview 用 content(多协议 sharelink)→ 返回 nodes/preview/groups,且不落库', async () => {
+test('POST preview 用 content（多协议 sharelink）→ 返回 nodes/preview/groups,且不落库', async () => {
   const { baseUrl, store, close } = await startApp()
   try {
     const res = await postJson(baseUrl, '/api/openbox/subscriptions/preview', { content: SHARELINK_MULTI })
@@ -141,7 +141,7 @@ test('POST preview 缺少 url/content → 400', async () => {
   }
 })
 
-test('POST 创建订阅后 GET 列表可见;DELETE 后消失(同时移除节点)', async () => {
+test('POST 创建订阅后 GET 列表可见;DELETE 后消失（同时移除节点）', async () => {
   const fetchImpl = async () => ({ ok: true, status: 200, text: async () => SHARELINK_MULTI })
   const { baseUrl, store, close } = await startApp(fetchImpl)
   try {
@@ -185,7 +185,7 @@ test('DELETE 不存在的 id 仍是幂等的 ok:true', async () => {
   }
 })
 
-test('两条订阅含同名节点 → 保存后 tag 全局唯一(dedupeNodeTags 集成断言)', async () => {
+test('两条订阅含同名节点 → 保存后 tag 全局唯一（dedupeNodeTags 集成断言）', async () => {
   const fetchImpl = async (url) => ({
     ok: true,
     status: 200,
@@ -221,7 +221,7 @@ test('创建时 fetch 返回 500 → 400 且不写入任何数据', async () => 
   }
 })
 
-test('创建时 fetch 网络异常(reject) → 400 且不写入任何数据', async () => {
+test('创建时 fetch 网络异常（reject） → 400 且不写入任何数据', async () => {
   const fetchImpl = async () => {
     throw new Error('ECONNRESET')
   }
@@ -255,7 +255,7 @@ test('创建时缺 url 或 name → 400', async () => {
 // 探测回环/内网端口。校验必须发生在真的调用 fetchImpl 之前,且不能改变已存状态。
 
 
-test('SSRF 防护:非 http/https 协议(file://)→ 400,且从未真正调用 fetchImpl', async () => {
+test('SSRF 防护:非 http/https 协议（file://）→ 400,且从未真正调用 fetchImpl', async () => {
   let called = false
   const fetchImpl = async () => {
     called = true
@@ -276,7 +276,7 @@ test('SSRF 防护:非 http/https 协议(file://)→ 400,且从未真正调用 fe
   }
 })
 
-test('SSRF 防护:正常公网 https 域名仍能通过(注入 fetchImpl,不发真实网络请求)', async () => {
+test('SSRF 防护:正常公网 https 域名仍能通过（注入 fetchImpl,不发真实网络请求）', async () => {
   const fetchImpl = async () => ({ ok: true, status: 200, text: async () => HK_LINE })
   const { baseUrl, store, close } = await startApp(fetchImpl)
   try {
@@ -314,6 +314,7 @@ test('refresh 时拉取失败 → 400,已存订阅与节点保持不变', async 
 
     assert.deepEqual(store.getNodes(), nodesBefore)
     assert.deepEqual(store.getSubscriptions(), subsBefore)
+    assert.match(body.error, /订阅服务器出错\(HTTP 500\)/)
   } finally {
     await close()
   }
@@ -367,7 +368,7 @@ test('refresh 成功后只替换该订阅节点,其它订阅节点不受影响',
 
 
 
-test('round2:合法的 302 重定向链(公网 → 公网)仍然放行', async () => {
+test('round2:合法的 302 重定向链（公网 → 公网）仍然放行', async () => {
   let hops = 0
   const fetchImpl = async (url) => {
     hops += 1
@@ -392,7 +393,7 @@ test('round2:合法的 302 重定向链(公网 → 公网)仍然放行', async (
   }
 })
 
-test('round2:重定向跳数超过上限(4 跳全部合法目标)→ 400', async () => {
+test('round2:重定向跳数超过上限（4 跳全部合法目标）→ 400', async () => {
   const fetchImpl = async (url) => {
     const match = url.match(/^https:\/\/hop-(\d+)\.example\.com\/sub$/)
     const n = match ? Number(match[1]) : 0
@@ -416,7 +417,7 @@ test('round2:重定向跳数超过上限(4 跳全部合法目标)→ 400', async
   }
 })
 
-test('round2:域名解析失败(NXDOMAIN 等) → 400,且从未真正拉取', async () => {
+test('round2:域名解析失败（NXDOMAIN 等） → 400,且从未真正拉取', async () => {
   let called = false
   const fetchImpl = async () => { called = true; return { ok: true, status: 200, text: async () => HK_LINE } }
   const lookup = async () => {
@@ -520,7 +521,7 @@ test('刷新失败时保留原有节点,不会把订阅刷成 0 个节点', asyn
 
 // -------- 修改订阅(PATCH) --------
 
-test('只改名字不触发重新拉取(机场抽风时也得能改名)', async () => {
+test('只改名字不触发重新拉取（机场抽风时也得能改名）', async () => {
   let fetchCount = 0
   const fetchImpl = async () => {
     fetchCount += 1
@@ -545,7 +546,7 @@ test('只改名字不触发重新拉取(机场抽风时也得能改名)', async 
   }
 })
 
-test('开了订阅名前缀时,改名字必须重新解析(否则节点上挂着旧前缀)', async () => {
+test('开了订阅名前缀时,改名字必须重新解析（否则节点上挂着旧前缀）', async () => {
   let fetchCount = 0
   const fetchImpl = async () => {
     fetchCount += 1
@@ -660,7 +661,7 @@ test('PATCH 不存在的订阅 → 404', async () => {
 // 此前粘贴内容只能预览、不能保存(创建接口硬性要求 url)。但"手上只有一堆分享链接、
 // 没有订阅地址"是很常见的情况,所以现在 url / content 二选一。
 
-test('只粘贴内容也能创建订阅(url 为空),内容被存下来', async () => {
+test('只粘贴内容也能创建订阅（url 为空）,内容被存下来', async () => {
   let fetched = false
   const fetchImpl = async () => { fetched = true; throw new Error('不该走网络') }
   const { baseUrl, store, close } = await startApp(fetchImpl)
@@ -789,7 +790,7 @@ test('PUT /order:按给定 id 顺序重排订阅,节点池跟着重排;id 集合
   }
 })
 
-test('刷新订阅期间删掉了另一条订阅 → 刷新完成后它不会复活(按此刻的列表写回,不用拉取前的快照)', async () => {
+test('刷新订阅期间删掉了另一条订阅 → 刷新完成后它不会复活（按此刻的列表写回,不用拉取前的快照）', async () => {
   let store
   let deleteDuringFetch = false
   const fetchImpl = async () => {
@@ -935,9 +936,38 @@ test('每个动作都如实报 changed:上游没动的刷新、只改名字是 f
   }
 })
 
+test('节点池变了就在线换进内核再回复(applied);没变不找内核;在线更新没成功也照常回复,把原因带回去', async () => {
+  let body = HK_LINE
+  const fetchImpl = async () => ({ ok: true, status: 200, text: async () => body })
+  let result = { ok: true, changed: 4 }
+  let calls = 0
+  const applyNow = async () => { calls += 1; return result }
+  const { baseUrl, close } = await startApp(fetchImpl, fakePublicLookup, { applyNow })
+  const refresh = (id) => postJson(baseUrl, `/api/openbox/subscriptions/${id}/refresh`, {}).then((r) => r.json())
+  try {
+    const created = await (await postJson(baseUrl, '/api/openbox/subscriptions', { url: 'http://a', name: 'A' })).json()
+    assert.deepEqual(created.applied, { ok: true, changed: 4 })
+    assert.equal(calls, 1)
+    const same = await refresh(created.id)
+    assert.equal(same.changed, false)
+    assert.equal(same.applied, undefined)
+    assert.equal(calls, 1, '节点没变不找内核')
+    body = JP_LINE
+    result = { ok: false, reason: 'kernel-old', changed: 0 }
+    const r = await refresh(created.id)
+    assert.equal(r.changed, true)
+    assert.deepEqual(r.applied, { ok: false, changed: 0, reason: 'kernel-old' })
+    result = { ok: true, skipped: 'not-running', changed: 0 }
+    const off = await (await fetch(`${baseUrl}/api/openbox/subscriptions/${created.id}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled: false }) })).json()
+    assert.deepEqual(off.applied, { ok: true, changed: 0, skipped: 'not-running' })
+  } finally {
+    await close()
+  }
+})
+
 // -------- 定期更新计划 --------
 
-test('autoUpdate:新建时存下(归一化到 1~30 天、0~23 点),改它不重拉,关掉就是 null;粘贴来的订阅没有计划', async () => {
+test('autoUpdate:新建时存下（归一化到 1~30 天、0~23 点）,改它不重拉,关掉就是 null;粘贴来的订阅没有计划', async () => {
   let fetched = 0
   const fetchImpl = async () => { fetched += 1; return { ok: true, status: 200, text: async () => HK_LINE } }
   const { baseUrl, store, close } = await startApp(fetchImpl)
@@ -993,7 +1023,7 @@ test('refresh 期间只改了自动更新开关 → 刷新照常写节点,开关
   }
 })
 
-test('refresh 期间改了名字或来源 → 这次结果作废(报错、节点不动),新名字和新来源保留', async () => {
+test('refresh 期间改了名字或来源 → 这次结果作废（报错、节点不动）,新名字和新来源保留', async () => {
   const { fetchImpl, release } = deferredFetch()
   const { baseUrl, store, close } = await startApp(fetchImpl)
   try {
@@ -1017,7 +1047,7 @@ test('refresh 期间改了名字或来源 → 这次结果作废(报错、节点
 })
 
 // -------- 审查第 5 项:校验过的地址要绑定到建连上,不给 DNS rebinding 留窗口 --------
-test('拉订阅时把校验过的地址交给 fetch 实现(init.lookup),每一跳重定向都重新校验重新绑定', async () => {
+test('拉订阅时把校验过的地址交给 fetch 实现（init.lookup）,每一跳重定向都重新校验重新绑定', async () => {
   const seen = []
   const fetchImpl = async (url, init) => {
     // 记下这一跳绑定的地址:调用 init.lookup 看它给谁
@@ -1063,7 +1093,7 @@ test('创建时首个 UA 被 403 → 换下一个 UA 继续,第二个 UA 拿到�
   }
 })
 
-test('创建时所有 UA 都被 403 → 400,错误里逐个列出 UA 和状态码;网络错误不换 UA、只请求一次', async () => {
+test('创建时所有 UA 都被 403 → 400,错误一句话说原因和下一步(订阅链接多半失效了);网络错误不换 UA、只请求一次', async () => {
   let calls = 0
   const fetchImpl = async () => {
     calls += 1
@@ -1074,9 +1104,9 @@ test('创建时所有 UA 都被 403 → 400,错误里逐个列出 UA 和状态�
     const res = await postJson(baseUrl, '/api/openbox/subscriptions', { url: 'http://sub.example.com/a', name: 'Sub A' })
     assert.equal(res.status, 400)
     const body = await res.json()
-    assert.match(body.error, /User-Agent/)
-    assert.match(body.error, /clash-verge\/v2\.0\.0 → HTTP 403/)
-    assert.match(body.error, /Open-Box\/1\.0 → HTTP 403/)
+    assert.match(body.error, /订阅链接被机场拒绝\(HTTP 403,换了 6 种客户端标识都一样\)/)
+    assert.match(body.error, /复制新的订阅链接/)
+    assert.ok(!body.error.includes('clash-verge'), '逐条的明细只进日志,不塞给用户')
     assert.ok(calls >= 3, `应逐个 UA 都试过:${calls}`)
     assert.deepEqual(store.getSubscriptions(), [])
   } finally {
@@ -1095,7 +1125,7 @@ test('创建时所有 UA 都被 403 → 400,错误里逐个列出 UA 和状态�
 })
 
 // ---------- 订阅地址允许内网 / 本机(GitHub #42):自建 subconverter 就在局域网或路由器上 ----------
-test('#42:内网 / 回环 / CGNAT 的订阅地址正常拉取(127.0.0.1、192.168.x.x、localhost → 127.0.0.1、::ffff:7f00:1、100.64.x)', async () => {
+test('#42:内网 / 回环 / CGNAT 的订阅地址正常拉取（127.0.0.1、192.168.x.x、localhost → 127.0.0.1、::ffff:7f00:1、100.64.x）', async () => {
   const cases = [
     { url: 'http://127.0.0.1:25500/sub' },
     { url: 'http://192.168.1.2/sub' },
@@ -1129,7 +1159,7 @@ test('#42:内网 / 回环 / CGNAT 的订阅地址正常拉取(127.0.0.1、192.16
   }
 })
 
-test('SSRF 防护(仍保留):未指定地址 / 链路本地(0.0.0.0、::、169.254.x、fe80::)→ 400,且从未真正拉取;file:// 照拒', async () => {
+test('SSRF 防护（仍保留）:未指定地址 / 链路本地（0.0.0.0、::、169.254.x、fe80::）→ 400,且从未真正拉取;file:// 照拒', async () => {
   const targets = ['0.0.0.0', '[::]', '169.254.1.1', '[fe80::1]']
   for (const host of targets) {
     let called = false
@@ -1172,7 +1202,7 @@ test('重定向逐跳仍校验:302 到内网地址放行并真的去拉;302 到�
 })
 
 // ---------- GitHub #37:Node fetch 全被拒 → 系统 curl 兜底 ----------
-test('#37:所有 UA 都被 403 时改用 curl 拉(同一个 UA、逐个试),拿到节点就用;没注入 curl 的测试路径不会去跑系统 curl', async () => {
+test('#37:所有 UA 都被 403 时改用 curl 拉（同一个 UA、逐个试）,拿到节点就用;没注入 curl 的测试路径不会去跑系统 curl', async () => {
   const fetchImpl = async () => ({ ok: false, status: 403, text: async () => 'forbidden' })
   const curlCalls = []
   const curlFetch = async (url, { userAgent }) => {
@@ -1192,19 +1222,43 @@ test('#37:所有 UA 都被 403 时改用 curl 拉(同一个 UA、逐个试),拿�
   } finally {
     await close()
   }
-  // 系统没有 curl(available:false)→ 照旧报「拒绝了所有客户端标识」
+  // 系统没有 curl(available:false)→ 照旧按状态码说原因
   const { baseUrl: b2, close: c2 } = await startApp(fetchImpl, fakePublicLookup, { curlFetch: async () => ({ available: false }) })
   try {
     const res = await postJson(b2, '/api/openbox/subscriptions/preview', { url: 'https://public.example.com/sub' })
     assert.equal(res.status, 400)
-    assert.match((await res.json()).error, /拒绝了所有客户端标识/)
+    assert.match((await res.json()).error, /订阅链接被机场拒绝/)
   } finally {
     await c2()
   }
 })
 
+test('限流(429)就停:不再换 UA、不跑 curl 那一轮;先 403 后 429 的原因按 403 说', async () => {
+  let calls = 0
+  const fetchImpl = async () => { calls += 1; return { ok: false, status: calls === 1 ? 403 : 429, text: async () => '' } }
+  let curlCalls = 0
+  const { baseUrl, close } = await startApp(fetchImpl, fakePublicLookup, { curlFetch: async () => { curlCalls += 1; return { status: 403, text: '' } } })
+  try {
+    const res = await postJson(baseUrl, '/api/openbox/subscriptions/preview', { url: 'https://public.example.com/sub' })
+    assert.equal(res.status, 400)
+    assert.match((await res.json()).error, /^订阅链接被机场拒绝\(HTTP 403,/)
+    assert.equal(calls, 2, '第二次拿到 429 就停')
+    assert.equal(curlCalls, 0)
+  } finally {
+    await close()
+  }
+})
+
+test('describeRejection:按状态码说原因——429 限流、401/403/404/410 链接失效、5xx 服务器出错、其它让问机场', () => {
+  assert.equal(describeRejection([429], 1), '订阅服务器限流了(HTTP 429,请求太频繁),过一会儿再刷新')
+  assert.match(describeRejection([403, 403, 429], 3), /^订阅链接被机场拒绝\(HTTP 403,/, '重试时才 429 是自己敲出来的,原因还是 403')
+  assert.match(describeRejection([403, 403, 404], 6), /^订阅链接被机场拒绝\(HTTP 403 \/ 404,换了 6 种客户端标识都一样\)/)
+  assert.match(describeRejection([502, 503], 6), /^订阅服务器出错\(HTTP 502 \/ 503\)/)
+  assert.match(describeRejection([406, 403], 6), /^订阅服务器拒绝了请求\(HTTP 403 \/ 406,换了 6 种客户端标识都不行\),请联系机场/)
+})
+
 // ---------- GitHub #40:订阅启用 / 停用 ----------
-test('#40:PATCH enabled 只改开关不重拉,开关翻转算节点池变了(changed:true);停用的订阅节点不在 activeNodes 里,记录和节点池原样', async () => {
+test('#40:PATCH enabled 只改开关不重拉,开关翻转算节点池变了（changed:true）;停用的订阅节点不在 activeNodes 里,记录和节点池原样', async () => {
   const fetchImpl = async () => ({ ok: true, status: 200, text: async () => HK_LINE })
   const { baseUrl, store, close } = await startApp(fetchImpl)
   try {
@@ -1255,4 +1309,88 @@ test('F1:curl 兜底传到一半失败 → 刷新失败,原有节点池和更新
   } finally {
     await close()
   }
+})
+
+test('#3:Node fetch 抛的是解析层错误（HPE_HEADER_OVERFLOW）时,系统 curl 用第一个 UA 试一次;curl 也不行就原样抛 Node 的错', async () => {
+  const fetchImpl = async () => { const e = new Error('failed to fetch subscription: HPE_HEADER_OVERFLOW: Parse Error: Header overflow'); throw e }
+  const curlCalls = []
+  const curlFetch = async (url, { userAgent }) => { curlCalls.push(userAgent); return { status: 200, text: HK_LINE } }
+  const { baseUrl, close } = await startApp(fetchImpl, fakePublicLookup, { curlFetch })
+  try {
+    const res = await postJson(baseUrl, '/api/openbox/subscriptions/preview', { url: 'https://public.example.com/sub' })
+    assert.equal(res.status, 200)
+    assert.equal((await res.json()).nodes.length, 1)
+    assert.equal(curlCalls.length, 1, '传输层出错只用第一个 UA 试一次 curl')
+  } finally { await close() }
+  const { baseUrl: b2, close: c2 } = await startApp(fetchImpl, fakePublicLookup, { curlFetch: async () => ({ status: 0, error: 'curl 退出码 7' }) })
+  try {
+    const res = await postJson(b2, '/api/openbox/subscriptions/preview', { url: 'https://public.example.com/sub' })
+    assert.equal(res.status, 400)
+    assert.match((await res.json()).error, /HPE_HEADER_OVERFLOW/)
+  } finally { await c2() }
+})
+
+test('订阅响应头 subscription-userinfo:新建 / 刷新时记到订阅记录（已用、总量、到期）,机场这次没给就保留上次的;预览也带', async () => {
+  let header = 'upload=1000; download=2000; total=107374182400; expire=1767225600'
+  const fetchImpl = async () => ({ ok: true, status: 200, headers: { get: (n) => (n.toLowerCase() === 'subscription-userinfo' ? header : null) }, text: async () => HK_LINE })
+  const { baseUrl, store, close } = await startApp(fetchImpl)
+  try {
+    const preview = await (await postJson(baseUrl, '/api/openbox/subscriptions/preview', { url: 'https://public.example.com/sub' })).json()
+    assert.deepEqual(preview.usage, { upload: 1000, download: 2000, total: 107374182400, expire: 1767225600 })
+    const created = await (await postJson(baseUrl, '/api/openbox/subscriptions', { url: 'https://public.example.com/sub', name: 'A' })).json()
+    const rec = store.getSubscriptions().find((s) => s.id === created.id)
+    assert.equal(rec.usage.download, 2000); assert.equal(rec.usage.expire, 1767225600); assert.ok(rec.usage.at > 0)
+    header = 'upload=1500; download=9000; total=107374182400; expire=1767225600'
+    assert.equal((await fetch(`${baseUrl}/api/openbox/subscriptions/${created.id}/refresh`, { method: 'POST' })).status, 200)
+    assert.equal(store.getSubscriptions().find((s) => s.id === created.id).usage.download, 9000)
+    header = null
+    assert.equal((await fetch(`${baseUrl}/api/openbox/subscriptions/${created.id}/refresh`, { method: 'POST' })).status, 200)
+    assert.equal(store.getSubscriptions().find((s) => s.id === created.id).usage.download, 9000, '这次没给就保留上次的')
+  } finally { await close() }
+})
+
+test('normalizeAutoUpdate:按天 / 按小时两种计划;关掉或不合法就是 null(#14)', () => {
+  assert.equal(normalizeAutoUpdate(null), null)
+  assert.equal(normalizeAutoUpdate({ enabled: false, days: 1, hour: 4 }), null)
+  assert.deepEqual(normalizeAutoUpdate({ enabled: true, days: 99, hour: 30 }), { enabled: true, days: 30, hour: 23 })
+  assert.deepEqual(normalizeAutoUpdate({ enabled: true, mode: 'hours', hours: 6, days: 3, hour: 4 }), { enabled: true, mode: 'hours', hours: 6 })
+  assert.deepEqual(normalizeAutoUpdate({ enabled: true, mode: 'hours', hours: 0 }), { enabled: true, mode: 'hours', hours: 6 })
+  assert.deepEqual(normalizeAutoUpdate({ enabled: true, mode: 'hours', hours: 48 }), { enabled: true, mode: 'hours', hours: 23 })
+})
+
+test('流量 / 到期的头挂在 302 那一跳上时也要认(GitHub #212:不少机场重定向到文件地址,头只在第一跳)', async () => {
+  const hops = []
+  const hdr = (v) => ({ get: (n) => (n.toLowerCase() === 'subscription-userinfo' ? v : n.toLowerCase() === 'location' ? 'https://cdn.example.com/sub.txt' : null) })
+  const fetchImpl = async (url) => {
+    hops.push(url)
+    // 第一跳:302 + 头
+    if (hops.length === 1) return { ok: false, status: 302, headers: hdr('upload=1; download=2; total=1073741824; expire=1798689197'), text: async () => '' }
+    // 最后那跳:只有正文
+    return { ok: true, status: 200, headers: { get: () => null }, text: async () => HK_LINE }
+  }
+  const { baseUrl, store, close } = await startApp(fetchImpl)
+  try {
+    const created = await (await postJson(baseUrl, '/api/openbox/subscriptions', { url: 'https://public.example.com/sub', name: 'A' })).json()
+    const rec = store.getSubscriptions().find((s) => s.id === created.id)
+    assert.ok(rec.usage, '重定向那一跳的流量信息不能丢')
+    assert.equal(rec.usage.total, 1073741824)
+    assert.equal(rec.usage.expire, 1798689197)
+    assert.equal(hops.length, 2, '只跟一次重定向,不多发请求')
+  } finally { await close() }
+})
+
+test('最后那跳自己带了流量信息时以它为准', async () => {
+  let n = 0
+  const fetchImpl = async () => {
+    n += 1
+    if (n === 1) return { ok: false, status: 302, headers: { get: (h) => (h.toLowerCase() === 'location' ? 'https://cdn.example.com/sub.txt' : h.toLowerCase() === 'subscription-userinfo' ? 'total=1073741824' : null) }, text: async () => '' }
+    return { ok: true, status: 200, headers: { get: (h) => (h.toLowerCase() === 'subscription-userinfo' ? 'upload=10; download=20; total=2147483648' : null) }, text: async () => HK_LINE }
+  }
+  const { baseUrl, store, close } = await startApp(fetchImpl)
+  try {
+    const created = await (await postJson(baseUrl, '/api/openbox/subscriptions', { url: 'https://public.example.com/sub', name: 'B' })).json()
+    const rec = store.getSubscriptions().find((s) => s.id === created.id)
+    assert.equal(rec.usage.total, 2147483648, '最后那跳给了就用它的')
+    assert.equal(rec.usage.download, 20)
+  } finally { await close() }
 })

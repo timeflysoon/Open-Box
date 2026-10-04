@@ -51,7 +51,7 @@ const extractCookie = (res) => {
   return match ? match[0] : ''
 }
 
-test('未设密时:GET /api/openbox/profile(受守卫的普通路由)得 403 PASSWORD_SETUP_REQUIRED', async () => {
+test('未设密时:GET /api/openbox/profile（受守卫的普通路由）得 403 PASSWORD_SETUP_REQUIRED', async () => {
   const res = await fetch(`${baseUrl}/api/openbox/profile`)
   assert.equal(res.status, 403)
   const body = await res.json()
@@ -95,7 +95,7 @@ test('GET /api/auth/status 的 passwordSet 字段随设密前后切换', async (
   assert.equal(after1.passwordSet, true)
 })
 
-test('POST /api/auth/setup 密码 < 4 位 → 400,且未落库(passwordSet 仍为 false)', async () => {
+test('POST /api/auth/setup 密码 < 4 位 → 400,且未落库（passwordSet 仍为 false）', async () => {
   const res = await postSetup('abc')
   assert.equal(res.status, 400)
 
@@ -130,7 +130,7 @@ test('POST /api/auth/setup 已设密时重复调用 → 409', async () => {
   assert.equal(second.status, 409)
 })
 
-test('未设密时:/api/controller-ws 升级请求被拒绝(403,不是正常 101 升级)', async () => {
+test('未设密时:/api/controller-ws 升级请求被拒绝（403,不是正常 101 升级）', async () => {
   const wsUrl = baseUrl.replace('http://', 'ws://') + '/api/controller-ws/foo'
   const client = new WebSocket(wsUrl)
 

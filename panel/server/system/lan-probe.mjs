@@ -10,6 +10,7 @@ import { spawn } from 'node:child_process'
 import net from 'node:net'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { childEnv } from './timezone.mjs'
 
 export const PROBE_NETNS = 'openbox-probe'
 export const PROBE_VETH_HOST = 'obprobe0'
@@ -157,7 +158,19 @@ export const ensureProbeNetns = async (ctx, { lan }) => {
     const tail = String(d.stderr || d.stdout || '').trim().split('\n').filter(Boolean).pop() || 'no lease'
     throw new Error(`dhcp: ${tail}`)
   }
-  state.lease = { ...lease, mac: PROBE_MAC, hostname: PROBE_HOSTNAME, lanDevice: lan.device, dhcpMs: Date.now() - t0 }
+  // 旁路由:DHCP 是主路由发的,网关 / DNS 都指向主路由,虚拟终端的流量根本不会经过本机,测出来永远是
+  // "访问超时、连接表里没有这条连接"(GitHub #132)。旁路由方案里终端本来就是把网关和 DNS 手工指到旁路由的,
+  // 这里照样办:默认路由改指本机 LAN 地址,DNS 也用本机;记下 DHCP 原本给的,界面上说明
+  let override = null
+  if (lan.address && lease.gateway && lease.gateway !== lan.address) {
+    const r = await ctx.exec('ip', ['netns', 'exec', PROBE_NETNS, 'ip', 'route', 'replace', 'default', 'via', lan.address, 'dev', PROBE_VETH_NS], { timeoutMs: 10000 })
+    if (r.code === 0) {
+      override = { gateway: lease.gateway, dns: lease.dns }
+      lease.gateway = lan.address
+      lease.dns = [lan.address]
+    }
+  }
+  state.lease = { ...lease, override, mac: PROBE_MAC, hostname: PROBE_HOSTNAME, lanDevice: lan.device, dhcpMs: Date.now() - t0 }
   touch(ctx)
   return { ...state.lease, reused: false }
 }
@@ -169,7 +182,8 @@ export const runProbeChild = ({ spawnImpl = spawn, nodeBin = process.execPath, o
   new Promise((resolve) => {
     let child
     try {
-      child = spawnImpl('ip', ['netns', 'exec', PROBE_NETNS, nodeBin, CHILD_SCRIPT, JSON.stringify(opts)], { stdio: ['pipe', 'pipe', 'pipe'] })
+      // 探测子进程只发一次 DNS 和一次 HTTP,堆给 64 MB 足够;不设上限的 Node 在内存紧的路由器上是负担
+      child = spawnImpl('ip', ['netns', 'exec', PROBE_NETNS, nodeBin, '--max-old-space-size=64', CHILD_SCRIPT, JSON.stringify(opts)], { stdio: ['pipe', 'pipe', 'pipe'], env: childEnv() })
     } catch (err) {
       resolve({ events: [], code: null, stderr: '', error: err instanceof Error ? err.message : String(err) })
       return

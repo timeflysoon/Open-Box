@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { dnsmasqSafeDomain } from './dns-names.mjs'
-import { isRuleListTag, listTagForUrl, ruleListIpTag } from './rule-list.mjs'
+import { RULE_LIST_IP_SUFFIX, isRuleListTag, listTagForUrl, ruleListIpTag } from './rule-list.mjs'
 // 分流模型的归一化与老档案迁移。
 //
 // 现在只有一层:**站点集**。一个站点集 = 一组匹配规则 + 内核里一个同名 selector,
@@ -45,7 +45,7 @@ const cnRules = (action) => [
   { type: 'geosite', value: 'cn', action },
   { type: 'geoip', value: 'cn', action },
 ]
-export const BUILTIN_REGIONS = Object.freeze([
+const BUILTIN_REGIONS = Object.freeze([
   { id: 'cn', name: '中国大陆', rules: cnRules('direct'), catchAll: 'proxy' },
   { id: 'hkmo', name: '香港澳门', rules: [], catchAll: 'direct' },
   { id: 'other', name: '其他地区', rules: cnRules('proxy'), catchAll: 'direct' },
@@ -54,10 +54,15 @@ export const BUILTIN_REGIONS = Object.freeze([
 // 内网直连那几条(127.0.0.0/8、10.0.0.0/8 ……)不放进这张表:生成配置时固定写在
 // 所有规则之前(见 engine/routing.mjs 的 ip_is_private),用户删不掉也不用管。
 
+// 内置的 NTP 对时直连(见 engine/routing.mjs 生成它的地方)。规则页认归属(engine/rule-owner.mjs)
+// 按同一个形状认,两边从这里取,不各写一份
+export const ntpDirectRule = (directTag) => ({ network: 'udp', port: [123], outbound: directTag })
+export const isNtpDirectRule = (rule) =>
+  Boolean(rule) && rule.network === 'udp' && Array.isArray(rule.port) && rule.port.length === 1 && Number(rule.port[0]) === 123 &&
+  rule.port_range === undefined && Object.keys(rule).every((k) => ['network', 'port', 'outbound', 'action'].includes(k))
+
 // 老字段 regionMode 到内置地区的对照,用来迁移改版初期存下的那一版档案
 const REGION_MODE_TO_ID = { CN: 'cn', HKMO: 'hkmo', OTHER: 'other' }
-
-export const DEFAULT_OUTBOUND_OPTIONS = Object.freeze({ direct: true, reject: true, groups: true })
 
 // 「拒绝」在内核里是一个 block 出站。sing-box 1.13.14 实测:block 出站能过 check,
 // 而 selector 的成员必须非空(空 outbounds 直接 FATAL: missing tags)。
@@ -175,15 +180,37 @@ export const normalizePolicy = (raw, index = 0) => {
     domainSuffix: strList(raw?.domainSuffix),
     domainKeyword: strList(raw?.domainKeyword),
     ipCidr: strList(raw?.ipCidr),
+    notes: normalizeNotes(raw?.notes),
   }
 }
+
+// 每条规则的备注(GitHub #238):{ '类型:值': '一句话' }。只给界面看,不进内核配置,也不算进分流指纹(routingFingerprint)
+export const NOTE_MAX = 60
+export const normalizeNotes = (raw) => {
+  const out = {}
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out
+  for (const [key, value] of Object.entries(raw)) {
+    if (!isNonEmptyString(key) || !isNonEmptyString(value)) continue
+    out[key.trim()] = value.trim().slice(0, NOTE_MAX)
+  }
+  return out
+}
+
+// 全新安装的种子站点集:国内域名 / IP 直连(以前由「中国大陆」这条内置地区翻译出来,现在直接写成站点集)。
+// 只在 store 的 DEFAULT_PROFILE 里用:档案没有 policies 字段时补上它;用户删空了(policies: [])就不再补
+export const CN_DIRECT_POLICY_SEED = normalizePolicy({
+  id: 'region-cn-direct', name: '中国大陆·直连', icon: FALLBACK_ICON, default: 'direct', rulesets: [...CN_RULESETS],
+})
 
 // 分流设置的指纹。部署时把它记进 config.meta.json,规则页拿它和当前档案比:不一样就说明
 // 分流改过但内核还在跑旧配置——那时「规则路由」(按当前设置推算)和「真实路由」(内核此刻
 // 的实际行为)本来就会对不上,界面要能说清楚,而不是让人以为查出来是乱的。
 // 归一化之后再算:同一份设置换个写法(缺省字段、老字段迁移)不该算成改过。
+// 「默认出口」不算进去:代理页每切一次线路,选择就被写回档案当默认值(选择即默认,api/deploy-runner.mjs 的
+// persistSelectionsAsDefaults),那不是改了分流设置。以前算进去,在代理线路之间换一下、规则页就一直提示「分流改过没重启」,
+// 直到下次部署;热切换下连直连 / 代理互切也不再部署,这个误报就变成常态了
 export const routingFingerprint = (routing) =>
-  createHash('sha256').update(JSON.stringify(normalizeRouting(routing))).digest('hex').slice(0, 16)
+  createHash('sha256').update(JSON.stringify(normalizeRouting(routing), (key, value) => (key === 'default' || key === 'fallbackDefault' || key === 'notes' || key === 'note' ? undefined : value))).digest('hex').slice(0, 16)
 
 // 没传 builtin 时的默认(测试、预览):直连叫 direct、拒绝叫 block,都启用
 export const DEFAULT_BUILTIN = Object.freeze({ direct: 'direct', block: 'block', directEnabled: true, blockEnabled: true })
@@ -200,7 +227,8 @@ const normalizeCustomRule = (raw) => {
   if (raw.type === 'ruleUrl' && !/^https?:\/\//i.test(value)) return null
   // 端口写错的行同样丢掉:进了配置内核起不来
   if (raw.type === 'port' && !parsePortSpec(value)) return null
-  return { type: raw.type, value, outbound: raw.outbound.trim() }
+  const note = isNonEmptyString(raw.note) ? raw.note.trim().slice(0, NOTE_MAX) : ''
+  return { type: raw.type, value, outbound: raw.outbound.trim(), ...(note ? { note } : {}) }
 }
 
 export const normalizeCustomPolicy = (raw) => {
@@ -362,8 +390,22 @@ const migrateRegion = (raw) => {
   return { policies, fallbackDefault: region.catchAll === 'proxy' ? 'proxy' : 'direct' }
 }
 
-export const normalizeRouting = (routing) => {
+// 改版前留在档案里的 routing 字段:地区层(regions / regionId / regionMode)、「出站」页签开关、广告拦截、
+// 更早的 categories / directRulesets / fallback,以及主 selector 名 proxyTag。store 读档案时用
+// migrateStoredRouting 翻译并删掉它们,写回一次之后档案里就不再出现
+export const LEGACY_ROUTING_KEYS = Object.freeze([
+  'regions', 'regionId', 'regionMode', 'outboundOptions', 'adBlock', 'adRuleset', 'categories', 'directRulesets', 'fallback', 'proxyTag',
+])
+
+// 老档案 → 存储形状。返回 { routing, changed }:changed 为 false 时 routing 就是传进来的对象。
+//   · 没有 policies(或 policies 为空且 categories / directRulesets 里有东西)→ 老的分类翻译成站点集
+//   · 没有 fallbackDefault 且有地区数据 → 选中的地区拆成站点集接在后面,兜底变成 fallbackDefault
+//   · 最后删掉全部老字段
+// 翻译只认档案里实际存着的东西:没有地区数据就不凭空长出站点集(全新安装的种子在 store 的 DEFAULT_PROFILE 里)
+export const migrateStoredRouting = (routing) => {
   const raw = routing && typeof routing === 'object' ? routing : {}
+  if (!LEGACY_ROUTING_KEYS.some((key) => key in raw)) return { routing: raw, changed: false }
+
   // store 的 deepMerge 会把 DEFAULT_PROFILE 里的 `policies: []` 补给老档案,所以
   // 不能只看"有没有 policies 字段":空数组 + 有老字段,同样是一份没迁过的老档案。
   const hasLegacy =
@@ -372,58 +414,57 @@ export const normalizeRouting = (routing) => {
   const migrated = !Array.isArray(raw.policies) || (raw.policies.length === 0 && hasLegacy)
     ? migrateLegacy(raw)
     : null
-
-  // 地区层已经退役:档案里还留着 regions/regionId 就把它翻译成站点集接在后面。
   // fallbackDefault 一旦写进档案,就说明这份档案已经迁过了,不再重复翻译。
   const migratedRegion = isNonEmptyString(raw.fallbackDefault) ? null : migrateRegion(raw)
+
+  const next = { ...raw }
+  for (const key of LEGACY_ROUTING_KEYS) delete next[key]
+  const policies = [
+    ...(migrated ? migrated.policies : Array.isArray(raw.policies) ? raw.policies : []),
+    ...(migratedRegion ? migratedRegion.policies : []),
+  ]
+  // 本来就没有 policies、翻译也没翻出东西(比如老客户端只 PUT 了一个 adBlock),就不写 policies:
+  // 作为 patch 合并时不能把现有站点集清空;作为整份档案时留给默认值去种
+  if (Array.isArray(raw.policies) || policies.length) next.policies = policies
+  if (migratedRegion && isNonEmptyString(migratedRegion.fallbackDefault)) next.fallbackDefault = migratedRegion.fallbackDefault
+  return { routing: next, changed: true }
+}
+
+export const normalizeRouting = (routing) => {
+  const { routing: raw } = migrateStoredRouting(routing)
 
   // 兜底站点集:名字和图标可以改(名字就是内核里的出站 tag),只有存在本身是固定的
   const fallbackName = isNonEmptyString(raw.fallbackName) ? raw.fallbackName.trim() : FALLBACK_TAG
   const fallbackIcon = isNonEmptyString(raw.fallbackIcon) ? raw.fallbackIcon.trim() : FALLBACK_ICON
 
-  const policies = [
-    ...(migrated ? migrated.policies : raw.policies.map(normalizePolicy)),
-    ...(migratedRegion ? migratedRegion.policies : []),
-  ].filter(policyHasCondition).filter((p) => p.name !== FALLBACK_TAG && p.name !== fallbackName)
+  const policies = (Array.isArray(raw.policies) ? raw.policies : [])
+    .map(normalizePolicy)
+    .filter(policyHasCondition)
+    .filter((p) => p.name !== FALLBACK_TAG && p.name !== fallbackName)
   // 真正进内核的那部分:停用的不算
   const activePolicies = policies.filter((p) => p.enabled !== false)
-
-  const opts = raw.outboundOptions && typeof raw.outboundOptions === 'object' ? raw.outboundOptions : {}
-  const outboundOptions = {
-    direct: opts.direct !== false,
-    reject: opts.reject !== false,
-    groups: opts.groups !== false,
-  }
 
   const fallback = {
     name: fallbackName,
     icon: fallbackIcon,
-    default: isNonEmptyString(raw.fallbackDefault)
-      ? raw.fallbackDefault.trim()
-      : migratedRegion
-        ? migratedRegion.fallbackDefault
-        : 'direct',
+    // 没写就空着:config.mjs 的 effectiveOutbound 会取成员表的第一项
+    default: isNonEmptyString(raw.fallbackDefault) ? raw.fallbackDefault.trim() : '',
   }
 
   return {
-    proxyTag: isNonEmptyString(raw.proxyTag) ? raw.proxyTag.trim() : 'PROXY',
-    outboundOptions,
     custom: normalizeCustomPolicy(raw.custom),
     policies,
     activePolicies,
     fallback,
-    adBlock: raw.adBlock === true,
-    adRuleset: isNonEmptyString(raw.adRuleset) ? raw.adRuleset.trim() : 'geosite-category-ads-all',
   }
 }
 
 // 站点集 selector 的成员表:「节点管理」里启用着的条目,按那里的顺序(内置的直连/
-// 拒绝和节点组混排)。要不要某一项,就在节点管理里启用/停用它——原来「出站」页签那套
-// 开关已退役,outboundOptions 参数留着只是不改所有调用方的签名。
+// 拒绝和节点组混排)。要不要某一项,就在节点管理里启用/停用它。
 // 一个都不剩时回落成直连——空成员的组会让内核 FATAL(实测)。
 //   groupTags  节点管理里出到配置的条目,按顺序;内置的两个也在其中,由 builtin 标出
 //   builtin    { direct, block, directEnabled, blockEnabled }(见 user-groups.mjs)
-export const policyOutboundOptions = (_outboundOptions, groupTags, builtin = DEFAULT_BUILTIN) => {
+export const policyOutboundOptions = (groupTags, builtin = DEFAULT_BUILTIN) => {
   const list = groupTags.filter((tag) => {
     if (tag === builtin.direct) return builtin.directEnabled
     if (tag === builtin.block) return builtin.blockEnabled
@@ -506,14 +547,11 @@ export const dnsmasqForwardPlan = (routing, members = ['direct'], builtin = DEFA
   const rewriteDomains = Array.isArray(extra.rewriteDomains) ? extra.rewriteDomains.filter((d) => typeof d === 'string' && d) : []
   const all = (reason) => ({ mode: 'all', domains: [], expand: [], reason })
   if (!policyGoesDirect(conf.fallback.name, conf.fallback.default, members, builtin, selections)) return all(`兜底「${conf.fallback.name}」走代理`)
-  // 广告拦截是规则集,拦截又必须在 DNS 入口就生效(否则查询交给原上游,内核里的拒绝规则根本碰
-  // 不到);广告规则集里关键词 / 正则很多,只能全量交给内核(复审 R7)
-  if (conf.adBlock) return all('广告拦截开着,拦截规则集 dnsmasq 展不开,拒绝只能在内核里做')
   const domains = new Set()
   const expand = []
   const addDomain = (value, owner) => {
     const safe = dnsmasqSafeDomain(value)
-    if (!safe) return `${owner}的域名「${value}」写不进 dnsmasq(非法字符 / 标签超长)`
+    if (!safe) return `${owner}的域名「${value}」写不进 dnsmasq（非法字符 / 标签超长）`
     domains.add(safe)
     return ''
   }
@@ -577,71 +615,138 @@ export const policyClasses = (routing, members = ['direct'], builtin = DEFAULT_B
   return out
 }
 
+// 入口模式(纯函数)。两种:
+//   blacklist(默认进内核)—— 现在这套:只有此刻走直连的站点集引用的 IP 集合在入口放走,其余全进内核;
+//   whitelist(默认放行)—— 反过来:只有"必须进内核"的目标进内核,其余在入口放走。必须进内核的 = FakeIP 占位池
+//     (走代理的域名拿到的都是它)+ 此刻走代理 / 拒绝的站点集引用的 IP 集合和手写网段 + 前置自定义分流里
+//     走代理 / 拒绝的 IP 行。兜底直连、按域名直连的目标不用任何 IP 条件就在入口放走,不再白付一次用户态转发
+//     (GitHub #224 之后用户的诉求)。
+// whitelist 的前提,少一条都退回 blacklist(原因写明):
+//   · FakeIP 开着且终端查询经内核(dnsMode != off):走代理的域名必须拿占位地址,真实 IP 的流量才敢默认放走;
+//   · 兜底走直连:兜底走代理时没命中的目标都得进内核,白名单列不出来;
+//   · 没有终端被指定整机走代理;
+//   · 前置自定义分流里走代理 / 拒绝的行只能是域名 / IP 段 / geoip:按端口分流的、规则集链接(里面有没有 IP 段
+//     说不清)的在入口判不了。
+// IPv6 这一版不放:v6 一律照旧进内核(ipv6 分层的语义不变),名单里的 v6 段只写 ::/0。
+export const ENTRY_MODE_BLACKLIST = 'blacklist'
+export const ENTRY_MODE_WHITELIST = 'whitelist'
+// 没有 nft 重定向(纯 tun)时入口名单编进路由表、不能在线换,白名单一律不启用;部署元数据和热切换都用这一句
+export const PURE_TUN_ENTRY_REASON = '没有 nft 重定向(纯 tun),入口名单不能在线换,只用黑名单'
+// 后端设置「直连不进内核」(档案 directBypass,默认开)关掉时的原因:入口一律不旁路,所有流量进内核,统计才完整
+export const DIRECT_BYPASS_OFF_REASON = '后端设置里关掉了「直连不进内核」:所有流量都进内核,入口不放行'
+// directAnswer:直连应答放行(system/direct-answer-bypass.mjs:直连侧解析出来的真实地址写进入口放行集合)开不开。
+// 白名单入口一直开;黑名单入口(兜底走代理)按用户 2026-09-29 定的原则也开——「选了直连的,只要开着直连不进内核和
+// FakeIP,就不进内核」(#307)。前提和白名单一样(兜底直连那条除外):FakeIP 开着且查询经内核、没有被指定走代理的终端、
+// 前置自定义分流没有按端口走代理 / 拒绝的行(入口按地址放走的连接,内核的端口规则就管不到了)
+const directAnswerAllowed = (conf, { builtin, clientRoutes, fakeIp, dnsMode, enabled }) => {
+  if (!enabled || !fakeIp || dnsMode === 'off') return false
+  if (clientRoutes.some((cr) => cr && cr.outbound && cr.outbound !== builtin.direct)) return false
+  if (customPolicyActive(conf.custom)) {
+    for (const rule of conf.custom.rules) {
+      if (rule.type === 'port' && customOutboundTag(rule, builtin) !== builtin.direct) return false
+    }
+  }
+  return true
+}
+
+export const entryModePlan = (routing, { members = ['direct'], builtin = DEFAULT_BUILTIN, selections = {}, clientRoutes = [], fakeIp = false, dnsMode = 'dnsmasq', enabled = true } = {}) => {
+  const conf = normalizeRouting(routing)
+  const domainSafe = Boolean(fakeIp) && dnsMode !== 'off'
+  const needSets = []
+  const needCidrs = []
+  const addSet = (tag) => { if (!needSets.includes(tag)) needSets.push(tag) }
+  const directAnswer = directAnswerAllowed(conf, { builtin, clientRoutes, fakeIp, dnsMode, enabled })
+  const black = (reason) => ({ mode: ENTRY_MODE_BLACKLIST, reason, fakeIp: domainSafe, needSets: [], needCidrs: [], directAnswer })
+  if (!enabled) return black(DIRECT_BYPASS_OFF_REASON)
+  if (!fakeIp) return black('没开 FakeIP:走代理的域名解析出来是真实 IP,入口分不出它和直连目标,不能默认放行')
+  if (dnsMode === 'off') return black('DNS 禁用模式下终端的查询不一定经内核,走代理的域名拿不到占位地址,不能默认放行')
+  if (!policyGoesDirect(conf.fallback.name, conf.fallback.default, members, builtin, selections)) return black(`兜底「${conf.fallback.name}」走代理:没命中的目标都要进内核,入口没法默认放行`)
+  if (clientRoutes.some((cr) => cr && cr.outbound && cr.outbound !== builtin.direct)) return black('有终端被指定走代理,该终端的全部流量都要进内核')
+  if (customPolicyActive(conf.custom)) {
+    for (const rule of conf.custom.rules) {
+      const target = customOutboundTag(rule, builtin)
+      if (target === builtin.direct) continue
+      if (rule.type === 'port') return black(`前置自定义分流「${rule.value}」按端口分流,入口按 IP 判不了`)
+      if (rule.type === 'ruleUrl' || rule.type === 'ruleset') return black(`前置自定义分流「${rule.value}」是规则集链接 / 规则集,里面有没有 IP 段说不清`)
+      if (rule.type === 'ipCidr') needCidrs.push(rule.value)
+      else if (rule.type === 'geoip') addSet(`geoip-${rule.value}`)
+      // 域名行:走代理的拿占位地址、拒绝的解析也拒,都不产生真实 IP
+    }
+  }
+  for (const p of conf.activePolicies) {
+    if (policyGoesDirect(p.name, p.default, members, builtin, selections)) continue
+    for (const tag of p.rulesets) if (/^geoip-/.test(tag)) addSet(tag)
+    for (const c of p.ipCidr) if (!needCidrs.includes(c)) needCidrs.push(c)
+  }
+  return { mode: ENTRY_MODE_WHITELIST, reason: 'FakeIP 开着、兜底直连:入口默认放行,只有 FakeIP 占位池和走代理 / 拒绝的 IP 集合进内核', fakeIp: domainSafe, needSets, needCidrs, directAnswer: true }
+}
+
 // 入口原生旁路的计划(纯函数)。基准是真实 IP:入口只看目标 IP,任何排在候选直连集合前面、可能把同一个
 // IP 送去别处的规则都必须核对——
-//   · 带域名条件的较早非直连规则(站点集的域名 / 关键词 / geosite,前置自定义分流的域名行):域名解析出来
-//     的 IP 可能正好落在候选集合里,入口分不出域名,一放走内核就救不回来 → 直接挡住后面所有候选;
+//   · 带域名条件的非直连规则(站点集的域名 / 关键词 / geosite,前置自定义分流的域名行)和走代理的兜底:域名解析
+//     出来的 IP 可能正好落在候选集合里,入口分不出域名,一放走内核就救不回来。有域名的访问只按域名判(见文件末尾
+//     noDomainGuard),所以不论排在候选前面还是后面都挡 → 整个不开(没有 FakeIP 时);
 //   · 只带 IP 条件的较早非直连规则(geoip / ip_cidr):和候选集合有没有交集是可以算的 → 候选记成 pending,
 //     部署时由 system/native-bypass.mjs 解码两边集合做区间重叠核对,没交集才旁路;
 //   · 端口规则、形状未知的规则集链接、走代理的终端、广告拦截:按目标 IP 判不了 → 不开。
 // fakeIp(隔离试验开关,engine/dns.mjs)且终端查询确实经内核(dnsMode 不是 off)时,走代理的域名拿到的是
 // 占位地址,域名条件才不挡——这是试验路径的前提,不是保证:终端自带加密 DNS、开启前已缓存的真实地址、
 // 转发漏匹配都不在范围内,原因里写明。DNS 禁用模式下即使开着 FakeIP 也按真实 IP 算(第四轮 T4)
-export const nativeBypassPlan = (routing, { members = ['direct'], builtin = DEFAULT_BUILTIN, selections = {}, clientRoutes = [], fakeIp = false, dnsMode = 'dnsmasq' } = {}) => {
+export const nativeBypassPlan = (routing, { members = ['direct'], builtin = DEFAULT_BUILTIN, selections = {}, clientRoutes = [], fakeIp = false, dnsMode = 'dnsmasq', enabled = true } = {}) => {
   const conf = normalizeRouting(routing)
   const domainSafe = Boolean(fakeIp) && dnsMode !== 'off'
+  if (!enabled) return { enabled: false, sets: [], pending: [], fakeIp: domainSafe, reason: DIRECT_BYPASS_OFF_REASON }
   const notes = []
   if (fakeIp && dnsMode === 'off') notes.push('DNS 禁用模式下终端的查询不一定经内核,FakeIP 不作旁路前提,按真实 IP 计算')
-  if (domainSafe) notes.push('FakeIP 试验开着:走代理的域名规则按占位地址计,不挡直连集合(终端自带加密 DNS / 开启前已缓存的真实地址 / 转发漏匹配不在此保证内)')
+  if (domainSafe) notes.push('FakeIP 试验开着:走代理的域名规则按占位地址计,不挡直连集合（终端自带加密 DNS / 开启前已缓存的真实地址 / 转发漏匹配不在此保证内）')
   const off = (reason) => ({ enabled: false, sets: [], pending: [], fakeIp: domainSafe, reason: [reason, ...notes].join(';') })
   const earlier = []
   if (customPolicyActive(conf.custom)) {
     const cidrs = []
     const geoip = []
+    const lists = []
     for (const rule of conf.custom.rules) {
       const target = customOutboundTag(rule, builtin)
       if (target === builtin.direct) continue
       if (rule.type === 'port') return off(`前置自定义分流「${rule.value}」按端口分流,任何目标 IP 都可能命中,入口旁路不能越过它`)
       if (rule.type === 'ipCidr') { cidrs.push(rule.value); continue }
       if (rule.type === 'geoip') { geoip.push(`geoip-${rule.value}`); continue }
+      // 规则集链接:开着 FakeIP 时域名那份拿的是占位地址,不挡;IP 那份部署时解码出来扣掉重叠段(system/native-bypass.mjs,#302)
+      if (rule.type === 'ruleUrl' && domainSafe) { lists.push(listTagForUrl(rule.value)); continue }
       if (rule.type === 'ruleUrl' || rule.type === 'ruleset') return off(`前置自定义分流「${rule.value}」是规则集链接 / 规则集,里面可能有 IP 段,入口旁路不能越过它`)
       // 域名 / 后缀 / 关键词行
       if (!domainSafe) return off(`前置自定义分流「${rule.value}」按域名分流,它解析出来的 IP 在入口分不出来,旁路不能越过它`)
     }
-    if (cidrs.length || geoip.length) earlier.push({ name: '前置自定义分流', geoip, cidrs })
+    if (cidrs.length || geoip.length || lists.length) earlier.push({ name: '前置自定义分流', geoip, cidrs, ...(lists.length ? { lists } : {}) })
   }
   if (clientRoutes.some((cr) => cr && cr.outbound && cr.outbound !== builtin.direct)) return off('有终端被指定走代理,该终端的全部流量都要进内核')
-  if (conf.adBlock) return off('广告拦截开着,命中广告规则的目标要在内核里拒绝')
+  // 有域名的访问只按域名判(见文件末尾 noDomainGuard 的说明):没有 FakeIP 时走代理的域名、没命中任何域名规则而落到
+  // 走代理的兜底的域名,拿到的都是真实地址,可能落在任何直连集合里——内核按域名判它们走代理,入口按 IP 放走就放错了,
+  // 不管这个站点集排在直连集合前面还是后面。开着 FakeIP 时它们拿的是占位地址,不挡
+  if (!domainSafe) {
+    const goes = (name, def) => policyGoesDirect(name, def, members, builtin, selections)
+    const byDomain = conf.activePolicies.find((p) => !goes(p.name, p.default) && (p.domain.length > 0 || p.domainSuffix.length > 0 || p.domainKeyword.length > 0 || p.rulesets.some((tag) => !/^geoip-/.test(tag))))
+    if (byDomain) return off(`站点集「${byDomain.name}」按域名走代理 / 拒绝:有域名的访问只按域名判,这些域名解析出来的真实地址在入口分不出来,按 IP 放走会放错（开 FakeIP 后它们拿的是占位地址,就不挡了）`)
+    if (!goes(conf.fallback.name, conf.fallback.default)) return off(`兜底「${conf.fallback.name}」走代理:没命中域名规则的域名都走兜底,它们解析出来的真实地址在入口分不出来,按 IP 放走会放错（开 FakeIP 后它们拿的是占位地址,就不挡了）`)
+  }
   const sets = []
   const pending = []
-  let blocker = ''
-  const skipped = []
   for (const p of conf.activePolicies) {
     const geoip = p.rulesets.filter((tag) => /^geoip-/.test(tag))
     if (!policyGoesDirect(p.name, p.default, members, builtin, selections)) {
+      // 规则集链接:能走到这里说明开着 FakeIP(没开时按域名走代理的站点集上面已经整个挡掉了),域名那份拿的是占位地址,
+      // 不挡;IP 那份(list-xxx-ip.srs)和 geoip 一样,部署时解码出来,从后面的直连集合里扣掉重叠段(system/native-bypass.mjs)。
+      // 以前一碰到规则集链接就把后面所有直连集合整个挡掉,「国内」的 geoip-cn 因此一份都不旁路(#302)
       const lists = p.rulesets.filter((tag) => isRuleListTag(tag))
-      const hasDomain = p.domain.length > 0 || p.domainSuffix.length > 0 || p.domainKeyword.length > 0 || p.rulesets.some((tag) => !/^geoip-/.test(tag) && !isRuleListTag(tag))
-      if (lists.length || (hasDomain && !domainSafe)) {
-        if (!blocker) blocker = p.name
-        continue
-      }
-      if (geoip.length || p.ipCidr.length) earlier.push({ name: p.name, geoip, cidrs: [...p.ipCidr] })
+      if (geoip.length || p.ipCidr.length || lists.length) earlier.push({ name: p.name, geoip, cidrs: [...p.ipCidr], ...(lists.length ? { lists } : {}) })
       continue
     }
     if (!geoip.length) continue
-    if (blocker) {
-      skipped.push(p.name)
-      continue
-    }
-    if (earlier.length) pending.push({ policy: p.name, sets: geoip, against: earlier.map((e) => ({ name: e.name, geoip: [...e.geoip], cidrs: [...e.cidrs] })) })
+    if (earlier.length) pending.push({ policy: p.name, sets: geoip, against: earlier.map((e) => ({ name: e.name, geoip: [...e.geoip], cidrs: [...e.cidrs], ...(e.lists ? { lists: [...e.lists] } : {}) })) })
     else for (const tag of geoip) if (!sets.includes(tag)) sets.push(tag)
   }
-  if (!sets.length && !pending.length) {
-    if (skipped.length) return off(`站点集「${skipped.join('」「')}」前面还有走代理 / 拒绝的站点集「${blocker}」,它可能先命中同样的地址(域名规则解析出来的 IP 在入口分不出来),按顺序不能越过它`)
-    return off('走直连的站点集里没有 geoip 规则集,入口没有可用的 IP 集合')
-  }
+  if (!sets.length && !pending.length) return off('走直连的站点集里没有 geoip 规则集,入口没有可用的 IP 集合')
   const reasons = [...notes]
-  if (skipped.length) reasons.push(`站点集「${skipped.join('」「')}」排在「${blocker}」之后,没有进入口旁路`)
   for (const x of pending) reasons.push(`站点集「${x.policy}」的集合要先和前面带 IP 条件的「${x.against.map((a) => a.name).join('」「')}」核对重叠,部署时决定`)
   return { enabled: sets.length > 0, sets, pending, fakeIp: domainSafe, reason: reasons.join(';') }
 }
@@ -654,7 +759,7 @@ export const bypassPlanKey = (plan) => {
   return JSON.stringify({
     sets: sorted(plan.sets),
     pending: [...(Array.isArray(plan.pending) ? plan.pending : [])]
-      .map((x) => ({ policy: x.policy, sets: sorted(x.sets), against: (x.against || []).map((a) => ({ name: a.name, geoip: sorted(a.geoip), cidrs: sorted(a.cidrs) })) }))
+      .map((x) => ({ policy: x.policy, sets: sorted(x.sets), against: (x.against || []).map((a) => ({ name: a.name, geoip: sorted(a.geoip), cidrs: sorted(a.cidrs), ...(a.lists && a.lists.length ? { lists: sorted(a.lists) } : {}) })) }))
       .sort((a, b) => (a.policy < b.policy ? -1 : a.policy > b.policy ? 1 : 0)),
     fakeIp: Boolean(plan.fakeIp),
   })
@@ -679,4 +784,62 @@ export const splitRuleSetConditions = (rule) => {
   const withDest = {}
   for (const k of destKeys) withDest[k] = rule[k]
   return [withSet, { ...withDest, ...rest }]
+}
+
+// 「IP 只管 IP、域名只管域名,不管是哪里的分流」(用户 2026-09-26 定的规则):一个有域名的访问先按域名把前置自定义
+// 分流、站点集从上往下对一遍,都没命中就走兜底「其他」,按兜底的出口走——和 DNS 那一层一样(engine/dns.mjs 只按
+// 域名条件分解析器,兜底直连就问直连 DNS)。按 IP 判的条件(IP 段、geoip 集合、规则集链接编出来的 IP 那份)只管
+// **没有域名**的连接:终端直接按 IP 连、内核嗅探不到 SNI / Host、DNS 反查(reverse_mapping)也没记下域名的那种。
+// 以前两类条件在一条规则里「任一命中」,没列进任何名单的域名(正式路由器上的 brainhost.ai)按兜底问直连 DNS 拿到
+// Cloudflare 的地址,又被「国外」的 geoip-cloudflare 抢去走节点:解析走直连、连接走节点,用户说这是 DNS 泄露。
+// 内置的私网直连、订阅和节点站点直连、tun 防回环不是分流,是保命规则,照旧对所有连接生效。
+//
+// 内核里「连接有域名」= metadata.Domain(嗅探到的、DNS 反查记下的)或 Destination.Fqdn(FakeIP 找回的)有值
+// (sing-box route/rule/rule_item_domain_regex.go)。HTTP 的 Host 直接写 IP 时嗅探出来的是 IP 字面量,不算域名:
+// 要求至少一个字母、且没有冒号(IPv4 字面量没有字母,IPv6 字面量有冒号;域名到这里已经转成小写)
+export const DOMAIN_PRESENT_REGEX = '^[^:]*[a-z][^:]*$'
+// 「连接没有域名」这个前提:放进 logical AND 里和 IP 条件并列
+export const noDomainGuard = () => ({ domain_regex: [DOMAIN_PRESENT_REGEX], invert: true })
+export const isNoDomainGuard = (sub) => Boolean(sub) && typeof sub === 'object' && sub.invert === true && Array.isArray(sub.domain_regex) &&
+  sub.domain_regex.length === 1 && sub.domain_regex[0] === DOMAIN_PRESENT_REGEX && Object.keys(sub).length === 2
+// 读规则的各处(规则页推算)用:这条规则带不带「连接没有域名」的前提;带的话去掉它,剩下的条件照常判。
+// 只剩一条普通规则时并回普通规则(动作 / 出口照抄),还带开关等其它子规则的保留 logical 结构交给 flattenFlipRule
+export const splitNoDomainGuard = (rule) => {
+  if (!rule || rule.type !== 'logical' || rule.mode !== 'and' || !Array.isArray(rule.rules) || !rule.rules.some(isNoDomainGuard)) return { rule, noDomain: false }
+  const rest = rule.rules.filter((r) => !isNoDomainGuard(r))
+  const { type: _t, mode: _m, rules: _r, ...tail } = rule
+  void _t
+  void _m
+  void _r
+  if (rest.length === 1 && rest[0] && rest[0].type !== 'logical') return { rule: { ...rest[0], ...tail }, noDomain: true }
+  return { rule: { ...rule, rules: rest }, noDomain: true }
+}
+
+// 内核连接记录里的规则原文(rule.String()):logical 规则各子规则用 " && " 连,取反的写成 "!(…)"。给界面看时把这段前提
+// 去掉、改成一个标记,免得用户在「查看详情」里看到一串正则
+const NO_DOMAIN_RULE_TEXT = ` && !(domain_regex=${DOMAIN_PRESENT_REGEX})`
+export const stripNoDomainGuardText = (text) => {
+  const s = String(text || '')
+  return s.includes(NO_DOMAIN_RULE_TEXT) ? { rule: s.split(NO_DOMAIN_RULE_TEXT).join(''), noDomain: true } : { rule: s, noDomain: false }
+}
+
+// 规则集按看什么分:geoip-* 和规则集链接编出来的 IP 那份看目标 IP,其余(geosite-*、规则集链接的域名那份、
+// 形状未知的规则集链接)看域名
+export const isIpRuleSetTag = (tag) => typeof tag === 'string' && (/^geoip-/.test(tag) || (isRuleListTag(tag) && tag.endsWith(RULE_LIST_IP_SUFFIX)))
+
+// 站点集的匹配条件分成「看域名」「看 IP」两份,各是一条还没拆规则集的路由规则条件(拆分见 splitRuleSetConditions);
+// 没有就是 null
+export const policyRouteMatches = (policy, ruleLists = {}) => {
+  const tags = routeRulesetTags(policy, ruleLists)
+  const domain = {}
+  const domainTags = tags.filter((t) => !isIpRuleSetTag(t))
+  if (domainTags.length) domain.rule_set = domainTags
+  if (policy.domain.length) domain.domain = policy.domain
+  if (policy.domainSuffix.length) domain.domain_suffix = policy.domainSuffix
+  if (policy.domainKeyword.length) domain.domain_keyword = policy.domainKeyword
+  const ip = {}
+  const ipTags = tags.filter(isIpRuleSetTag)
+  if (ipTags.length) ip.rule_set = ipTags
+  if (policy.ipCidr.length) ip.ip_cidr = policy.ipCidr
+  return { domain: Object.keys(domain).length ? domain : null, ip: Object.keys(ip).length ? ip : null }
 }

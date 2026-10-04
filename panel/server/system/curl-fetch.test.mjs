@@ -24,7 +24,7 @@ test('curl 兜底:完整的 200 响应原样交出正文', { skip }, async () =>
   } finally { await stop(server) }
 })
 
-test('F1:HTTP 200 后传到一半断开(curl exit 18)→ 算下载失败,不交出半份正文', { skip }, async () => {
+test('F1:HTTP 200 后传到一半断开（curl exit 18）→ 算下载失败,不交出半份正文', { skip }, async () => {
   const body = NODE + NODE
   const { server, url } = await listen((req, res) => {
     res.writeHead(200, { 'content-length': Buffer.byteLength(body) })
@@ -40,7 +40,7 @@ test('F1:HTTP 200 后传到一半断开(curl exit 18)→ 算下载失败,不交�
   } finally { await stop(server) }
 })
 
-test('F1:超时(exit 28)和超过大小上限(exit 63)同样是失败,不交出正文', { skip }, async () => {
+test('F1:超时（exit 28）和超过大小上限（exit 63）同样是失败,不交出正文', { skip }, async () => {
   const slow = await listen((req, res) => { res.writeHead(200, { 'content-length': 100 }); res.write('x') /* 剩下的永远不发 */ })
   try {
     const r = await curlFetchText(slow.url, { userAgent: 'u', lookup, timeoutMs: 1000 })
@@ -58,7 +58,7 @@ test('F1:超时(exit 28)和超过大小上限(exit 63)同样是失败,不交出�
   } finally { await stop(large.server) }
 })
 
-test('curl 兜底:4xx 由上层判(status 照交);重定向逐跳跟、到链路本地地址拒绝', { skip }, async () => {
+test('curl 兜底:4xx 由上层判（status 照交）;重定向逐跳跟、到链路本地地址拒绝', { skip }, async () => {
   const { server, url } = await listen((req, res) => {
     if (req.url === '/sub') { res.writeHead(302, { location: '/real' }); res.end(); return }
     if (req.url === '/real') { res.writeHead(200, { 'content-length': Buffer.byteLength(NODE) }); res.end(NODE); return }

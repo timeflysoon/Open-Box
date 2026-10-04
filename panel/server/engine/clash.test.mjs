@@ -230,10 +230,10 @@ test('YAML 里不加引号的数字密码转成字符串;kcp / xhttp 传输层�
   assert.equal(typeof byName.NUM.fields.password, 'string')
   assert.equal(byName.SSNUM.fields.password, '123')
   assert.deepEqual(skipped.map((s) => s.name).sort(), ['KCP', 'XH'])
-  assert.ok(skipped.every((s) => s.reason === 'invalid' && s.detail))
+  assert.ok(skipped.every((s) => s.reason === 'unsupported-transport' && s.detail))
 })
 
-test('Clash socks5 收进来;带 tls 的记为 skipped(内核的 socks 出站没有 TLS)', () => {
+test('Clash socks5 收进来;带 tls 的记为 skipped（内核的 socks 出站没有 TLS）', () => {
   const yaml = [
     'proxies:',
     '  - { name: SK, type: socks5, server: 1.2.3.4, port: 1080, username: alice, password: 123456 }',
@@ -250,7 +250,7 @@ test('Clash socks5 收进来;带 tls 的记为 skipped(内核的 socks 出站没
   assert.deepEqual(skipped.map((s) => s.name), ['SKTLS'])
 })
 
-test('vless / vmess / trojan 套 ws、h2 没写 servername 时 SNI 按 Host 头兜底(CF 优选:server 是 IP,域名只在 Host 里)', () => {
+test('vless / vmess / trojan 套 ws、h2 没写 servername 时 SNI 按 Host 头兜底（CF 优选:server 是 IP,域名只在 Host 里）', () => {
   const yaml = `proxies:
   - { name: cf-vless, type: vless, server: 104.16.1.1, port: 443, uuid: 22222222-2222-2222-2222-222222222222, tls: true, network: ws, ws-opts: { path: /vl, headers: { Host: cdn.example.com } } }
   - { name: cf-vless-sni, type: vless, server: 104.16.1.1, port: 443, uuid: 22222222-2222-2222-2222-222222222222, tls: true, servername: sni.example.com, network: ws, ws-opts: { headers: { Host: cdn.example.com } } }

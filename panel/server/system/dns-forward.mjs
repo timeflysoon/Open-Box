@@ -194,7 +194,7 @@ export const ruleSetToForwardEntries = (json) => {
   for (const rule of (json && json.rules) || []) {
     if (!rule || typeof rule !== 'object') continue
     if (rule.type === 'logical' || rule.rules || rule.invert) return { entries: [], superset: [], unsupported: '含逻辑 / 取反规则' }
-    if (list(rule.domain_keyword).length) return { entries: [], superset: [], unsupported: `含域名关键词(${list(rule.domain_keyword).slice(0, 3).join(', ')})` }
+    if (list(rule.domain_keyword).length) return { entries: [], superset: [], unsupported: `含域名关键词（${list(rule.domain_keyword).slice(0, 3).join(', ')}）` }
     for (const d of list(rule.domain)) {
       const safe = dnsmasqSafeDomain(d)
       if (safe) entries.add(safe)
@@ -208,10 +208,10 @@ export const ruleSetToForwardEntries = (json) => {
     for (const re of list(rule.domain_regex)) {
       const { suffixes, reason } = regexForwardSuffixesDetail(re)
       if (!suffixes) {
-        return { entries: [], superset: [], unsupported: reason === 'budget' ? `含分支组合超过预算(${REGEX_TAIL_BUDGET.tails} 条)的正则(${String(re).slice(0, 60)})` : `含无法证明安全转换的正则(${String(re).slice(0, 60)})` }
+        return { entries: [], superset: [], unsupported: reason === 'budget' ? `含分支组合超过预算（${REGEX_TAIL_BUDGET.tails} 条）的正则（${String(re).slice(0, 60)}）` : `含无法证明安全转换的正则（${String(re).slice(0, 60)}）` }
       }
       regexEntries += suffixes.length
-      if (regexEntries > RULESET_REGEX_ENTRY_BUDGET) return { entries: [], superset: [], unsupported: `正则展开的条目累计超过预算(${RULESET_REGEX_ENTRY_BUDGET})` }
+      if (regexEntries > RULESET_REGEX_ENTRY_BUDGET) return { entries: [], superset: [], unsupported: `正则展开的条目累计超过预算（${RULESET_REGEX_ENTRY_BUDGET}）` }
       for (const suffix of suffixes) {
         entries.add(suffix)
         superset.push({ regex: String(re), suffix })
@@ -265,7 +265,7 @@ export const expandDnsForward = async (ctx, paths, plan) => {
 
 // dnsmasq 转发文件的正文:一行一条,`*.x` 的写法照搬(dnsmasq 用同样的记法表示只匹配子域)
 export const forwardConfText = (domains) => {
-  const lines = ['# Open-Box:走代理的域名交给内核解析(127.0.0.1#7853),其余由路由器原有上游解析。由 Open-Box 生成,勿手改']
+  const lines = ['# Open-Box:走代理的域名交给内核解析（127.0.0.1#7853）,其余由路由器原有上游解析。由 Open-Box 生成,勿手改']
   for (const d of [...new Set(domains)].sort()) lines.push(`server=/${d}/${SINGBOX_DNS_UPSTREAM}`)
   return `${lines.join('\n')}\n`
 }

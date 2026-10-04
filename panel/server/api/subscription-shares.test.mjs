@@ -105,3 +105,20 @@ test('public share returns Clash YAML when requested by a Clash client', async (
     assert.equal(YAML.parse(body).proxies[0].servername, 'tls.example')
   } finally { await close() }
 })
+
+test('新建分享可以带前端先生成的 token:合法且未占用就照用;不合法或撞了已有的就服务端另生成', async () => {
+  const { store, base, close } = await setup()
+  try {
+    const post = (body) => fetch(`${base}/api/openbox/subscription-shares`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: 'A', host: 'r.example', protocol: 'https', subscriptionIds: ['one'], ...body }) })
+    const mine = 'e'.repeat(48)
+    const a = await (await post({ token: mine.toUpperCase() })).json()
+    assert.equal(a.share.token, mine, '大小写归一后照用')
+    const b = await (await post({ token: mine })).json()
+    assert.notEqual(b.share.token, mine, '撞了已有的另生成')
+    assert.match(b.share.token, /^[0-9a-f]{48}$/)
+    const c = await (await post({ token: 'short' })).json()
+    assert.match(c.share.token, /^[0-9a-f]{48}$/)
+    assert.equal(store.getSubscriptionShares().length, 3)
+    assert.equal((await fetch(`${base}/sub/${mine}`)).status, 200)
+  } finally { await close() }
+})

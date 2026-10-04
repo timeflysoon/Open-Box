@@ -3,7 +3,7 @@ import net from 'node:net'
 import test from 'node:test'
 import { hostPort, targetUrl, probeViaKernel } from './route-test.mjs'
 
-test('hostPort / targetUrl:IPv6 字面量加方括号,默认端口不写(审核 B7)', () => {
+test('hostPort / targetUrl:IPv6 字面量加方括号,默认端口不写（审核 B7）', () => {
   assert.equal(hostPort('2001:db8::1', 80), '[2001:db8::1]:80')
   assert.equal(hostPort('1.2.3.4', 443), '1.2.3.4:443')
   assert.equal(hostPort('example.com', 8443), 'example.com:8443')

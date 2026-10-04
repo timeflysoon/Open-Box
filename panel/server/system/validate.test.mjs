@@ -2,7 +2,25 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createMockContext } from './context.mjs'
 import { createPaths } from './paths.mjs'
-import { checkConfig, validateConfigObject, attributeBadNodes } from './validate.mjs'
+import { checkConfig, validateConfigObject, attributeBadNodes, describeConfigError } from './validate.mjs'
+
+test('错误索引映射到重命名后的节点、订阅和原名，不泄露节点配置', () => {
+  const nodes = [{ tag: '机场A-香港01', originalTag: 'HK01', subscriptionId: 'a', password: 'never-show' }]
+  const subscriptions = [{ id: 'a', name: '我的机场', url: 'https://private-sub/token' }]
+  const config = { outbounds: [{ type: 'direct', tag: 'direct' }, { type: 'hysteria2', tag: nodes[0].tag }] }
+  for (const msg of ['\x1b[31mFATAL\x1b[0m [0000] initialize outbound[1]: missing obfs password', 'initialize outbound [1]: invalid public_key', 'outbounds.1.tls: invalid public_key', 'initialize outbound/hysteria2[机场A-香港01]: failed']) {
+    const r = describeConfigError(msg, config, { nodes, subscriptions })
+    assert.match(r.message, /节点「机场A-香港01」，订阅「我的机场」，原名「HK01」/)
+    assert.doesNotMatch(r.message, /\x1b|never-show|private-sub/)
+    assert.deepEqual(r.badTags, ['机场A-香港01'])
+  }
+  const group = describeConfigError('initialize outbound[0]: failure', config, { nodes, subscriptions })
+  assert.match(group.message, /出站「direct」/)
+  assert.deepEqual(group.badTags, [])
+  assert.equal(describeConfigError('initialize outbound[999]: failed', config).located, false)
+  assert.equal(describeConfigError('DNS failed', config).message, 'DNS failed')
+  assert.match(describeConfigError('initialize endpoint[0]: failed', { endpoints: [{ type: 'wireguard', tag: nodes[0].tag }] }, { nodes, subscriptions }).message, /订阅「我的机场」/)
+})
 
 const paths = createPaths('/opt/open-box')
 

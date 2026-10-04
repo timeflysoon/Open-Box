@@ -3,7 +3,8 @@ import test from 'node:test'
 import { createMockContext } from './context.mjs'
 import { createPaths } from './paths.mjs'
 import { configMetaPath } from './deploy.mjs'
-import { createFailoverManager, FAILOVER_STATE_KEY, laneRole } from './failover-manager.mjs'
+import { createFailoverManager, FAILOVER_STATE_KEY, laneRole, RECHECK_DELAY_MS } from './failover-manager.mjs'
+import { createLatencyProbeCoordinator } from './latency-probe-coordinator.mjs'
 
 const paths = createPaths('/opt/open-box')
 const T0 = Date.parse('2026-09-09T10:00:00+08:00')
@@ -106,14 +107,14 @@ const kernel = (clock) => {
   }
 }
 
-const setup = ({ metaAt = 'v1', failover } = {}) => {
-  let clock = T0
+const setup = ({ metaAt = 'v1', failover, probeCoordinator = null, clockRef = null } = {}) => {
+  let clock = clockRef && Number.isFinite(clockRef.value) ? clockRef.value : T0
   const k = kernel(() => clock)
   const store = memStore()
   const ctx = createMockContext({ files: { [configMetaPath(paths)]: metaJson(metaAt, failover) }, execResults: { 'pidof sing-box': { code: 1, stdout: '' } } })
   const logs = []
-  const mgr = createFailoverManager({ store, ctx, paths, fetchImpl: k.fetchImpl, now: () => clock, log: (m) => logs.push(m) })
-  const advance = (ms) => { clock += ms }
+  const mgr = createFailoverManager({ store, ctx, paths, fetchImpl: k.fetchImpl, probeCoordinator, now: () => clock, log: (m) => logs.push(m) })
+  const advance = (ms) => { clock += ms; if (clockRef) clockRef.value = clock }
   const round = async (ms = 30_000) => { advance(ms); return mgr.tick() }
   return { k, store, ctx, mgr, logs, advance, round, clock: () => clock }
 }
@@ -125,7 +126,7 @@ test('laneRole:第一个是主用,后面依次备用', () => {
   assert.equal(laneRole(2), 'backup-2')
 })
 
-test('首轮:全部通过 → 留在主用(内核默认就是主用),状态 ok;状态里能看到页签、有效节点和探测结果', async () => {
+test('首轮:全部通过 → 留在主用（内核默认就是主用）,状态 ok;状态里能看到页签、有效节点和探测结果', async () => {
   const { k, mgr, store } = setup()
   const r = await mgr.tick()
   assert.equal(r.ran['主备'].switched, null)
@@ -145,6 +146,21 @@ test('首轮:全部通过 → 留在主用(内核默认就是主用),状态 ok;�
   assert.equal(JSON.parse(store.getRaw(FAILOVER_STATE_KEY)).groups.fo1.laneId, 'A')
 })
 
+test('故障转移复用较短周期组已经完成的节点探测,到自己的 interval 才再次检查', async () => {
+  const clockRef = { value: T0 }
+  const coordinator = createLatencyProbeCoordinator({ now: () => clockRef.value })
+  for (const tag of ['a1', 'a2', 'b1', 'c1', 'c2']) {
+    coordinator.register('urltest:短周期', tag, URL, 10_000)
+    coordinator.observe(tag, URL, { ok: true, delay: 90, at: T0 })
+  }
+  const { k, mgr, advance } = setup({ probeCoordinator: coordinator, clockRef })
+  await mgr.tick()
+  assert.equal(k.calls.filter((c) => /\/proxies\/[^/]+\/delay/.test(c)).length, 0)
+  advance(30_000)
+  await mgr.tick()
+  assert.equal(k.calls.filter((c) => /\/proxies\/[^/]+\/delay/.test(c)).length, 5)
+})
+
 test('验收 8:主用里一个节点失败、另一个仍可用 → 流量留在主用页签,内核子组切到可用节点,外层不动', async () => {
   const { k, mgr, round } = setup()
   await mgr.tick()
@@ -159,7 +175,27 @@ test('验收 8:主用里一个节点失败、另一个仍可用 → 流量留在
   assert.equal(group(mgr).status, 'ok')
 })
 
-test('验收 9:主用全部失败达到阈值(2 轮)才转到第一个可用备用;它再失败则转到下一个候选', async () => {
+test('手动选择的页签(#188,内部 selector):不让内核重选,只看用户选中的节点;选中的挂了算页签不通,另一个节点好的也不自己换', async () => {
+  const manual = mapping({ lanes: mapping().lanes.map((l) => (l.id === 'A' ? { ...l, mode: 'selector' } : l)) })
+  const { k, mgr, round } = setup({ failover: [manual] })
+  k.proxies['__fo:fo1:A'].type = 'Selector'
+  await mgr.tick()
+  assert.equal(lanes(mgr).A, 'up')
+  assert.equal(group(mgr).lanes[0].kernelNow, 'a1')
+  assert.ok(!k.calls.some((c) => c.includes('/group/__fo:fo1:A/delay')), '手动页签不调组测速让内核重选')
+  k.down.add('a1')
+  await round()
+  assert.equal(lanes(mgr).A, 'down', '选中的 a1 挂了:页签不通')
+  assert.equal(k.proxies['__fo:fo1:A'].now, 'a1', '不替用户换到 a2')
+  await round()
+  assert.equal(k.now(), 'b1', '连续两轮不通照常转到备用')
+  // 用户在代理页把页签里改选 a2 → 下一轮主用恢复,满 hold 后切回
+  k.proxies['__fo:fo1:A'].now = 'a2'
+  await round()
+  assert.equal(lanes(mgr).A, 'up')
+})
+
+test('验收 9:主用全部失败达到阈值（2 轮）才转到第一个可用备用;它再失败则转到下一个候选', async () => {
   const { k, mgr, round } = setup()
   await mgr.tick()
   k.down.add('a1'); k.down.add('a2')
@@ -252,7 +288,7 @@ test('验收 11:内核 API 不可达时暂停,不把基础设施故障记成节�
   assert.equal(mgr.status().paused, '')
 })
 
-test('未知不算失败:探测服务对某个节点报 500(不是 503/504)→ 该页签未知,不计失败轮数、不切换', async () => {
+test('未知不算失败:探测服务对某个节点报 500（不是 503/504）→ 该页签未知,不计失败轮数、不切换', async () => {
   const { k, mgr, round } = setup()
   await mgr.tick()
   const origin = k.fetchImpl
@@ -283,7 +319,7 @@ test('我们的探测偶发超时、内核组内重测又通过并仍选着它 �
   assert.equal(k.now(), '__fo:fo1:A')
 })
 
-test('多节点页签有节点通过但内核实际选中的还是坏节点且没新结果 → 这轮算未确认(未知),不宣布恢复', async () => {
+test('多节点页签有节点通过但内核实际选中的还是坏节点且没新结果 → 这轮算未确认（未知）,不宣布恢复', async () => {
   const { k, mgr, round } = setup()
   await mgr.tick()
   k.down.add('a1')
@@ -335,7 +371,7 @@ test('验收 12:配置版本变了 → 重载映射、旧关联按页签 id 恢�
   assert.deepEqual(JSON.parse(store.getRaw(FAILOVER_STATE_KEY)).groups, {})
 })
 
-test('验收 12:部署到一半(映射已更新、内核还是旧出站)→ 这轮跳过、不切换,10 秒后再看', async () => {
+test('验收 12:部署到一半（映射已更新、内核还是旧出站）→ 这轮跳过、不切换,10 秒后再看', async () => {
   const { k, mgr, ctx, round } = setup()
   await mgr.tick()
   ctx.files[configMetaPath(paths)] = metaJson('v2', [mapping({ lanes: [
@@ -381,7 +417,7 @@ test('验收 12:轮次进行中配置版本变了 → 旧轮次结果作废,不�
   void round
 })
 
-test('切换失败(PUT 被拒)→ 保留实际状态并记原因,下一轮再试', async () => {
+test('切换失败（PUT 被拒）→ 保留实际状态并记原因,下一轮再试', async () => {
   const { k, mgr, round } = setup()
   await mgr.tick()
   k.down.add('a1'); k.down.add('a2')
@@ -398,7 +434,7 @@ test('切换失败(PUT 被拒)→ 保留实际状态并记原因,下一轮再试
   assert.equal(group(mgr).lastError, '')
 })
 
-test('没部署过(meta 不存在)→ 没有组可管,不报错;stop 后不再跑', async () => {
+test('没部署过（meta 不存在）→ 没有组可管,不报错;stop 后不再跑', async () => {
   const store = memStore()
   const ctx = createMockContext({ files: {}, execResults: {} })
   const mgr = createFailoverManager({ store, ctx, paths, fetchImpl: async () => { throw new Error('no') }, now: () => T0, log: () => {} })
@@ -427,7 +463,7 @@ const reorderTo = ({ k, ctx }, ids, metaAt = 'v2') => {
 }
 const persistedOf = (store) => JSON.parse(store.getRaw(FAILOVER_STATE_KEY)).groups.fo1
 
-test('验收 A:A 全失败已切到 B,用户把顺序改成 A/C/B 并应用 → 下一轮确认 C 通过就切到 C(priority-changed),不用重启、不要求 B 先失败', async () => {
+test('验收 A:A 全失败已切到 B,用户把顺序改成 A/C/B 并应用 → 下一轮确认 C 通过就切到 C（priority-changed）,不用重启、不要求 B 先失败', async () => {
   const s = setup()
   const { k, mgr, store } = s
   await mgr.tick()
@@ -463,7 +499,7 @@ test('验收 A:A 全失败已切到 B,用户把顺序改成 A/C/B 并应用 → 
   assert.equal(group(mgr).reorder, null)
 })
 
-test('验收 A:只是重新生成配置(顺序没变,改名 / 换图标)不算重排,不重选;新增或删掉页签才按新顺序看', async () => {
+test('验收 A:只是重新生成配置（顺序没变,改名 / 换图标）不算重排,不重选;新增或删掉页签才按新顺序看', async () => {
   const s = setup()
   const { k, mgr } = s
   await mgr.tick()
@@ -519,7 +555,7 @@ test('验收 B:排序应用后、重选完成前重启管理器 / 内核不可�
   assert.equal(group(mgr).lastSwitch.reason, 'priority-changed')
 })
 
-test('验收 B:老的落盘记录没有顺序信息(停在旧备用 B)→ 校正一次:新顺序里更靠前的 C 通过就挪过去;校正只做到当前是第一个通过的为止', async () => {
+test('验收 B:老的落盘记录没有顺序信息（停在旧备用 B）→ 校正一次:新顺序里更靠前的 C 通过就挪过去;校正只做到当前是第一个通过的为止', async () => {
   // 旧版存的记录:只有 laneId,没有 laneOrder / reorder
   const store = memStore()
   store.setRaw(FAILOVER_STATE_KEY, JSON.stringify({ groups: { fo1: { laneId: 'B', at: T0 - 600_000, lastSwitch: { at: T0 - 600_000, reason: 'lane-failed' } } } }))
@@ -594,7 +630,7 @@ test('验收 C:切换接口被拒 → 保留实际选择 B 并记原因,待办�
   assert.equal(k.now(), '__fo:fo1:C')
 })
 
-test('验收 A:重排后目标页签和当前引用同一个出站(两个单节点页签挂同一个节点)→ 只改关联,不发切换', async () => {
+test('验收 A:重排后目标页签和当前引用同一个出站（两个单节点页签挂同一个节点）→ 只改关联,不发切换', async () => {
   const twin = mapping({ lanes: [
     { id: 'A', name: '', index: 0, members: ['a1', 'a2'], valid: ['a1', 'a2'], mode: 'urltest', ref: '__fo:fo1:A', subTag: '__fo:fo1:A' },
     { id: 'B', name: '', index: 1, members: ['b1'], valid: ['b1'], mode: 'single', ref: 'b1', subTag: null },
@@ -658,7 +694,7 @@ test('验收 C:候选恢复计时被未知打断——C down → up → unknown 
   assert.equal(group(mgr).lastSwitch.reason, 'priority-changed')
 })
 
-test('验收 A:用户把某个页签排到第一位(C/A/B)→ 第一次确认它通过就立刻切过去,关着「恢复后切回」也一样;主用之后失败再恢复才按回切规则', async () => {
+test('验收 A:用户把某个页签排到第一位（C/A/B）→ 第一次确认它通过就立刻切过去,关着「恢复后切回」也一样;主用之后失败再恢复才按回切规则', async () => {
   const s = setup({ failover: [mapping({ settings: { ...mapping().settings, restorePrimary: false } })] })
   const { k, mgr } = s
   await mgr.tick()
@@ -683,4 +719,118 @@ test('验收 A:用户把某个页签排到第一位(C/A/B)→ 第一次确认它
   await s.round(); await s.round(); await s.round()
   assert.equal(group(mgr).currentLaneId, 'B', '关着「恢复后切回」:主用恢复不切回')
   assert.equal(k.calls.filter((c) => c.startsWith('PUT')).length, 3)
+})
+
+// ---------- 10 秒复查(用户 2026-09-30 定的规则)----------
+// 按指定间隔检测;当前页签不通 → 过 10 秒强制复查当前页签的节点一次 → 通过就回到正常周期,仍不通才换页签。
+// 备用页签、只有部分节点不通都不复查;复查只强制测当前页签,别的页签照常复用间隔内的结果
+const forced = (k) => k.calls.filter((c) => /\/proxies\/[^/]+\/delay\?.*force=true/.test(c)).map((c) => c.match(/\/proxies\/([^/]+)\/delay/)[1]).sort()
+const nextRoundIn = (mgr, clockNow) => mgr.status().groups[0].nextRoundAt - clockNow
+
+test('10 秒复查:当前页签全部不通 → 这一轮不换、不马上重测,10 秒后强制复查;复查仍不通才换页签', async () => {
+  const { k, mgr, round, advance, clock } = setup()
+  await mgr.tick()
+  k.down.add('a1'); k.down.add('a2')
+  k.calls.length = 0
+  const r = await round()
+  assert.equal(r.ran['主备'].switched, null, '第一次不通不换')
+  assert.equal(r.ran['主备'].recheck, true)
+  assert.deepEqual(forced(k), [], '不再立刻重测')
+  assert.equal(k.now(), '__fo:fo1:A')
+  assert.equal(nextRoundIn(mgr, clock()), RECHECK_DELAY_MS, '10 秒后复查,不等整个周期')
+  k.calls.length = 0
+  advance(RECHECK_DELAY_MS)
+  const r2 = await mgr.tick()
+  assert.deepEqual(forced(k), ['a1', 'a2'], '复查强制重测当前页签的节点')
+  assert.equal(r2.ran['主备'].switched.to, 'b1', '复查仍不通 → 换到下一个通过的页签')
+  assert.equal(group(mgr).lastSwitch.reason, 'lane-failed')
+  assert.equal(r2.ran['主备'].recheck, false)
+  assert.equal(nextRoundIn(mgr, clock()), 30_000, '换好以后回到正常周期')
+})
+
+test('10 秒复查:复查通过就留在当前页签,回到正常周期', async () => {
+  const { k, mgr, round, advance, clock } = setup()
+  await mgr.tick()
+  k.down.add('a1'); k.down.add('a2')
+  await round()
+  k.down.delete('a1'); k.down.delete('a2')
+  advance(RECHECK_DELAY_MS)
+  const r = await mgr.tick()
+  assert.equal(r.ran['主备'].switched, null)
+  assert.equal(lanes(mgr).A, 'up')
+  assert.equal(k.now(), '__fo:fo1:A')
+  assert.equal(r.ran['主备'].recheck, false)
+  assert.equal(nextRoundIn(mgr, clock()), 30_000)
+})
+
+test('10 秒复查:备用页签不通、当前页签只有部分节点不通,都不复查', async () => {
+  const { k, mgr, round, clock } = setup()
+  await mgr.tick()
+  k.down.add('b1'); k.down.add('c1'); k.down.add('c2')
+  k.calls.length = 0
+  let r = await round()
+  assert.equal(r.ran['主备'].recheck, false, '备用页签不通不复查')
+  assert.equal(nextRoundIn(mgr, clock()), 30_000)
+  k.down.add('a1')
+  r = await round()
+  assert.equal(r.ran['主备'].recheck, false, '当前页签还有节点通过,不复查')
+  assert.equal(lanes(mgr).A, 'up')
+  assert.deepEqual(forced(k), [])
+})
+
+test('10 秒复查:复查只强制测当前页签,别的页签复用间隔内的结果', async () => {
+  const clockRef = { value: T0 }
+  const coordinator = createLatencyProbeCoordinator({ now: () => clockRef.value })
+  const { k, mgr, advance } = setup({ probeCoordinator: coordinator, clockRef })
+  await mgr.tick()
+  k.down.add('a1'); k.down.add('a2')
+  advance(30_000)
+  await mgr.tick()
+  k.calls.length = 0
+  advance(RECHECK_DELAY_MS)
+  await mgr.tick()
+  assert.deepEqual(forced(k), ['a1', 'a2'])
+  assert.equal(k.calls.filter((c) => /\/proxies\/(b1|c1|c2)\/delay/.test(c)).length, 0, '备用页签 10 秒前刚测过,复用不另发')
+  assert.equal(k.now(), 'b1')
+})
+
+test('10 秒复查:复查切换被拒 / 候选都还未知 → 继续每 10 秒复查,不在坏页签上干等整个周期', async () => {
+  const { k, mgr, round, advance, clock } = setup()
+  await mgr.tick()
+  k.down.add('a1'); k.down.add('a2')
+  await round()
+  k.setRefuseSwitch(true)
+  advance(RECHECK_DELAY_MS)
+  const r = await mgr.tick()
+  assert.equal(r.ran['主备'].switched, null)
+  assert.match(group(mgr).lastError, /切换失败/)
+  assert.equal(r.ran['主备'].recheck, true)
+  assert.equal(nextRoundIn(mgr, clock()), RECHECK_DELAY_MS)
+  k.setRefuseSwitch(false)
+  advance(RECHECK_DELAY_MS)
+  const r2 = await mgr.tick()
+  assert.equal(r2.ran['主备'].switched.to, 'b1')
+})
+
+test('复用来的失败不再记进延迟历史(同一次失败只记一笔);探测接口本身没应答记未知,不复查', async () => {
+  const k = setup().k
+  const samples = []
+  const origin = k.fetchImpl
+  let clock = T0
+  const fetchImpl = async (url, init) => {
+    const u = String(url)
+    // 内核缓存里别的使用者刚测完的超时:504 带原始完成时间和 reused
+    if (u.includes('/proxies/b1/delay')) return { ok: false, status: 504, json: async () => ({ message: 'Timeout', time: iso(clock - 2000), reused: true }) }
+    if (u.includes('/proxies/a2/delay')) { const err = new Error('aborted'); err.name = 'AbortError'; throw err }
+    return origin(url, init)
+  }
+  const mgr = createFailoverManager({ store: memStore(), ctx: createMockContext({ files: { [configMetaPath(paths)]: metaJson('v1') }, execResults: { 'pidof sing-box': { code: 1 } } }), paths, fetchImpl, now: () => clock, history: { recordSamples: (s) => samples.push(...s), recordFromProxies: () => {} }, log: () => {} })
+  k.down.add('c1')
+  await mgr.tick()
+  const nodes = Object.assign({}, ...group(mgr).lanes.map((l) => l.nodes))
+  assert.equal(nodes.b1.ok, false)
+  assert.equal(nodes.a2.ok, null, '接口没应答记未知')
+  assert.deepEqual(samples.map((s) => s.name), ['c1'], 'b1 是复用来的,不再记一笔')
+  assert.deepEqual(forced(k), [])
+  void clock
 })

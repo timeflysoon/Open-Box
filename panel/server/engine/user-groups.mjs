@@ -155,7 +155,9 @@ const inRange = (v, [lo, hi], fallback) => {
 }
 // 主备页签:id 稳定(拖拽排序、保存、运行状态都按它认),name / icon 可选(不决定主备顺序;icon 空 = 继承
 // 父组的图标),members 只存节点名、同一页签内去重。老记录缺 id 的补一个,重复的 id 加后缀——运行映射按 id
-// 对齐,重复了就分不清
+// 对齐,重复了就分不清。
+// manual:多节点页签在页签内怎么挑节点(GitHub #188)——不写 / false = 自动优选(内部 urltest,按测速选),
+// true = 手动选择(内部 selector,用户在代理页点选;节点不稳时不会在页签内来回跳)。单节点页签不看它
 export const normalizeLanes = (raw) => {
   const seen = new Set()
   return (Array.isArray(raw) ? raw : []).slice(0, FAILOVER_MAX_LANES).map((lane, i) => {
@@ -166,7 +168,7 @@ export const normalizeLanes = (raw) => {
     for (const m of Array.isArray(lane?.members) ? lane.members : []) {
       if (isNonEmptyString(m) && !members.includes(m.trim())) members.push(m.trim())
     }
-    return { id, name: isNonEmptyString(lane?.name) ? lane.name.trim() : '', icon: isNonEmptyString(lane?.icon) ? lane.icon.trim() : '', members }
+    return { id, name: isNonEmptyString(lane?.name) ? lane.name.trim() : '', icon: isNonEmptyString(lane?.icon) ? lane.icon.trim() : '', members, ...(lane?.manual === true ? { manual: true } : {}) }
   })
 }
 
@@ -266,11 +268,13 @@ export const builtinTags = (groups) => {
 //              必须最终落到真实存在的组上。
 // matchText:节点名之外再带上识别出的地区名(rename.mjs 挂的 regionName)。订阅关了重命名、节点保留
 // 机场原名(比如 "US-01")时,「美国-自动」这种按地区关键词选成员的组照样能选到它
-const resolveMembers = (group, nodeTags, groupNameSet, matchText = new Map()) => {
+// dynamicTags:动态组能挑的节点。链式代理的节点(engine/chain-proxy.mjs,node.chain)不在里面——住宅线路不该
+// 悄悄混进「全部节点 / 按关键词」的自动择优池,要用就显式加成静态成员
+const resolveMembers = (group, nodeTags, groupNameSet, matchText = new Map(), dynamicTags = nodeTags) => {
   const nodeTagSet = new Set(nodeTags)
   if (group.mode === 'dynamic') {
-    if (!group.keywords.length) return [...nodeTags]
-    return nodeTags.filter((tag) => {
+    if (!group.keywords.length) return [...dynamicTags]
+    return dynamicTags.filter((tag) => {
       const lower = matchText.get(tag) ?? normalizeForMatch(tag)
       return group.keywords.some((kw) => keywordMatches(lower, kw))
     })
@@ -327,6 +331,7 @@ export const emitUserGroups = (groups, nodes, options = {}) => {
   // 保持节点原有顺序:节点已经按地区词典排过序了(见 rename.mjs),组里的成员顺序
   // 跟着它走,策略组列表看起来才和节点列表一致。
   const nodeTags = (nodes || []).map((n) => n.tag)
+  const dynamicNodeTags = (nodes || []).filter((n) => !n.chain).map((n) => n.tag)
   const matchText = new Map((nodes || []).map((n) => [n.tag, normalizeForMatch(`${n.regionName || ''} ${n.tag}`)]))
 
   const builtin = builtinTags(normalized)
@@ -370,6 +375,14 @@ export const emitUserGroups = (groups, nodes, options = {}) => {
       while (usedTags.has(subTag)) subTag += '~'
       usedTags.add(subTag)
       internal.add(subTag)
+      // 手动选择的页签:内部子组是 selector,默认第一个节点,之后按用户在代理页点的(内核 cache_file 记住选择)。
+      // 后台管理器只看选中的那个节点通不通,不让内核在页签内重选
+      if (lane.manual === true) {
+        outbounds.push({ type: 'selector', tag: subTag, outbounds: valid, default: valid[0] })
+        lanes.push({ id: lane.id, name: lane.name, icon: lane.icon || '', index, members: lane.members, valid, mode: 'selector', ref: subTag, subTag })
+        refs.push(subTag)
+        return
+      }
       // 内部子组共用父组的检测参数;idle_timeout 抬到不低于 interval(内核硬性要求)
       outbounds.push({
         type: 'urltest', tag: subTag, outbounds: valid,
@@ -409,7 +422,7 @@ export const emitUserGroups = (groups, nodes, options = {}) => {
     if (g.kind === 'block') { outbounds.push({ type: 'block', tag: g.name }); continue }
     if (!withoutCycles.includes(g)) continue
     if (g.type === 'failover') { emitFailover(g); continue }
-    let members = resolveMembers(g, nodeTags, groupNameSet, matchText)
+    let members = resolveMembers(g, nodeTags, groupNameSet, matchText, dynamicNodeTags)
     if (!members.length) {
       // 空组不能原样写进配置——内核会 FATAL(1.13.14 实测:
       // "initialize outbound[N]: missing tags")。但也不该把整个组丢掉:用户建

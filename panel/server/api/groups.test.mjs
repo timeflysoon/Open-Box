@@ -80,7 +80,7 @@ test('PUT /groups:成员引用了既不是节点也不是组的名字 → 保存
   }
 })
 
-test('PUT /groups:删掉被引用的组 → 引用它的组不管空没空,都在 dangling 里点名(空组在内核里挂直连占位,dropped 不会提它)', async () => {
+test('PUT /groups:删掉被引用的组 → 引用它的组不管空没空,都在 dangling 里点名（空组在内核里挂直连占位,dropped 不会提它）', async () => {
   const store = memStore()
   const { B } = seed(store)
   const { baseUrl, close } = await startApp(store)
@@ -119,7 +119,7 @@ const putFo = async (store, groups) => {
   } finally { await close() }
 }
 
-test('PUT /groups(failover):合法定义保存后 lanes 原样落库、mode 固定 static、参数补默认,内部子组不在公开候选里', async () => {
+test('PUT /groups（failover）:合法定义保存后 lanes 原样落库、mode 固定 static、参数补默认,内部子组不在公开候选里', async () => {
   const store = memStore()
   foSeed(store)
   const { status, body } = await putFo(store, [fo({ interval: '45s', tolerance: 50, failover: { failureThreshold: 3 } })])
@@ -142,7 +142,16 @@ test('PUT /groups(failover):合法定义保存后 lanes 原样落库、mode 固�
   } finally { await close() }
 })
 
-test('PUT /groups(failover):动态模式、页签 id 重复、成员是组 / 站点集 / 内部 tag / 陌生名字、参数越界、时长格式错都被拒绝', async () => {
+test('PUT /groups（failover）:页签可以设成手动选择(manual:true,#188),落库保留;不写就是自动优选', async () => {
+  const store = memStore()
+  foSeed(store)
+  const { status, body } = await putFo(store, [fo({ lanes: [{ id: 'L1', name: '', members: ['n1', 'n2'], manual: true }, { id: 'L2', name: '', members: ['n3'] }] })])
+  assert.equal(status, 200, JSON.stringify(body))
+  const saved = store.getGroups().find((g) => g.type === 'failover')
+  assert.deepEqual(saved.lanes.map((l) => l.manual === true), [true, false])
+})
+
+test('PUT /groups（failover）:动态模式、页签 id 重复、成员是组 / 站点集 / 内部 tag / 陌生名字、参数越界、时长格式错都被拒绝', async () => {
   const store = memStore()
   foSeed(store)
   const cases = [
@@ -151,6 +160,7 @@ test('PUT /groups(failover):动态模式、页签 id 重复、成员是组 / 站
     [fo({ lanes: [{ id: 'L1', members: ['n1'] }, { id: 'L1', members: ['n2'] }] }), /页签 id 重复/],
     [fo({ lanes: [{ id: 'L1', members: ['n1'] }, { id: 'L2', members: ['n2'] }, { id: 'L3', members: ['n3'] }, { id: 'L4', members: ['n1'] }] }), /最多 3 个页签/],
     [fo({ lanes: [{ id: 'L1', members: ['A'] }] }), /只能放真实节点/],
+    [fo({ lanes: [{ id: 'L1', members: ['n1', 'n2'], manual: 'yes' }] }), /选择方式不合法/],
     [fo({ lanes: [{ id: 'L1', members: ['Video'] }] }), /只能放真实节点/],
     [fo({ lanes: [{ id: 'L1', members: ['__fo:g-fo:L2'] }] }), /只能放真实节点/],
     [fo({ lanes: [{ id: 'L1', members: ['主备'] }] }), /只能放真实节点/],
@@ -175,7 +185,7 @@ test('PUT /groups(failover):动态模式、页签 id 重复、成员是组 / 站
   assert.ok(!store.getGroups().some((g) => g.id === 'g-fo'))
 })
 
-test('PUT /groups(failover):订阅更新删掉了页签里的节点 → 旧引用保留并在 dangling 里报告,别的组照常能改;新加陌生节点仍被拒', async () => {
+test('PUT /groups（failover）:订阅更新删掉了页签里的节点 → 旧引用保留并在 dangling 里报告,别的组照常能改;新加陌生节点仍被拒', async () => {
   const store = memStore()
   foSeed(store)
   const A = { id: 'g-a', name: 'A', type: 'selector', mode: 'static', members: ['n1'] }
@@ -192,7 +202,7 @@ test('PUT /groups(failover):订阅更新删掉了页签里的节点 → 旧引�
   assert.equal(moved.status, 400)
 })
 
-test('PUT /groups(failover):普通组可以引用故障转移父组;父组改名后引用一并迁移', async () => {
+test('PUT /groups（failover）:普通组可以引用故障转移父组;父组改名后引用一并迁移', async () => {
   const store = memStore()
   foSeed(store)
   const B = { id: 'g-b', name: 'B', type: 'selector', mode: 'static', members: ['主备', 'n1'] }
@@ -202,4 +212,60 @@ test('PUT /groups(failover):普通组可以引用故障转移父组;父组改名
   assert.deepEqual(r.body.renamed, [{ from: '主备', to: '主备2' }])
   assert.deepEqual(store.getGroups().find((g) => g.id === 'g-b').members, ['主备2', 'n1'])
   assert.deepEqual(r.body.dangling, [])
+})
+
+test('GET /groups:链式代理的节点也在成员候选里,来源标「链式代理」;停用的不在', async () => {
+  const store = memStore()
+  store.setNodes([{ tag: 'node-1', type: 'ss', server: '1.2.3.4', server_port: 1, subscriptionId: 's1' }])
+  store.setSubscriptions([{ id: 's1', name: '机场A' }])
+  store.setProfile({ chainProxies: [
+    { id: 'c1', enabled: true, name: '住宅-美国', link: 'socks5://u:p@res.example.net:1080#x', upstream: 'node-1' },
+    { id: 'c2', enabled: false, name: '停用的', link: 'socks5://u:p@res2.example.net:1080#y', upstream: 'node-1' },
+  ] })
+  const { baseUrl, close } = await startApp(store)
+  try {
+    const body = await (await fetch(`${baseUrl}/api/openbox/groups`)).json()
+    assert.deepEqual(body.availableNodes, [{ name: 'node-1', subscription: '机场A' }, { name: '住宅-美国', subscription: '链式代理', chain: true, upstream: 'node-1' }])
+  } finally {
+    await close()
+  }
+})
+
+
+test('PUT /groups:分组不能和链式代理同名（同名会让链式节点被当重名丢掉,组里只剩指向自己的成员）', async () => {
+  const store = memStore()
+  seed(store)
+  store.setProfile({ chainProxies: [{ id: 'c1', enabled: true, name: '英国-住宅', link: 'socks5://u:p@res.example.net:1080#x', upstream: 'A' }] })
+  const { baseUrl, close } = await startApp(store)
+  try {
+    const res = await put(baseUrl, [...store.getGroups(), { id: 'g-c', name: '英国-住宅', type: 'selector', mode: 'static', members: ['英国-住宅'] }])
+    assert.equal(res.status, 400)
+    assert.match((await res.json()).error, /链式代理/)
+    const ok = await put(baseUrl, [...store.getGroups(), { id: 'g-c', name: '英国-住宅组', type: 'selector', mode: 'static', members: ['英国-住宅'] }])
+    assert.equal(ok.status, 200)
+    const body = await ok.json()
+    assert.deepEqual(body.dangling, [], '链式节点是合法成员')
+    const list = await fetch(`${baseUrl}/api/openbox/groups`).then((r) => r.json())
+    // chain 标记:页面算动态组成员时排除它,和内核一致(#297)
+    assert.deepEqual(list.availableNodes.find((n) => n.name === '英国-住宅'), { name: '英国-住宅', subscription: '链式代理', chain: true, upstream: 'A' })
+  } finally {
+    await close()
+  }
+})
+
+test('GET /groups:候选节点带识别出的地区名(动态组按「地区名 + 节点名」匹配),订阅节点没有 chain 标记', async () => {
+  const store = memStore()
+  seed(store)
+  store.setNodes([
+    { tag: 'US-01', type: 'ss', server: '1.2.3.4', server_port: 1, regionName: '美国' },
+    { tag: 'node-2', type: 'ss', server: '1.2.3.5', server_port: 1 },
+  ])
+  const { baseUrl, close } = await startApp(store)
+  try {
+    const list = await fetch(`${baseUrl}/api/openbox/groups`).then((r) => r.json())
+    assert.deepEqual(list.availableNodes.find((n) => n.name === 'US-01'), { name: 'US-01', subscription: '', region: '美国' })
+    assert.deepEqual(list.availableNodes.find((n) => n.name === 'node-2'), { name: 'node-2', subscription: '' })
+  } finally {
+    await close()
+  }
 })

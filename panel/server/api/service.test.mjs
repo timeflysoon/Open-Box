@@ -63,6 +63,8 @@ test('GET /api/openbox/service/status → {core:{running,raw}, panel:{running,ra
     assert.ok(body.panel.raw)
     assert.ok(Array.isArray(body.conflicts))
     assert.equal(body.conflicts.length, 0)
+    // 界面按 platform 隐藏只有 OpenWrt 才有的选项(dnsmasq 分流);默认路径表就是 openwrt
+    assert.equal(body.platform, 'openwrt')
     // mock 里没配 enabled 的返回,默认退出码 0 → 视为已开启自启
     assert.equal(body.core.autostart, true)
   } finally {
@@ -139,7 +141,7 @@ test('POST /api/openbox/service/core/stop → {ok,code,stderr}', async () => {
   }
 })
 
-test('停止失败时不应关闭自启(内核还在跑,关自启只会让状态更乱)', async () => {
+test('停止失败时不应关闭自启（内核还在跑,关自启只会让状态更乱）', async () => {
   const ctx = okCtx({ '/etc/init.d/openbox stop': { code: 1, stdout: '', stderr: 'boom' } })
   const { baseUrl, close } = await startApp(ctx)
   try {
@@ -165,7 +167,7 @@ test('停止成功但关自启失败时,如实把原因带回来', async () => {
   }
 })
 
-test('重启不得关闭自启(init 的 restart 内部就是 stop+start,不能顺手把自启关了)', async () => {
+test('重启不得关闭自启（init 的 restart 内部就是 stop+start,不能顺手把自启关了）', async () => {
   const ctx = okCtx()
   const { baseUrl, close } = await startApp(ctx)
   try {
@@ -281,7 +283,7 @@ test('GET /service/status:init 脚本 enabled 退出码非 0 → core.autostart=
   }
 })
 
-test('GET /service/status:内核在跑时带 uptimeSeconds(pidof + /proc/<pid>/stat + /proc/uptime)', async () => {
+test('GET /service/status:内核在跑时带 uptimeSeconds（pidof + /proc/<pid>/stat + /proc/uptime）', async () => {
   const ctx = okCtx({ 'pidof sing-box': { code: 0, stdout: '4321\n' } })
   // starttime = 100000 滴答 = 1000s;系统开机 4600s → 运行 3600s
   ctx.files['/proc/4321/stat'] = '4321 (sing-box) S 1 4321 4321 0 -1 4194560 100 0 0 0 5 3 0 0 20 0 9 0 100000 1296640 15000 18446744073709551615 1 1 0 0 0 0 0 0 0 0 0 0 17 1 0 0 0 0 0 0 0 0 0 0 0 0 0'
@@ -325,7 +327,7 @@ test('停止后内核迟迟不退出 → ok:false 并说明,不再谎报已停�
 
 // 审查第 2 项:部署跑到一半(内核已起、正在验证)时点了停止——停止要排在部署后面执行,部署要
 // 认出自己被取消(不报成功、不开自启),最终状态是停止的、自启关着,和用户最后一个动作一致
-test('部署途中点停止:部署被标成取消(不 enable),停止随后执行并 disable,最终状态跟最后一个动作走', async () => {
+test('部署途中点停止:部署被标成取消（不 enable）,停止随后执行并 disable,最终状态跟最后一个动作走', async () => {
   let releaseVerify
   const verifyGate = new Promise((r) => { releaseVerify = r })
   let stopped = false

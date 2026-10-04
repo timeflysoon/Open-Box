@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { buildFilterConfig, DNS_FILTER_DEFAULT, filterForwardPlan, filterKey, filterSettings, parseDnsFilter, validateDnsFilter } from './dns-filter.mjs'
+import { createHash } from 'node:crypto'
+import { buildFilterConfig, chunkRules, contentKey, DNS_FILTER_DEFAULT, DNS_FILTER_SET_ENTRIES, ruleHasRegex, filterForwardPlan, filterKey, filterSettings, parseDnsFilter, validateDnsFilter } from './dns-filter.mjs'
 
 test('DNS filtering defaults off; empty list stays empty; forward changes only while enabled', () => {
   assert.equal(DNS_FILTER_DEFAULT.enabled, false)
@@ -42,4 +43,40 @@ test('filter configuration validates IDs, URL schemes, duplicate lists and domai
   }
   assert.ok(validateDnsFilter({ ...structuredClone(DNS_FILTER_DEFAULT), autoUpdate: { enabled: 'yes' } }))
   assert.ok(validateDnsFilter({ ...structuredClone(DNS_FILTER_DEFAULT), autoUpdate: { days: 0 } }))
+})
+
+test('big rule sets are chunked by entry count; each piece keeps the extra conditions; regex detection sees through logical rules', () => {
+  assert.equal(DNS_FILTER_SET_ENTRIES, 25000)
+  assert.deepEqual(chunkRules([]), [])
+  const body = [...Array(7)].map((_, i) => `||s${i}.test^`).concat(['/^r[0-9]\\.test$/', '||a.test^$dnstype=A', '||b.test^$dnstype=A', '|exact.test^']).join('\n')
+  const { rules } = parseDnsFilter(body)
+  // 精确 1 条 + 后缀 7 条 + 正则 1 条在同一条规则里(9 条),两条 dnstype=A 在一条逻辑规则里
+  const chunks = chunkRules(rules.block, 3)
+  const entries = (rule) => (rule.type === 'logical' ? rule.rules[0] : rule)
+  assert.deepEqual(chunks.map((c) => c.map((r) => Object.values(entries(r)).flat().length)), [[3], [3], [3], [2]])
+  const first = chunks[0][0], last = chunks[2][0]
+  assert.deepEqual(first, { domain: ['exact.test'], domain_suffix: ['s0.test', 's1.test'] })
+  assert.deepEqual(last, { domain_suffix: ['s5.test', 's6.test'], domain_regex: ['^r[0-9]\\.test$'] })
+  const typed = chunks[3][0]
+  assert.equal(typed.type, 'logical')
+  assert.deepEqual(typed.rules[1], { query_type: ['A'] })
+  assert.deepEqual(chunkRules(rules.block, 100), [rules.block])
+  // 小规则在前、大规则在后:大规则先把当前这份填满,不会留下一份只装几条的集合
+  assert.deepEqual(chunkRules([{ domain: ['a.test'] }, { domain_suffix: ['b1', 'b2', 'b3', 'b4', 'b5'] }], 3), [[{ domain: ['a.test'] }, { domain_suffix: ['b1', 'b2'] }], [{ domain_suffix: ['b3', 'b4', 'b5'] }]])
+  // 切出来的所有条目合起来和原来一样多
+  const total = (list) => list.flat().reduce((n, r) => n + Object.values(entries(r)).flat().length, 0)
+  assert.equal(total(chunks), total([rules.block]))
+  assert.equal(ruleHasRegex(first), false)
+  assert.equal(ruleHasRegex(last), true)
+  assert.equal(ruleHasRegex({ type: 'logical', mode: 'and', rules: [{ domain_regex: ['x'] }, { query_type: ['A'] }] }), true)
+})
+
+test('content keys hash the text itself; filterKey on a string must not spread it into indexed keys', () => {
+  assert.equal(contentKey('abc'), createHash('sha256').update('abc').digest('hex').slice(0, 16))
+  assert.equal(filterKey('abc'), contentKey('abc'))
+  assert.notEqual(filterKey('abc'), contentKey(JSON.stringify({ 0: 'a', 1: 'b', 2: 'c' })))
+  const started = Date.now()
+  filterKey('x'.repeat(2 * 1024 * 1024))
+  assert.ok(Date.now() - started < 500, '2 MB 正文取键应当毫秒级')
+  assert.equal(filterKey({ autoUpdate: { enabled: true }, lists: [] }), filterKey({ autoUpdate: { enabled: false }, lists: [] }))
 })

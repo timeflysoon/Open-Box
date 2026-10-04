@@ -1,8 +1,9 @@
 import express from 'express'
 import { filterKey, filterSettings, validateDnsFilter } from '../engine/dns-filter.mjs'
-import { cleanupDnsFilterCache, readFilterListState } from '../system/dns-filter.mjs'
+import { cleanupDnsFilterCache, prepareDnsFilter, readFilterListState } from '../system/dns-filter.mjs'
 import { runDeploy, runExclusive } from './deploy-runner.mjs'
 import { createDnsFilterPreview } from '../system/dns-filter-preview.mjs'
+import { labelClients } from './traffic.mjs'
 
 export const registerDnsFilterRoutes = (app, { store, ctx, paths, data, observer, deploy = runDeploy, previewFetch }) => {
   const router = express.Router()
@@ -11,9 +12,15 @@ export const registerDnsFilterRoutes = (app, { store, ctx, paths, data, observer
   let busy = false
   const status = async () => {
     let applied = null
-    try { applied = JSON.parse(await ctx.readFile(`${paths.etc}/config.meta.json`)).dnsFilter || null } catch { /* not deployed */ }
+    // queryLog:dnsmasq 转发模式下认终端用的 dnsmasq 查询日志开没开(system/dnsmasq-query-log.mjs);reason 'user' = 用户自己设了 dnsmasq 日志,没接管
+    let queryLog = null
+    try {
+      const meta = JSON.parse(await ctx.readFile(`${paths.etc}/config.meta.json`))
+      applied = meta.dnsFilter || null
+      queryLog = meta.dnsmasqQueryLog || null
+    } catch { /* not deployed */ }
     const settings = filterSettings(store.getProfile())
-    return { settings, lists: readFilterListState(store), applied, pending: applied ? applied.key !== filterKey(settings) : settings.enabled, busy, ...observer.status() }
+    return { settings, lists: readFilterListState(store), applied, queryLog, pending: applied ? applied.key !== filterKey(settings) : settings.enabled, busy, ...observer.status() }
   }
   router.get('/', async (_req, res) => res.json(await status()))
   router.put('/', (req, res) => {
@@ -24,11 +31,20 @@ export const registerDnsFilterRoutes = (app, { store, ctx, paths, data, observer
     store.setProfile({ dns: { filter: settings } })
     res.json({ settings: filterSettings(store.getProfile()) })
   })
+  // force(更新名单):只重新下载、编译名单。集合的文件名固定,内容换了内核自己重新加载,不重启内核(system/dns-filter.mjs;
+  // 用户 2026-09-30:没必要重启内核的都不重启)。名单份数变了(条目数跨过一份 2.5 万条的边界)、设置改了还没生效,才要重启,
+  // 由右上角的统一提示说。不带 force 是「应用设置」= 重启内核(界面上已经不用了,留给接口调用方)
   const apply = async (force, listId = '') => {
     if (busy) throw new Error('DNS 设置正在应用,请稍后重试')
     busy = true
     try {
-      const result = await deploy({ store, ctx, paths, refreshDnsFilter: force ? (listId || true) : false })
+      if (force) {
+        await runExclusive(store, () => prepareDnsFilter({ store, ctx, paths, force: listId || true }))
+        await runExclusive(store, () => cleanupDnsFilterCache({ store, ctx, paths })).catch(() => {})
+        await observer.tick()
+        return { ok: true, stage: 'updated', message: '' }
+      }
+      const result = await deploy({ store, ctx, paths })
       if (!result.ok) throw new Error(result.message || 'DNS 设置应用失败')
       await runExclusive(store, () => cleanupDnsFilterCache({ store, ctx, paths })).catch(() => {})
       await observer.tick()
@@ -42,7 +58,11 @@ export const registerDnsFilterRoutes = (app, { store, ctx, paths, data, observer
     catch (error) { res.status(400).json({ error: error.message }) }
   })
   router.get('/summary', (_req, res) => res.json({ enabled: filterSettings(store.getProfile()).enabled, ...observer.status(), ...data.summary() }))
-  router.get('/records', (req, res) => res.json(data.records(req.query)))
+  // 终端设备一栏:按来源 IP 补 DHCP 主机名、标出路由器自己的地址(和流量表的终端同一套)
+  router.get('/records', async (req, res) => {
+    const out = data.records(req.query)
+    res.json({ ...out, rows: await labelClients(ctx, paths, out.rows, 'source') })
+  })
   router.get('/preview', async (req, res) => {
     try { res.json(await preview(req.query)) }
     catch (error) { res.status(400).json({ error: error.message }) }

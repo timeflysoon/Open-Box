@@ -4,19 +4,25 @@ import { prepareDnsFilter, readFilterArtifact } from '../system/dns-filter.mjs'
 import { filterForwardPlan } from '../engine/dns-filter.mjs'
 import { randomBytes } from 'node:crypto'
 import { activeNodes } from './subscriptions.mjs'
+import { chainNodes, resolveChainNodes } from '../engine/chain-proxy.mjs'
 import { readSystemDns } from '../system/resolv.mjs'
 import { normalizeDnsRewrite, rewriteForwardDomains } from '../engine/dns-rewrite.mjs'
 import { readLocalSubnets } from '../system/local-subnets.mjs'
 import { resolveHostsToCidrs } from '../system/resolve-hosts.mjs'
 import { collectDirectHosts } from '../engine/direct-hosts.mjs'
-import { bypassPlanKey, dnsmasqForwardPlan, nativeBypassPlan, normalizeRouting, policyClasses } from '../engine/routing-model.mjs'
+import { PURE_TUN_ENTRY_REASON, bypassPlanKey, dnsmasqForwardPlan, entryModePlan, nativeBypassPlan, normalizeRouting, policyClasses, routingFingerprint } from '../engine/routing-model.mjs'
 import { emitUserGroups } from '../engine/user-groups.mjs'
 import { normalizeClientRoutes } from '../engine/client-routes.mjs'
 import { builtinTags } from '../engine/user-groups.mjs'
-import { buildConfig } from '../engine/config.mjs'
-import { dnsPolicyClasses } from '../engine/dns.mjs'
-import { deployConfig, configMetaPath } from '../system/deploy.mjs'
+import { buildConfigDetailed } from '../engine/config.mjs'
+import { applyProxyUpstreamRoutes, directResolverServers, dnsPolicyClasses } from '../engine/dns.mjs'
+import { routeProxyDnsUpstreams } from './dns-upstream-route.mjs'
+import { deployConfig, configMetaPath, applyDnsForwardNow, dnsForwardMeta, profileAsDeployed } from '../system/deploy.mjs'
+import { applyFlipDiff, clearFlipStateCache, flipTargetState, writeFlipFiles } from '../system/flip-files.mjs'
+import { writeNodeDirectSets } from '../system/node-direct-files.mjs'
 import { ensureRuleLists } from '../system/rule-lists.mjs'
+import { dropRuleSetIndex } from '../system/ruleset-index.mjs'
+import { ruleListIpTag } from '../engine/rule-list.mjs'
 import { resolveNativeBypass } from '../system/native-bypass.mjs'
 import { dnsFakeIpEnabled, ipv6ProxyMode } from '../engine/dns.mjs'
 import { policyOutboundOptions } from '../engine/routing-model.mjs'
@@ -122,7 +128,7 @@ export const firstLayerChanged = async (ctx, paths, store, selections) => {
     const profile = store.getProfile() || {}
     const builtin = builtinTags(typeof store.getGroups === 'function' ? store.getGroups() : [])
     const dnsMode = (profile.dns && profile.dns.mode) || 'hijack'
-    const bypass = nativeBypassPlan(profile.routing, { members, builtin, selections: selections || {}, clientRoutes: normalizeClientRoutes(profile.clientRoutes, { directTag: builtin.direct }), fakeIp: dnsFakeIpEnabled(profile), dnsMode })
+    const bypass = nativeBypassPlan(profile.routing, { members, builtin, selections: selections || {}, clientRoutes: normalizeClientRoutes(profile.clientRoutes, { directTag: builtin.direct }), fakeIp: dnsFakeIpEnabled(profile), dnsMode, enabled: profile.directBypass !== false })
     // 和元数据里计划阶段的结论比(pending 的重叠核对要到部署时才做)。指纹含候选集合、核对对象(名字 + 集合 +
     // CIDR)和 FakeIP 前提——"核对对象从一条变成两条"这种变化只比站点集名字会漏掉(第四轮 T2)。老元数据没有
     // 指纹就退回比集合 / pending 名字
@@ -139,8 +145,11 @@ export const firstLayerChanged = async (ctx, paths, store, selections) => {
     }
     // IPv6 分层 · 代理 v6 降为 IPv4:每条走代理的路由规则前面有一条 v6 拒绝,纯 IP 站点集在直连 / 代理之间
     // 切换时 DNS 分类看不出来,但这条保护要跟着变(第四轮 T3)。按元数据里生成时的出口类别表比,只比两边
-    // 都有的名字(和 dnsClassesFlipped 一个道理)
-    if (prev.ipv6 === 'ipv4' && ipv6ProxyMode(profile) === 'ipv4') {
+    // 都有的名字(和 dnsClassesFlipped 一个道理)。屏蔽 QUIC 的拒绝规则是同一个套路,同样要比——
+    // 它刚加进来时漏了这里,纯 IP 站点集翻面后 QUIC 拒绝会留在已经直连的站点集上(或该拒的没拒)
+    const v6Guard = prev.ipv6 === 'ipv4' && ipv6ProxyMode(profile) === 'ipv4'
+    const quicGuard = prev.rejectQuic === true && profile.rejectQuic === true
+    if (v6Guard || quicGuard) {
       // 升级前的元数据没有出口类别表:不知道生成时的 v6 保护落在哪些站点集上,宁可多重生成一次
       if (!prev.policyClasses || typeof prev.policyClasses !== 'object') return true
       const next = policyClasses(profile.routing, members, builtin, selections || {})
@@ -193,42 +202,161 @@ export const STATUS_BY_STAGE = {
 // 从当前 store 状态(profile + 节点 + 按区域分组)组装一份 sing-box 配置。
 // clash secret 独立存储,只在此处临时注入 profile 副本供 buildConfig 写入
 // experimental.clash_api.secret,不回写 store.profile。
-// systemDns 是路由器 WAN 下发的 DNS 上游(见 system/resolv.mjs):dnsmasq 接管模式下
-// 直连侧要用它,不能让 sing-box 去问系统解析器——那时系统解析器就是 dnsmasq,而 dnsmasq
-// 的上游又是 sing-box,一问就死循环。预览接口没有 ctx 也照样能出配置,回落到档案里的值。
+// systemDns 是路由器系统的上游 DNS(见 system/resolv.mjs):「上游 DNS」(档案记号 wan)用的就是它,不能让 sing-box
+// 去问系统解析器——dnsmasq 接管模式下系统解析器就是 dnsmasq,而 dnsmasq 的上游又是 sing-box,一问就死循环。
+// 预览接口没有 ctx 也照样能出配置,按地区回落到随包默认。
 // profilePatch:在当前档案上临时盖一层再生成(不落库)。部署时 auto_redirect 起不来要降级
 // 重试就靠它把 tun.autoRedirect 关掉重生成一份(见 system/deploy.mjs)。
 // 当前档案 + 此刻的选择 → 旁路计划(纯函数那一步)。部署前和选择同步时都用它,口径一致
-export const currentBypassPlan = (store, selections) => {
-  const profile = store.getProfile() || {}
+export const currentBypassPlan = (store, selections, profile = store.getProfile() || {}) => {
   const groups = typeof store.getGroups === 'function' ? store.getGroups() : []
   const builtin = builtinTags(groups)
   const { publicTags } = emitUserGroups(groups, activeNodes(store), {})
-  const members = policyOutboundOptions(normalizeRouting(profile.routing).outboundOptions, publicTags, builtin)
-  return nativeBypassPlan(profile.routing, { members, builtin, selections: selections || {}, clientRoutes: normalizeClientRoutes(profile.clientRoutes, { directTag: builtin.direct }), fakeIp: dnsFakeIpEnabled(profile), dnsMode: (profile.dns && profile.dns.mode) || 'hijack' })
+  const members = policyOutboundOptions(publicTags, builtin)
+  return nativeBypassPlan(profile.routing, { members, builtin, selections: selections || {}, clientRoutes: normalizeClientRoutes(profile.clientRoutes, { directTag: builtin.direct }), fakeIp: dnsFakeIpEnabled(profile), dnsMode: (profile.dns && profile.dns.mode) || 'hijack', enabled: profile.directBypass !== false })
 }
 
 // 代理页改完出口之后的同步判断 + 执行:DNS 分类翻面、或第一层计划(入口旁路指纹 / DNS 转发三态 / v6 保护
 // 的出口类别)变了,就在后台重新生成配置并重启内核。index.mjs 的选择同步和开发路由器的运行时验收都走这
 // 一个入口,保证"判断变了"之后调用方真的执行了更新(第四轮 T2 / T3)
-export const regenerateIfPlanChanged = async ({ store, ctx, paths, selections, log = () => {}, deploy = runDeploy }) => {
+// 热切换的成员表 / 内置名字 / 目标状态:和 currentBypassPlan 同一个口径(档案 + 此刻的选择)
+// 入口模式(白名单 / 黑名单,engine/routing-model.mjs 的 entryModePlan):和旁路计划同一口径。只在有 nft 重定向时有意义,
+// 纯 tun 一律黑名单(那边的名单是编进路由表的,没验证过能在线换)
+// 元数据里记的入口模式:模式、原因、名单里有哪些集合、手写网段数(网段本身不进元数据)
+export const entryModeMeta = (entryMode) => ({ mode: entryMode.mode, reason: entryMode.reason || '', needSets: entryMode.needSets || [], needCidrs: (entryMode.needCidrs || []).length, directAnswer: Boolean(entryMode.directAnswer) })
+export const currentEntryMode = (store, selections, profile = store.getProfile() || {}) => {
+  const autoRedirect = Boolean(profile.tun && profile.tun.autoRedirect && ((profile.dns && profile.dns.mode) || 'hijack') !== 'off')
+  if (!autoRedirect) return { mode: 'blacklist', reason: PURE_TUN_ENTRY_REASON, fakeIp: false, needSets: [], needCidrs: [] }
+  const groups = typeof store.getGroups === 'function' ? store.getGroups() : []
+  const builtin = builtinTags(groups)
+  const { publicTags } = emitUserGroups(groups, activeNodes(store), {})
+  const members = policyOutboundOptions(publicTags, builtin)
+  return entryModePlan(profile.routing, { members, builtin, selections: selections || {}, clientRoutes: normalizeClientRoutes(profile.clientRoutes, { directTag: builtin.direct }), fakeIp: dnsFakeIpEnabled(profile), dnsMode: (profile.dns && profile.dns.mode) || 'hijack', enabled: profile.directBypass !== false })
+}
+const flipStateNow = (store, selections, nativeBypass, entryMode = null, profile = store.getProfile() || {}) => {
+  const groups = typeof store.getGroups === 'function' ? store.getGroups() : []
+  const builtin = builtinTags(groups)
+  const { publicTags } = emitUserGroups(groups, activeNodes(store), {})
+  const members = policyOutboundOptions(publicTags, builtin)
+  return { ...flipTargetState({ routing: profile.routing, members, builtin, selections: selections || {}, nativeBypass, entryMode: entryMode || currentEntryMode(store, selections, profile) }), members, builtin }
+}
+
+// 热切换:站点集在直连 / 代理之间翻面,不重启内核(engine/flip.mjs)。
+// 按**已经部署的那份**元数据里记的开关表比——档案改了还没重启内核时,运行中的配置用的还是老的那套开关,
+// 照当前档案算会写错文件。只重写变了的开关 / 旁路动态集(内核盯着文件自己重载),dnsmasq 模式下顺带重算转发名单,
+// 最后把元数据更新到此刻的状态(generatedAt 不动:故障转移管理器拿它当配置版本)。
+// 返回 { ok:true, changed } 或 { ok:false, reason }——后者由调用方决定要不要回到老的重启路径。
+export const applyHotFlip = async ({ store, ctx, paths, selections, log = () => {} }) => {
+  const startedAt = Date.now()
+  let meta
+  try { meta = JSON.parse(await ctx.readFile(configMetaPath(paths))) } catch { return { ok: false, reason: '读不到部署元数据' } }
+  // 入口相关的设置(FakeIP、DNS 模式、直连不进内核、终端分流、auto_redirect)按部署时记下的算,保存了还没重启的
+  // 改动不在翻面时提前生效一半(system/deploy.mjs 的 hotFlipInputs);分流设置本身改过由下面的 routingHash 挡
+  const profile = profileAsDeployed(store.getProfile() || {}, meta)
+  // 运行中的配置还是老结构:从带开关的老版本(v0.1.207 / v0.1.208 开着「切换重启内核」)升上来、内核还没按新版本重新部署过
+  if (!meta || !meta.flip || meta.flip.mode !== 'hot' || !meta.flip.flags) return { ok: false, reason: '运行中的配置不是热切换结构(老版本生成的,还没重新部署)' }
+  // 分流设置改过(界面里改了站点集、或者刚导入了一份备份)而内核还没重启:运行中的规则是按老设置生成的,拿新设置去算
+  // 开关该开该关会写错——比如导入的站点集 id 相同、名字不同,内核里查不到它的选择,就会按档案默认值去改一个正在用的开关。
+  // 这种时候不热切换,交还给调用方(经面板切换的会走老路径重新部署,新设置随之生效;每分钟对账则什么都不做)
+  if (typeof meta.routingHash === 'string' && meta.routingHash && meta.routingHash !== routingFingerprint(profile.routing)) {
+    return { ok: false, reason: '分流设置改过,还没重启内核' }
+  }
+  const dynamicBypass = meta.flip.bypassMode === 'dynamic'
+  try {
+    // 先只算开关(便宜):一个都没变就什么都不做——在代理线路之间换(香港 → 美国)、每分钟对账,绝大多数落在这里
+    const cheap = flipStateNow(store, selections, null, null, profile)
+    const known = (tag) => Object.prototype.hasOwnProperty.call(meta.flip.flags, tag)
+    const flagsChanged = Object.keys(cheap.flags).filter((tag) => known(tag) && Boolean(meta.flip.flags[tag]) !== cheap.flags[tag])
+    if (!flagsChanged.length) return { ok: true, changed: { flags: [], bypass: [] }, ms: Date.now() - startedAt }
+    // 类别真变了才重算入口旁路(每个 geoip 集合要起一次内核进程解码;核对不过的一律不旁路)
+    const plan = currentBypassPlan(store, selections, profile)
+    if (!dynamicBypass && bypassPlanKey(plan) !== (meta.firstLayer && meta.firstLayer.nativeBypassPlanKey)) {
+      return { ok: false, reason: '入口旁路变了,而这台设备没有 nft 重定向(纯 tun),旁路集合换不了' }
+    }
+    const nativeBypass = dynamicBypass ? await resolveNativeBypass(ctx, paths, plan) : (meta.firstLayer && meta.firstLayer.nativeBypass) || { enabled: false, sets: [] }
+    const entryMode = currentEntryMode(store, selections, profile)
+    const next = flipStateNow(store, selections, nativeBypass, entryMode, profile)
+    // 只动部署时就在的开关 / 候选(档案里新加、还没部署的站点集,运行中的配置里没有它的规则)。
+    // need 侧同理:运行中的配置没有 route_address_set(老版本部署的)时 meta.flip.need 是空的,一份都不写
+    const knownBypass = (tag) => Object.prototype.hasOwnProperty.call(meta.flip.bypass || {}, tag)
+    const knownNeed = (tag) => Object.prototype.hasOwnProperty.call(meta.flip.need || {}, tag)
+    const scoped = {
+      flags: Object.fromEntries(Object.entries(next.flags).filter(([tag]) => known(tag))),
+      bypass: Object.fromEntries(Object.entries(next.bypass).filter(([tag]) => knownBypass(tag))),
+      bypassContent: Object.fromEntries(Object.entries(next.bypassContent || {}).filter(([tag]) => knownBypass(tag))),
+      bypassTrimmed: Object.fromEntries(Object.entries(next.bypassTrimmed || {}).filter(([tag]) => knownBypass(tag))),
+      need: Object.fromEntries(Object.entries(next.need || {}).filter(([tag]) => knownNeed(tag))),
+      needCidrs: Object.fromEntries(Object.entries(next.needCidrs || {}).filter(([tag]) => knownNeed(tag))),
+    }
+    const changed = await applyFlipDiff(ctx, paths, meta.flip, scoped, { dynamicBypass })
+    // dnsmasq 接管模式:走代理的域名名单跟着类别变(名单没变时这一步什么都不做,不重启 dnsmasq)
+    const dnsMode = (profile.dns && profile.dns.mode) || 'hijack'
+    let forwardMeta = {}
+    let queryLogMeta = {}
+    if (dnsMode === 'dnsmasq' && meta.dnsMode === 'dnsmasq') {
+      const { dnsForward, dnsPlanned, applied } = await applyDnsForwardNow(ctx, paths, { profile, policyMembers: meta.dnsPolicyMembers || next.members, builtin: next.builtin, selections: selections || {}, dnsMode })
+      forwardMeta = dnsForwardMeta(dnsMode, dnsForward, dnsPlanned)
+      if (applied && applied.queryLog) queryLogMeta = { dnsmasqQueryLog: applied.queryLog }
+    }
+    const members = Array.isArray(meta.dnsPolicyMembers) && meta.dnsPolicyMembers.length ? meta.dnsPolicyMembers : next.members
+    const updated = {
+      ...meta,
+      ...queryLogMeta,
+      dnsPolicyClasses: dnsPolicyClasses(profile.routing, members, next.builtin, selections || {}),
+      firstLayer: {
+        ...(meta.firstLayer || {}),
+        ...forwardMeta,
+        ...(dynamicBypass ? {
+          nativeBypass: nativeBypass.enabled ? { ...nativeBypass, via: 'nft' } : nativeBypass,
+          nativeBypassPlanned: { sets: plan.sets, pending: plan.pending.map((x) => x.policy) },
+          nativeBypassPlanKey: bypassPlanKey(plan),
+          ...(Object.keys(meta.flip.need || {}).length ? { entryMode: entryModeMeta(entryMode) } : {}),
+        } : {}),
+        policyClasses: next.classes,
+      },
+      flip: { ...meta.flip, flags: { ...meta.flip.flags, ...scoped.flags }, bypass: { ...(meta.flip.bypass || {}), ...scoped.bypass }, bypassContent: { ...(meta.flip.bypassContent || {}), ...scoped.bypassContent }, ...(Object.keys(meta.flip.need || {}).length ? { need: { ...meta.flip.need, ...scoped.need }, entryMode: next.entryMode } : {}), flippedAt: new Date().toISOString() },
+    }
+    await ctx.writeFile(configMetaPath(paths), JSON.stringify(updated, null, 2))
+    // 读规则的各处缓存着开关状态(1 秒),刚翻完立刻作废
+    clearFlipStateCache()
+    const names = Object.entries(meta.flip.names || {}).filter(([, tag]) => changed.flags.includes(tag)).map(([name, tag]) => `「${name}」→${scoped.flags[tag] ? '代理' : '直连'}`)
+    const ms = Date.now() - startedAt
+    const modeNote = meta.flip.entryMode && next.entryMode !== meta.flip.entryMode ? `,入口 ${meta.flip.entryMode === 'whitelist' ? '默认放行' : '默认进内核'} → ${next.entryMode === 'whitelist' ? '默认放行' : '默认进内核'}` : ''
+    log(`[proxies] 热切换:${names.join('、') || '开关'}${changed.bypass.length ? `,入口旁路 ${changed.bypass.length} 份集合` : ''}${(changed.need || []).length ? `,进内核名单 ${changed.need.length} 份` : ''}${modeNote},内核没有重启(${ms} ms)`)
+    return { ok: true, changed, ms }
+  } catch (error) {
+    return { ok: false, reason: `热切换出错:${error instanceof Error ? error.message : String(error)}` }
+  }
+}
+
+// 规则页推算用:运行中的配置还不是热切换结构(刚关掉开关、还没重启内核)时,按档案里的默认出口算一份开关状态
+export const flipStateFromProfile = (store) => flipStateNow(store, {}, null).flags
+
+export const regenerateIfPlanChanged = async ({ store, ctx, paths, selections, log = () => {}, deploy = runDeploy, exclusive = runExclusive }) => {
+  // 先试着只改写开关文件(热切换);走不通(运行中的还是老结构、纯 tun 下旁路变了、分流改过没重启、写文件出错……)
+  // 才回到下面重新部署、重启内核的路径。和部署排同一个队,免得一边写开关一边重启内核
+  const hot = await exclusive(store, () => applyHotFlip({ store, ctx, paths, selections, log }))
+  if (hot.ok) return { regenerated: false, hot: true, reason: '', changed: hot.changed }
+  log(`[proxies] 热切换走不通(${hot.reason}),改走重启`)
   const dnsFlipped = await dnsClassesFlipped(ctx, paths, store, selections)
   const planChanged = dnsFlipped ? false : await firstLayerChanged(ctx, paths, store, selections)
   if (!dnsFlipped && !planChanged) return { regenerated: false, reason: '' }
-  const reason = dnsFlipped ? '站点集在直连/代理之间翻面' : '第一层计划(入口旁路 / DNS 转发 / v6 保护)变了'
+  const reason = dnsFlipped ? '站点集在直连/代理之间翻面' : '第一层计划（入口旁路 / DNS 转发 / v6 保护）变了'
   log(`[proxies] ${reason},后台重新生成配置`)
   const result = await deploy({ store, ctx, paths })
-  if (!result.ok) log(`[proxies] 重新生成配置失败(${result.stage}):${result.message}`)
+  if (!result.ok) log(`[proxies] 重新生成配置失败（${result.stage}）:${result.message}`)
   return { regenerated: true, reason, result }
 }
 
-export const buildCurrentConfig = (store, systemDns, { geoDir = createPaths(process.env.OPENBOX_ROOT).geoDir, cacheFilePath, selections, tlsCert, localSubnets = [], directHostCidrs = [], ruleLists = {}, profilePatch, nativeBypass } = {}) => {
+export const buildCurrentConfig = (store, systemDns, { geoDir = createPaths(process.env.OPENBOX_ROOT).geoDir, rulesetDir = createPaths(process.env.OPENBOX_ROOT).rulesetDir, cacheFilePath, selections, tlsCert, localSubnets = [], directHostCidrs = [], ruleLists = {}, profilePatch, nativeBypass, inlineDirectHosts = false } = {}) => {
   const profile = profilePatch ? { ...store.getProfile(), ...profilePatch } : store.getProfile()
   // 停用的订阅的节点不进内核(api/subscriptions.mjs 的 activeNodes)
   const nodes = activeNodes(store)
   const clashApiSecret = store.getClashSecret()
-  const config = buildConfig({
+  const { config, dnsRuleOwners, directHosts } = buildConfigDetailed({
     cacheFilePath,
+    // 规则集 .srs 所在目录:本机安装路径,不存档案(见 engine/config.mjs)
+    rulesetDir,
     selections,
     ...(tlsCert ? { tlsCert } : {}),
     nodes,
@@ -244,6 +372,8 @@ export const buildCurrentConfig = (store, systemDns, { geoDir = createPaths(proc
     ruleLists,
     nativeBypass,
     dnsFilter: readFilterArtifact(store),
+    // 订阅和节点站点直连的地址直接写进规则(规则页推算、手机 App);部署的配置引用规则集文件(engine/config.mjs)
+    inlineDirectHosts,
   })
   for (const entry of config.route?.rule_set || []) {
     if (rulesetKind(entry.tag)) entry.path = `${geoDir}/${entry.tag}.srs`
@@ -251,19 +381,45 @@ export const buildCurrentConfig = (store, systemDns, { geoDir = createPaths(proc
   // 故障转移的运行映射(父组 / 页签 / 有效节点 / 子组 tag / 检测参数):和配置同一次生成,写进 config.meta.json
   // 给后台管理器和界面用
   const { failover } = emitUserGroups(store.getGroups(), nodes, { testUrl: profile.testUrl })
-  return { config, profile, failover }
+  return { config, profile, failover, dnsRuleOwners, directHosts }
+}
+
+// 按部署时记下的生成输入(元数据的 buildInputs:系统 DNS、本机网段、节点域名解析结果、当时的选择、入口旁路结论、代理 DNS
+// 上游的线路、auto_redirect 有没有降级)+ 此刻的档案 / 节点 / 节点组重新生成一份配置。部署自己也走这里,所以同样的输入
+// 生成的就是运行中的那份;热替换(api/hot-apply.mjs)拿它和运行中的比:只差节点 / 节点组这些出站的,在线换掉,不重启;
+// 别处也变了的,才是真的要重启内核
+export const configFromInputs = (store, paths, inputs = {}, { ruleLists = {} } = {}) => {
+  const profile = store.getProfile() || {}
+  const profilePatch = inputs.autoRedirectFallback ? { tun: { ...(profile.tun || {}), autoRedirect: false } } : undefined
+  const built = buildCurrentConfig(store, Array.isArray(inputs.systemDns) ? inputs.systemDns : [], {
+    geoDir: paths.geoDir, rulesetDir: paths.rulesetDir, cacheFilePath: paths.cacheDb,
+    selections: inputs.selections && typeof inputs.selections === 'object' ? inputs.selections : {},
+    tlsCert: { certPath: paths.tlsCert, keyPath: paths.tlsKey },
+    localSubnets: Array.isArray(inputs.localSubnets) ? inputs.localSubnets : [],
+    directHostCidrs: Array.isArray(inputs.directHostCidrs) ? inputs.directHostCidrs : [],
+    ruleLists,
+    ...(inputs.nativeBypass && typeof inputs.nativeBypass === 'object' ? { nativeBypass: inputs.nativeBypass } : {}),
+    ...(profilePatch ? { profilePatch } : {}),
+  })
+  applyProxyUpstreamRoutes(built.config, Array.isArray(inputs.dnsUpstreamRoutes) ? inputs.dnsUpstreamRoutes : [], builtinTags(store.getGroups ? store.getGroups() : []))
+  return built
 }
 
 // 「保存设置」与「让设置生效」之间只隔一次启动内核:各个设置页只管把自己那块写进档案,
 // 真正生成配置、下规则集、接管 DNS/防火墙、起内核、失败回滚,统一在这里做一次。
 // 所以启动/重启内核走的就是这条路径(server/api/service.mjs),不再有单独的"部署"动作。
 // 「订阅和节点站点直连」开着时,把它涉及的域名解析成 IP;关着就不解析。
-// 直接问 WAN 上游(systemDns),不走路由器自己的 resolver(见 system/resolve-hosts.mjs)。
-const resolveDirectHostCidrs = async (store, systemDns, lookup) => {
-  const profile = store.getProfile()
-  if (profile.directForNodes === false) return []
-  const { domains } = collectDirectHosts(activeNodes(store), store.getSubscriptions ? store.getSubscriptions() : [])
-  return resolveHostsToCidrs(domains, lookup ? { lookup } : { servers: systemDns })
+// 问直连 DNS(和内核直连侧同一个口径,上游 DNS 展开成系统的上游 DNS systemDns,engine/dns.mjs 的
+// directResolverServers),不走路由器自己的 resolver(见 system/resolve-hosts.mjs)。
+// 要解析的是哪些域名(订阅链接的主机名、节点服务器的域名):记进元数据,在线更新节点时(api/hot-apply.mjs)名单变了才重新解析
+export const directHostDomains = (store) => {
+  if ((store.getProfile() || {}).directForNodes === false) return []
+  return collectDirectHosts(activeNodes(store), store.getSubscriptions ? store.getSubscriptions() : []).domains
+}
+export const resolveDirectHostCidrs = async (store, systemDns, lookup) => {
+  const domains = directHostDomains(store)
+  if (!domains.length) return []
+  return resolveHostsToCidrs(domains, lookup ? { lookup } : { servers: directResolverServers(store.getProfile(), systemDns) })
 }
 
 // 部署流水线(uci 写 dhcp/firewall、重启 dnsmasq、重启内核、等几秒验证)没法交错执行:
@@ -295,6 +451,16 @@ const pidAlive = (pid) => {
   }
 }
 
+// 此刻有没有部署 / 停止 / 回滚握着锁(持锁进程还活着才算)。面板内存自检用:别在改系统的半路上重启自己
+export const isDeployLocked = (store, { alive = pidAlive } = {}) => {
+  try {
+    const lock = JSON.parse(store.getRaw(LOCK_KEY) || 'null')
+    return Boolean(lock && lock.pid && alive(lock.pid))
+  } catch {
+    return false
+  }
+}
+
 export const withDeployLock = async (store, fn, {
   sleep = (ms) => new Promise((r) => setTimeout(r, ms)), now = Date.now, waitMs = LOCK_WAIT_MS, pid = process.pid, alive = pidAlive,
   heartbeatMs = LOCK_HEARTBEAT_MS, setIntervalImpl = setInterval, clearIntervalImpl = clearInterval,
@@ -318,7 +484,7 @@ export const withDeployLock = async (store, fn, {
         // CAS(存储只有 get / set),但并发窗口从"整个部署"缩到两次写之间的几毫秒。
         if (mine(getLock())) break
       }
-      if (now() > deadline) throw new Error(`另一个部署(pid ${lock && lock.pid})正在进行,等了 ${Math.round(waitMs / 1000)} 秒仍未结束`)
+      if (now() > deadline) throw new Error(`另一个部署（pid ${lock && lock.pid}）正在进行,等了 ${Math.round(waitMs / 1000)} 秒仍未结束`)
       await sleep(500)
     }
     beat = setIntervalImpl(() => {
@@ -376,23 +542,63 @@ const runDeployInner = async ({ store, ctx, paths, fetchImpl = globalThis.fetch,
     // 路由规则和 DNS 规则要凭这个决定引用哪几份(见 engine/routing-model.mjs)。
     // 这一步只往 rulesetDir 里写文件,失败原地返回,不动系统。
     const ruleLists = await ensureRuleLists(ctx, paths, (store.getProfile() || {}).routing, { fetchImpl, log: (m) => console.log(m) })
+    // 这次重拉重编过的名单,规则页推算用的索引立刻作废(不然还要照旧内容算 10 分钟)
+    dropRuleSetIndex((ruleLists.updated || []).flatMap((tag) => [tag, ruleListIpTag(tag)]))
     if (!ruleLists.ok) {
       result = { ok: false, stage: 'rulesets', message: ruleLists.message }
     } else {
       // 入口原生旁路:纯函数先算,FakeIP 下留下的 pending 在这里解码两边的集合核对重叠(system/native-bypass.mjs),
       // 生成配置和元数据用同一份结论
       const nativeBypass = await resolveNativeBypass(ctx, paths, currentBypassPlan(store, selections))
-      const buildOptions = {
-        geoDir: paths.geoDir, cacheFilePath: paths.cacheDb, selections, tlsCert: { certPath: paths.tlsCert, keyPath: paths.tlsKey }, localSubnets, directHostCidrs,
-        ruleLists: ruleLists.lists, nativeBypass,
+      // 代理侧 DNS 上游走哪条线路:由目标分流按上游地址判,和终端访问这个地址同一套规则(api/dns-upstream-route.mjs,用户
+      // 2026-09-28「全局就只有一个分流规则:目标分流」)。规则集这时都已就位(随包的 + 上面补齐的规则集链接)
+      const profileNow = store.getProfile() || {}
+      const dnsUpstreamRoutes = profileNow.dns && profileNow.dns.split
+        ? await routeProxyDnsUpstreams({ store, ctx, paths, fetchImpl, systemDns }, profileNow)
+        : []
+      // 生成配置用到的、档案之外的输入:记进元数据(buildInputs),热替换按同样的输入重新生成、和运行中的比(configFromInputs)
+      const buildInputs = { systemDns, localSubnets, directHostCidrs, directHostDomains: directHostDomains(store), selections, nativeBypass, dnsUpstreamRoutes }
+      const { config, profile, failover, dnsRuleOwners, directHosts } = configFromInputs(store, paths, buildInputs, { ruleLists: ruleLists.lists })
+      for (const r of dnsUpstreamRoutes) {
+        if (r.error) console.warn(`[deploy] 代理 DNS 上游 ${r.server} 按目标分流判不出线路,先走兜底:${r.error}`)
+        else if (r.reject) console.warn(`[deploy] 代理 DNS 上游 ${r.server} 被目标分流拒绝(第 ${Number(r.ruleIndex) + 1} 条),走代理的域名解析会失败`)
       }
-      const { config, profile, failover } = buildCurrentConfig(store, systemDns, buildOptions)
+      // 内核启动时每个本地规则集文件都必须已经在,所以热切换的开关 / 旁路动态集在这里按此刻的选择全套写好
+      // (system/flip-files.mjs)。这份状态一并交给 deployConfig 记进元数据,翻面时按它比
+      const entryMode = currentEntryMode(store, selections)
+      const flip = flipStateNow(store, selections, nativeBypass, entryMode)
+      const autoRedirect = Boolean(profile.tun && profile.tun.autoRedirect && ((profile.dns && profile.dns.mode) || 'hijack') !== 'off')
+      // 真正落盘交给 deployConfig 在「冲突检测之后、校验之前」做:别的代理在跑、这次部署不会进行时,一个文件都不写
+      // 订阅和节点站点直连的两份规则集文件(system/node-direct-files.mjs)同样要在内核启动之前写好
+      const writeFlip = async () => {
+        await writeFlipFiles(ctx, paths, flip, { dynamicBypass: autoRedirect })
+        if (directHosts) await writeNodeDirectSets(ctx, paths, directHosts)
+      }
+      // 链式代理里没进配置的条目(上游没了 / 成环 / 重名)记一笔,界面上那条会显示上游不存在,这里给日志留个原因
+      for (const s of resolveChainNodes({ chainProxies: profile.chainProxies, nodes: activeNodes(store), userGroups: store.getGroups() }).skipped) {
+        console.warn(`[deploy] 链式代理「${s.name}」没有进配置:${s.reason === 'cycle' ? `上游「${s.upstream}」绕回了它自己` : s.reason === 'duplicate' ? '名称和别的出站重复' : `上游「${s.upstream}」不存在或不可用`}`)
+      }
       const prepMs = Date.now() - startedAt
       result = await deployConfig(ctx, paths, {
-        config, profile, userGroups: store.getGroups(), selections, isCancelled, nativeBypass, failover,
-        rebuild: (profilePatch) => buildCurrentConfig(store, systemDns, { ...buildOptions, profilePatch }).config,
+        config, profile, userGroups: store.getGroups(), nodes: [...activeNodes(store), ...chainNodes(profile)], subscriptions: store.getSubscriptions(), selections, isCancelled, nativeBypass, failover, flip, writeFlip, dnsRuleOwners, dnsUpstreamRoutes, buildInputs,
+        // auto_redirect 起不来时关掉它重新生成(system/deploy.mjs);元数据记下降过级,重新生成时照样关
+        rebuild: () => configFromInputs(store, paths, { ...buildInputs, autoRedirectFallback: true }, { ruleLists: ruleLists.lists }).config,
       })
       if (result.warning) console.warn(`[deploy] ${result.warning}`)
+      // 热切换的开关是按「重启前」的选择写的,而内核重启后从缓存文件里恢复出来的选择可能不一样(换过缓存文件、
+      // 缓存里的节点已经不在了……)。内核确认在跑之后立刻按它此刻真实的选择对一次账,只改写开关文件、不会再触发部署。
+      // (开发路由器验收时遇到过:切换 FakeIP 换了缓存文件,兜底从直连变成了代理。)老路径下同样的偏差要等下次切换才发现
+      if (flip && result.ok) {
+        try {
+          const live = await fetchSelections(fetchImpl, store.getClashSecret ? store.getClashSecret() : '')
+          if (Object.keys(live).length) {
+            const hot = await applyHotFlip({ store, ctx, paths, selections: resolveSelections(store, live), log: (m) => console.log(m) })
+            if (!hot.ok) console.warn(`[deploy] 部署后的热切换对账没做成:${hot.reason}`)
+          }
+        } catch (error) {
+          console.warn(`[deploy] 部署后的热切换对账出错:${error instanceof Error ? error.message : String(error)}`)
+        }
+      }
       // 准备阶段 = 读系统 DNS / 解析节点域名 / 拉当前选择 / 规则集链接 / 生成配置
       result.timings = { 准备: prepMs, ...(result.timings || {}) }
     }

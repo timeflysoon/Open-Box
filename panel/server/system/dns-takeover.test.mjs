@@ -2,25 +2,30 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createMockContext } from './context.mjs'
 import { createPaths } from './paths.mjs'
-import { applyDnsTakeover, restoreDnsTakeover, dnsmasqSafeDomain, dnsForwardFilePath } from './dns-takeover.mjs'
+import { applyDnsTakeover, restoreDnsTakeover, dnsmasqSafeDomain, dnsForwardFilePath, queryLogFailedPath } from './dns-takeover.mjs'
+import { DNSMASQ_QUERY_LOG_PATH } from './dnsmasq-query-log.mjs'
 
 const paths = createPaths('/opt/open-box')
 const cmds = (ctx) => ctx.calls.map((c) => [c.cmd, ...c.args].join(' '))
 
 // 会真实更新状态的 uci 桩:set / delete / add_list / del_list 改了之后,后面的 get / show 读到的
 // 是改过的值。只记命令的桩看不出"从 all 切到 domains 时原上游早就被删光了"这类问题(复审 R4)
-const statefulUci = ({ servers = [], noresolv = null, files = {} } = {}) => {
+// grep:dnsmasq 别处已有日志设置时 grep -H 列出的「文件:那一行」;dnsmasqUp:pidof 找不找得到 dnsmasq(第几次查、返回真假)
+const statefulUci = ({ servers = [], noresolv = null, files = {}, options = {}, grep = '', dnsmasqUp = () => true } = {}) => {
   const state = { servers: [...servers], noresolv }
   const ctx = createMockContext({ files })
+  let pidofCalls = 0
   ctx.exec = async (cmd, args = []) => {
     ctx.calls.push({ cmd, args })
+    if (cmd === 'pidof') return { code: dnsmasqUp(++pidofCalls) ? 0 : 1, stdout: '', stderr: '' }
+    if (cmd === 'sh' && String(args[1]).includes('log-(facility|queries)')) return { code: 0, stdout: grep, stderr: '' }
     let stdout = ''
     if (cmd === 'uci') {
       const [verb, item = ''] = args.filter((v) => v !== '-q')
       const [key, ...rest] = item.split('=')
       const value = rest.join('=')
       if (verb === 'show') stdout = `dhcp.cfg=dnsmasq\n${state.servers.length ? `dhcp.cfg.server=${state.servers.map((x) => `'${x}'`).join(' ')}\n` : ''}${state.noresolv == null ? '' : `dhcp.cfg.noresolv='${state.noresolv}'\n`}`
-      if (verb === 'get') stdout = key.endsWith('.server') ? state.servers.join(' ') : (state.noresolv ?? '')
+      if (verb === 'get') stdout = key.endsWith('.server') ? state.servers.join(' ') : key.endsWith('.noresolv') ? (state.noresolv ?? '') : (options[key.split('.').pop()] ?? '')
       if (verb === 'delete' && key.endsWith('.server')) state.servers = []
       if (verb === 'delete' && key.endsWith('.noresolv')) state.noresolv = null
       if (verb === 'set' && key.endsWith('.noresolv')) state.noresolv = value
@@ -109,10 +114,10 @@ test('dnsmasq 模式 all:备份用户基线 + 上游只剩内核 + noresolv=1 + 
   assert.equal(uci.ctx.files[STATE], 'plan=all\nserver=127.0.0.1#7853\nnoresolv=1\n')
 })
 
-test('dnsmasq 模式 all:已经接管过(备份里是 9.9.9.9)再应用 all,备份里的用户上游不会被此刻只剩内核的列表冲掉', async () => {
+test('dnsmasq 模式 all:已经接管过（备份里是 9.9.9.9）再应用 all,备份里的用户上游不会被此刻只剩内核的列表冲掉', async () => {
   const uci = statefulUci({ servers: ['127.0.0.1#7853'], noresolv: '1', files: { [BACKUP]: "dhcp.cfg=dnsmasq\ndhcp.cfg.server='9.9.9.9'\n", [STATE]: 'plan=all\nserver=127.0.0.1#7853\nnoresolv=1\n' } })
   const r = await applyDnsTakeover(uci.ctx, paths, { mode: 'dnsmasq' })
-  assert.deepEqual(r, { changed: false, actions: ['unchanged'], effective: { mode: 'all', domains: [], reason: '' } })
+  assert.deepEqual(r, { changed: false, actions: ['unchanged'], effective: { mode: 'all', domains: [], reason: '' }, queryLog: { active: false, reason: '' } })
   assert.ok(uci.ctx.files[BACKUP].includes("'9.9.9.9'"))
   assert.ok(!uci.ctx.files[BACKUP].includes('127.0.0.1#7853'))
 })
@@ -149,7 +154,7 @@ test('还原:无备份时不删用户 server 列表,只精确撤销写入的上�
   assert.ok(c.includes('uci commit dhcp'))
 })
 
-test('还原:多上游备份(同行多个引号值)全部恢复,而非只恢复第一个', async () => {
+test('还原:多上游备份（同行多个引号值）全部恢复,而非只恢复第一个', async () => {
   const ctx = createMockContext({
     files: { '/opt/open-box/data/dnsmasq-backup.txt': "dhcp.cfg.server='1.1.1.1' '8.8.8.8'\ndhcp.cfg.noresolv='0'\n" },
   })
@@ -161,7 +166,7 @@ test('还原:多上游备份(同行多个引号值)全部恢复,而非只恢复�
   assert.ok(c.includes('uci set dhcp.@dnsmasq[0].noresolv=0'))
 })
 
-test('按域名转发:转发文件写进 dnsmasq 的 conf-dir(一行一条),uci 列表一个字不碰,noresolv 跟用户基线', async () => {
+test('按域名转发:转发文件写进 dnsmasq 的 conf-dir（一行一条）,uci 列表一个字不碰,noresolv 跟用户基线', async () => {
   const uci = statefulUci({ servers: ['9.9.9.9'], noresolv: null })
   const r = await applyDnsTakeover(uci.ctx, paths, { mode: 'dnsmasq', forwardDomains: ['google.com', 'youtube.com'] })
   assert.ok(r.changed)
@@ -176,21 +181,21 @@ test('按域名转发:转发文件写进 dnsmasq 的 conf-dir(一行一条),uci 
   assert.equal(uci.ctx.files[STATE], `plan=domains\nforward=${INSTALLED}\n`)
 })
 
-test('没有可枚举的域名时回落到全局转发(和以前一样)', async () => {
+test('没有可枚举的域名时回落到全局转发（和以前一样）', async () => {
   const uci = statefulUci({ servers: ['9.9.9.9'], noresolv: null })
   const r = await applyDnsTakeover(uci.ctx, paths, { mode: 'dnsmasq', forwardDomains: [] })
   assert.ok(r.actions.includes('set-upstream'))
   assert.deepEqual(uci.state, { servers: ['127.0.0.1#7853'], noresolv: '1' })
 })
 
-test('按域名转发:老版本留在 uci 里的按域名条目和全量上游都摘掉,用户的上游(AdGuard)原样保留', async () => {
+test('按域名转发:老版本留在 uci 里的按域名条目和全量上游都摘掉,用户的上游（AdGuard）原样保留', async () => {
   const uci = statefulUci({ servers: ['192.168.3.5', '/old.com/127.0.0.1#7853', '127.0.0.1#7853'], noresolv: null })
   await applyDnsTakeover(uci.ctx, paths, { mode: 'dnsmasq', forwardDomains: ['google.com'] })
   assert.deepEqual(uci.state, { servers: ['192.168.3.5'], noresolv: null })
   assert.match(uci.ctx.files[INSTALLED], /google\.com/)
 })
 
-test('域名规范化:中文域名按 IDNA 转成 punycode 照样按域名转发;真写不进 dnsmasq 的(带 / #)应用阶段降成 all,状态和返回值记的都是实际执行的 all(复审 S3)', async () => {
+test('域名规范化:中文域名按 IDNA 转成 punycode 照样按域名转发;真写不进 dnsmasq 的（带 / #）应用阶段降成 all,状态和返回值记的都是实际执行的 all（复审 S3）', async () => {
   assert.equal(dnsmasqSafeDomain('中文.com'), 'xn--fiq228c.com')
   assert.equal(dnsmasqSafeDomain('*.Example.COM'), 'example.com')
   assert.equal(dnsmasqSafeDomain('.example.com.'), 'example.com')
@@ -209,7 +214,7 @@ test('域名规范化:中文域名按 IDNA 转成 punycode 照样按域名转发
   assert.equal(await bad.ctx.exists(INSTALLED), false)
 })
 
-test('uci commit 失败(闪存写满)必须抛错,不能报部署成功', async () => {
+test('uci commit 失败（闪存写满）必须抛错,不能报部署成功', async () => {
   const ctx = createMockContext({ execResults: {
     'uci commit dhcp': { code: 1, stderr: 'uci: I/O error' },
   } })
@@ -237,7 +242,7 @@ test('dnsmasq 模式:dnsmasq 重启失败必须抛错,不能报部署成功', as
   await assert.rejects(() => applyDnsTakeover(ctx, paths, { mode: 'dnsmasq' }), /dnsmasq 重启 失败/)
 })
 
-test('还原:uci commit 失败要抛错,备份文件必须还在(下次还能重来),暂存的半截改动要 revert', async () => {
+test('还原:uci commit 失败要抛错,备份文件必须还在（下次还能重来）,暂存的半截改动要 revert', async () => {
   const ctx = createMockContext({
     files: { '/opt/open-box/data/dnsmasq-backup.txt': "dhcp.cfg01411c.server='9.9.9.9'\ndhcp.cfg01411c.noresolv='1'\n" },
     execResults: { 'uci commit dhcp': { code: 1, stderr: 'uci: I/O error' } },
@@ -258,7 +263,7 @@ test('还原:dnsmasq 重启失败同样抛错并保留备份', async () => {
   assert.equal(await ctx.exists('/opt/open-box/data/dnsmasq-backup.txt'), true)
 })
 
-test('还原:重建原上游的 add_list 失败也抛错、留备份;delete / del_list 返回非零不算失败(目标不存在是常态)', async () => {
+test('还原:重建原上游的 add_list 失败也抛错、留备份;delete / del_list 返回非零不算失败（目标不存在是常态）', async () => {
   const ctx = createMockContext({
     files: { '/opt/open-box/data/dnsmasq-backup.txt': "dhcp.cfg01411c.server='9.9.9.9'\n" },
     execResults: {
@@ -278,7 +283,7 @@ test('还原:重建原上游的 add_list 失败也抛错、留备份;delete / de
   assert.equal(await ok.exists('/opt/open-box/data/dnsmasq-backup.txt'), false)
 })
 
-test('转发计划 none(全部直连):接管过就还原到接管前的上游;状态文件写 plan=none;没接管过就一个字不动', async () => {
+test('转发计划 none（全部直连）:接管过就还原到接管前的上游;状态文件写 plan=none;没接管过就一个字不动', async () => {
   // 接管过:备份在,uci 里是我们写的全量转发
   const uci = statefulUci({ servers: ['127.0.0.1#7853'], noresolv: '1', files: { '/opt/open-box/data/dnsmasq-backup.txt': "dhcp.cfg01411c.server='223.5.5.5' '192.168.3.5'\ndhcp.cfg01411c.noresolv='0'\n", '/opt/open-box/data/dnsmasq-takeover.txt': 'plan=all\nserver=127.0.0.1#7853\nnoresolv=1\n' } })
   const ctx = uci.ctx
@@ -359,7 +364,7 @@ test('老版本留下的现场:uci 已被全量接管却没有备份 → 基线�
 })
 
 // ---------- 第三轮 S2:用户基线的两条丢失路径 ----------
-test('S2a:同一个 domains 计划重复应用(unchanged)时,用户新加的上游照样进备份,随后 none 不会把它丢掉', async () => {
+test('S2a:同一个 domains 计划重复应用（unchanged）时,用户新加的上游照样进备份,随后 none 不会把它丢掉', async () => {
   const uci = statefulUci({ servers: ['9.9.9.9'], noresolv: null })
   await applyDnsTakeover(uci.ctx, paths, { mode: 'dnsmasq', forward: { mode: 'domains', domains: ['youtube.com'] } })
   uci.state.servers.push('192.168.3.5')
@@ -370,7 +375,7 @@ test('S2a:同一个 domains 计划重复应用(unchanged)时,用户新加的上�
   assert.deepEqual(uci.state, { servers: ['9.9.9.9', '192.168.3.5'], noresolv: null })
 })
 
-test('S2b:all 期间用户新加上游再切 domains:基线 = 备份里的原上游 ∪ 新加的,noresolv 用备份的(all 设的 1 不是用户的);none 还原完整', async () => {
+test('S2b:all 期间用户新加上游再切 domains:基线 = 备份里的原上游 ∪ 新加的,noresolv 用备份的（all 设的 1 不是用户的）;none 还原完整', async () => {
   const uci = statefulUci({ servers: ['9.9.9.9'], noresolv: null })
   await applyDnsTakeover(uci.ctx, paths, { mode: 'dnsmasq', forward: { mode: 'all', domains: [] } })
   uci.state.servers.push('192.168.3.5')
@@ -382,7 +387,7 @@ test('S2b:all 期间用户新加上游再切 domains:基线 = 备份里的原上
   assert.deepEqual(uci.state, { servers: ['9.9.9.9', '192.168.3.5'], noresolv: null })
 })
 
-test('S2:domains 期间用户删掉一个上游,再应用时基线跟着删(domains 下 uci 就是用户的);all 期间看不见用户的列表,不推断删除', async () => {
+test('S2:domains 期间用户删掉一个上游,再应用时基线跟着删（domains 下 uci 就是用户的）;all 期间看不见用户的列表,不推断删除', async () => {
   const d = statefulUci({ servers: ['9.9.9.9', '8.8.8.8'], noresolv: null })
   await applyDnsTakeover(d.ctx, paths, { mode: 'dnsmasq', forward: { mode: 'domains', domains: ['a.com'] } })
   d.state.servers = d.state.servers.filter((v) => v !== '8.8.8.8')
@@ -395,4 +400,145 @@ test('S2:domains 期间用户删掉一个上游,再应用时基线跟着删(doma
   await applyDnsTakeover(a.ctx, paths, { mode: 'dnsmasq', forward: { mode: 'all', domains: [] } })
   await applyDnsTakeover(a.ctx, paths, { mode: 'dnsmasq', forward: { mode: 'none', domains: [] } })
   assert.deepEqual(a.state.servers, ['9.9.9.9', '8.8.8.8'])
+})
+
+// dnsmasq 查询日志(「域名解析查询」认终端用,system/dnsmasq-query-log.mjs):开着域名过滤时受管文件里带那两行
+const LOG_LINES = `log-queries=extra\nlog-facility=${DNSMASQ_QUERY_LOG_PATH}\n`
+// 重启 dnsmasq 那一刻日志文件在不在(面板部署时先建好普通文件,dnsmasq 启动那几行才留得住)
+const watchRestart = (uci) => {
+  const seen = []
+  const exec = uci.ctx.exec
+  uci.ctx.exec = async (cmd, args = []) => {
+    if (cmd === '/etc/init.d/dnsmasq') seen.push(uci.ctx.files[DNSMASQ_QUERY_LOG_PATH])
+    return exec(cmd, args)
+  }
+  return seen
+}
+
+test('查询日志:all 带上日志那两行、重启 dnsmasq 前先建好空的日志文件;关掉后拿掉那两行和日志文件', async () => {
+  const uci = statefulUci({ servers: ['9.9.9.9'] })
+  const restarts = watchRestart(uci)
+  const apply = (queryLog, rewriteSources = []) => applyDnsTakeover(uci.ctx, paths, { mode: 'dnsmasq', forward: { mode: 'all', domains: [] }, rewriteSources, queryLog })
+  const on = await apply(true, ['*.example.test'])
+  assert.deepEqual(on.queryLog, { active: true, reason: '' })
+  assert.equal(uci.ctx.files[INSTALLED], `rebind-domain-ok=/example.test/\n${LOG_LINES}`)
+  assert.equal(uci.ctx.files[FORWARD_SRC], uci.ctx.files[INSTALLED], '开机重放的正本也带')
+  assert.deepEqual(restarts, [''], '重启时日志文件已经是个空的普通文件')
+  // 面板在读(或者面板停着、指向 /dev/null):重复部署不动它、不重启 dnsmasq
+  uci.ctx.files[DNSMASQ_QUERY_LOG_PATH] = 'reading'
+  const again = await apply(true, ['*.example.test'])
+  assert.equal(again.changed, false)
+  assert.equal(uci.ctx.files[DNSMASQ_QUERY_LOG_PATH], 'reading')
+  // 关掉:受管文件只剩重写例外,重启 dnsmasq 之后日志文件拿掉
+  const off = await apply(false, ['*.example.test'])
+  assert.equal(off.changed, true)
+  assert.deepEqual(off.queryLog, { active: false, reason: '' })
+  assert.equal(uci.ctx.files[INSTALLED], 'rebind-domain-ok=/example.test/\n')
+  assert.equal(DNSMASQ_QUERY_LOG_PATH in uci.ctx.files, false)
+  assert.equal(restarts.at(-1), 'reading', '先按不带日志的配置重启,再删文件')
+  // 只剩日志那两行时关掉:受管文件整个拿掉
+  await apply(true)
+  assert.equal(uci.ctx.files[INSTALLED], LOG_LINES)
+  await apply(false)
+  assert.equal(INSTALLED in uci.ctx.files, false)
+})
+
+test('查询日志:domains 也带;用户自己在 uci 里开了查询日志或改了日志位置就不接管', async () => {
+  const uci = statefulUci({ servers: ['9.9.9.9'] })
+  const r = await applyDnsTakeover(uci.ctx, paths, { mode: 'dnsmasq', forward: { mode: 'domains', domains: ['example.test'] }, queryLog: true })
+  assert.deepEqual(r.queryLog, { active: true, reason: '' })
+  assert.ok(uci.ctx.files[INSTALLED].endsWith(LOG_LINES))
+  assert.match(uci.ctx.files[INSTALLED], /^# Open-Box/)
+  // 查询日志写进系统日志(没设 log-facility,或设的是 syslog 设施名):带 syslog,面板改读 logread 认终端(#322);写到文件的不带
+  for (const [options, grep, syslog] of [
+    [{ logqueries: '1' }, '', true],
+    [{ logqueries: '1', logfacility: 'LOCAL0' }, '', true],
+    [{ logfacility: '/tmp/dnsmasq.log' }, '', false],
+    [{ logqueries: '1', logfacility: '/tmp/dnsmasq.log' }, '', false],
+    [{}, '/var/etc/dnsmasq.conf.cfg01411c:log-queries\n', true],
+    [{}, '/etc/dnsmasq.conf:log-queries=extra\n/etc/dnsmasq.conf:log-facility=-\n', false],
+  ]) {
+    const user = statefulUci({ servers: ['9.9.9.9'], options, grep })
+    const got = await applyDnsTakeover(user.ctx, paths, { mode: 'dnsmasq', forward: { mode: 'all', domains: [] }, queryLog: true })
+    assert.deepEqual(got.queryLog, { active: false, reason: 'user', ...(syslog ? { syslog: true } : {}) }, JSON.stringify([options, grep]))
+    assert.ok(!(user.ctx.files[INSTALLED] || '').includes('log-queries'))
+    assert.equal(DNSMASQ_QUERY_LOG_PATH in user.ctx.files, false)
+  }
+  // none:一个都不转发,不记
+  const none = await applyDnsTakeover(uci.ctx, paths, { mode: 'dnsmasq', forward: { mode: 'none', domains: [] }, queryLog: true })
+  assert.deepEqual(none.queryLog, { active: false, reason: '' })
+  // 不是 dnsmasq 模式
+  assert.deepEqual((await applyDnsTakeover(uci.ctx, paths, { mode: 'hijack', queryLog: true })).queryLog, { active: false, reason: '' })
+})
+
+test('查询日志:还原接管时和受管文件一起拿掉', async () => {
+  const uci = statefulUci({ servers: ['9.9.9.9'] })
+  await applyDnsTakeover(uci.ctx, paths, { mode: 'dnsmasq', forward: { mode: 'all', domains: [] }, queryLog: true })
+  uci.ctx.files[DNSMASQ_QUERY_LOG_PATH] = 'reading'
+  await restoreDnsTakeover(uci.ctx, paths)
+  assert.equal(DNSMASQ_QUERY_LOG_PATH in uci.ctx.files, false)
+  assert.equal(INSTALLED in uci.ctx.files, false)
+  assert.deepEqual(uci.state.servers, ['9.9.9.9'])
+})
+
+// GitHub #286:dnsmasq-full 自带的 /etc/dnsmasq.conf 里有 log-facility=/dev/null,再加一行 log-facility,dnsmasq 2.93 拒绝启动
+// (illegal repeated keyword),DNS 和 DHCP 一起停——v0.1.259~261 开着域名过滤的 dnsmasq 转发模式全断网
+test('查询日志:dnsmasq 别处(固件的 /etc/dnsmasq.conf、生成的配置、conf-dir 里别的文件)已经设了日志就不加', async () => {
+  for (const grep of ['/etc/dnsmasq.conf:log-facility=/dev/null\n', '/var/etc/dnsmasq.conf.cfg01411c:log-facility=/tmp/q.log\n', '/tmp/dnsmasq.cfg.d/custom.conf:log-facility=/var/log/dnsmasq.log\n']) {
+    const uci = statefulUci({ servers: ['9.9.9.9'], grep })
+    const r = await applyDnsTakeover(uci.ctx, paths, { mode: 'dnsmasq', forward: { mode: 'all', domains: [] }, queryLog: true })
+    assert.deepEqual(r.queryLog, { active: false, reason: 'user' }, grep)
+    assert.ok(!(uci.ctx.files[INSTALLED] || '').includes('log-'), grep)
+  }
+  // 只有自己那份受管文件里有(上一版加的):不算冲突
+  const own = statefulUci({ servers: ['9.9.9.9'], grep: '/tmp/dnsmasq.cfg.d/open-box.conf:log-queries=extra\n' })
+  assert.deepEqual((await applyDnsTakeover(own.ctx, paths, { mode: 'dnsmasq', forward: { mode: 'all', domains: [] }, queryLog: true })).queryLog, { active: true, reason: '' })
+})
+
+test('查询日志:上一版加上后 dnsmasq 起不来的现场,升级后第一次部署就把那两行拿掉', async () => {
+  // 上一版装进去的受管文件带着那两行;这次发现 /etc/dnsmasq.conf 里有 log-facility
+  const uci = statefulUci({ servers: ['127.0.0.1#7853'], noresolv: '1', grep: '/etc/dnsmasq.conf:log-facility=/dev/null\n', files: { [INSTALLED]: LOG_LINES, [FORWARD_SRC]: LOG_LINES, [STATE]: 'plan=all\nserver=127.0.0.1#7853\nnoresolv=1\n', [DNSMASQ_QUERY_LOG_PATH]: '' } })
+  const r = await applyDnsTakeover(uci.ctx, paths, { mode: 'dnsmasq', forward: { mode: 'all', domains: [] }, queryLog: true })
+  assert.equal(r.changed, true)
+  assert.equal(INSTALLED in uci.ctx.files, false, '受管文件只剩那两行:整个拿掉')
+  assert.ok(cmds(uci.ctx).includes('/etc/init.d/dnsmasq restart'))
+  assert.equal(DNSMASQ_QUERY_LOG_PATH in uci.ctx.files, false)
+})
+
+test('查询日志:加上后 dnsmasq 没起来 → 撤掉那两行、再重启一次、记下失败;之后不再加', async () => {
+  // 第一次重启后一直查不到 dnsmasq,撤掉之后又能查到
+  let rolledBack = false
+  const uci = statefulUci({ servers: ['9.9.9.9'], dnsmasqUp: () => rolledBack })
+  const exec = uci.ctx.exec
+  let restarts = 0
+  uci.ctx.exec = async (cmd, args = []) => {
+    if (cmd === '/etc/init.d/dnsmasq') { restarts++; if (restarts > 1) rolledBack = true }
+    return exec(cmd, args)
+  }
+  const r = await applyDnsTakeover(uci.ctx, paths, { mode: 'dnsmasq', forward: { mode: 'all', domains: [] }, queryLog: true, rewriteSources: ['*.example.test'] })
+  assert.deepEqual(r.queryLog, { active: false, reason: 'failed' })
+  assert.equal(restarts, 2, '撤掉之后再重启一次')
+  assert.equal(uci.ctx.files[INSTALLED], 'rebind-domain-ok=/example.test/\n', '只剩重写例外')
+  assert.equal(uci.ctx.files[FORWARD_SRC], uci.ctx.files[INSTALLED], '开机重放的正本也撤掉')
+  assert.equal(DNSMASQ_QUERY_LOG_PATH in uci.ctx.files, false)
+  assert.ok(queryLogFailedPath(paths) in uci.ctx.files, '记下失败')
+  // 之后的部署 / 热切换:不再加、不再重启
+  const again = await applyDnsTakeover(uci.ctx, paths, { mode: 'dnsmasq', forward: { mode: 'all', domains: [] }, queryLog: true, rewriteSources: ['*.example.test'] })
+  assert.deepEqual(again.queryLog, { active: false, reason: 'failed' })
+  assert.equal(again.changed, false)
+  assert.equal(restarts, 2)
+})
+
+test('查询日志:受管文件没变、但 dnsmasq 此刻根本没在跑(上一版加上就没起来)→ 同样撤掉', async () => {
+  let fixed = false
+  const uci = statefulUci({ servers: ['127.0.0.1#7853'], noresolv: '1', dnsmasqUp: () => fixed, files: { [INSTALLED]: LOG_LINES, [FORWARD_SRC]: LOG_LINES, [STATE]: 'plan=all\nserver=127.0.0.1#7853\nnoresolv=1\n' } })
+  const exec = uci.ctx.exec
+  uci.ctx.exec = async (cmd, args = []) => {
+    if (cmd === '/etc/init.d/dnsmasq') fixed = true
+    return exec(cmd, args)
+  }
+  const r = await applyDnsTakeover(uci.ctx, paths, { mode: 'dnsmasq', forward: { mode: 'all', domains: [] }, queryLog: true })
+  assert.deepEqual(r.queryLog, { active: false, reason: 'failed' })
+  assert.equal(INSTALLED in uci.ctx.files, false)
+  assert.ok(cmds(uci.ctx).includes('/etc/init.d/dnsmasq restart'))
 })

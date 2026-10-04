@@ -35,7 +35,7 @@ test('parseUri IPv6 主机剥括号', () => {
   assert.equal(u.port, 8443)
 })
 
-test('parseUri userinfo 带冒号(tuic uuid:password)', () => {
+test('parseUri userinfo 带冒号（tuic uuid:password）', () => {
   const u = parseUri('tuic://uuid-x:pass-y@h.com:443?alpn=h3#t')
   assert.equal(u.userinfo, 'uuid-x:pass-y')
 })

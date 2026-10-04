@@ -10,20 +10,28 @@ export const DNS_FILTER_DEFAULT = {
 }
 export const DNS_FILTER_RUNTIME = 'openbox/dns-filter-runtime'
 export const DNS_FILTER_RULESET_PREFIX = 'dns-filter-'
-// 本地编译产物的标签，不属于 Geo 规则集下载源。末尾为 filterKey 的 16 位摘要。
+// 本地编译产物的标签，不属于 Geo 规则集下载源。现在是固定的「名单 id + 类别 + 第几份」(system/dns-filter.mjs,内容更新
+// 只换文件、不重启内核);老版本末尾带 16 位内容摘要,同样认
+const COMPILED_LABEL = /^(?:user-allow|[A-Za-z0-9_-]{1,40}-(?:important|block|allow|allow-important)(?:-\d+)?)$/
+const LEGACY_LABEL = /^[A-Za-z0-9_-]+-[a-f0-9]{16}$/
 export const isDnsFilterRulesetTag = (tag) => typeof tag === 'string'
   && tag.startsWith(DNS_FILTER_RULESET_PREFIX)
-  && /^[A-Za-z0-9_-]+-[a-f0-9]{16}$/.test(tag.slice(DNS_FILTER_RULESET_PREFIX.length))
+  && (COMPILED_LABEL.test(tag.slice(DNS_FILTER_RULESET_PREFIX.length)) || LEGACY_LABEL.test(tag.slice(DNS_FILTER_RULESET_PREFIX.length)))
 export const filterSettings = (profile) => ({
   ...structuredClone(DNS_FILTER_DEFAULT),
   ...profile?.dns?.filter,
   autoUpdate: { ...DNS_FILTER_DEFAULT.autoUpdate, ...profile?.dns?.filter?.autoUpdate },
 })
 // 自动更新计划只影响调度,不影响内核规则;从产物 key 排除它,改时间不会造成待应用状态。
+// 正文 / 规则源码这类字符串按内容取键。filterKey 传字符串也走这里:以前 filterKey(body) 会把 2 MB 正文 rest-spread
+// 成两百万个下标键的对象再 JSON.stringify(主线程卡 3 秒多、几十 MB 垃圾,2026-09-18 开发路由器实测),名单每次更新
+// 都要来一遍;换成直接哈希后旧的内容寻址文件名会变一次,下次更新重新编一份即可
+export const contentKey = (text) => createHash('sha256').update(text).digest('hex').slice(0, 16)
 export const filterKey = (settings) => {
+  if (typeof settings === 'string') return contentKey(settings)
   const { autoUpdate, ...rulesSettings } = settings || {}
   void autoUpdate
-  return createHash('sha256').update(JSON.stringify(rulesSettings)).digest('hex').slice(0, 16)
+  return contentKey(JSON.stringify(rulesSettings))
 }
 export const filterForwardPlan = (profile, plan) => profile?.dns?.filter?.enabled
   ? { mode: 'all', domains: [], reason: '域名过滤已开启:DNS 查询统一交给内核检查,通过后仍按原 DNS 策略解析' }
@@ -55,7 +63,7 @@ export const validateDnsFilter = (value) => {
   for (const list of value.lists) {
     if (!list || !/^[a-zA-Z0-9_-]{1,40}$/.test(list.id) || ids.has(list.id)) return '过滤名单 id 无效或重复'
     ids.add(list.id)
-    if (typeof list.name !== 'string' || !list.name.trim() || list.name.length > 80) return '请填写名单名称(最多 80 字)'
+    if (typeof list.name !== 'string' || !list.name.trim() || list.name.length > 80) return '请填写名单名称（最多 80 字）'
     if (typeof list.enabled !== 'boolean') return '名单 enabled 必须是布尔值'
     try {
       const url = new URL(list.url)
@@ -155,6 +163,43 @@ export const parseDnsFilter = (body, { collectEntries = false } = {}) => {
   }
   return { rules, count, unsupported, unsupportedExamples, ...(entries ? { entries } : {}) }
 }
+
+// 一份集合里的条目越多,内核编译它的峰值内存越高:9.3 万条 domain_suffix 编成一份要 150 MB,切成 4 份各 2.3 万条
+// 只要 90 MB,总耗时不变(2026-09-18 开发路由器实测)。按条目数切成多份:同一条规则里的 domain / domain_suffix /
+// domain_regex 本来就是「或」,切开后每段仍带原来的 query_type / denyallow 条件;多份集合在 DNS 规则里 rule_set 并列,
+// 效果和一份一样
+export const DNS_FILTER_SET_ENTRIES = 25000
+const DOMAIN_FIELDS = ['domain', 'domain_suffix', 'domain_regex']
+const matchEntries = (match) => DOMAIN_FIELDS.reduce((n, field) => n + (match[field]?.length || 0), 0)
+export const chunkRules = (rules, max = DNS_FILTER_SET_ENTRIES) => {
+  const chunks = [[]]
+  let used = 0
+  const push = (rule, size) => {
+    if (used + size > max && chunks.at(-1).length) { chunks.push([]); used = 0 }
+    chunks.at(-1).push(rule)
+    used += size
+  }
+  for (const rule of rules) {
+    const logical = rule.type === 'logical'
+    const match = logical ? rule.rules[0] : rule
+    const extra = logical ? rule.rules.slice(1) : []
+    const size = matchEntries(match)
+    if (size <= max) { push(rule, size); continue }
+    // 单条规则就超了:按域名条件顺序切段,先把当前这份没用完的位置填满,再整份整份地切;每段都带同样的附加条件
+    const pairs = DOMAIN_FIELDS.flatMap((field) => (match[field] || []).map((value) => [field, value]))
+    for (let i = 0; i < pairs.length;) {
+      const room = chunks.at(-1).length ? max - used : max
+      const take = Math.min(room > 0 ? room : max, pairs.length - i)
+      const part = {}
+      for (const [field, value] of pairs.slice(i, i + take)) (part[field] ||= []).push(value)
+      push(and([part, ...extra]), take)
+      i += take
+    }
+  }
+  return chunks.filter((chunk) => chunk.length)
+}
+
+export const ruleHasRegex = (rule) => rule.type === 'logical' ? rule.rules.some(ruleHasRegex) : Array.isArray(rule.domain_regex) && rule.domain_regex.length > 0
 
 export const buildFilterConfig = (profile, artifact) => {
   if (!profile?.dns?.filter?.enabled) return { rules: [], sets: [] }

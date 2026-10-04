@@ -58,7 +58,6 @@
   "config/show-statistics-when-sidebar-collapsed": "true",
   "config/speedtest-timeout": "5000",
   "config/speedtest-url": "http://www.gstatic.com/generate_204",
-  "config/split-overview-page": "true",
   "config/swipe-in-pages": "true",
   "config/swipe-in-tabs": "false",
   "config/table-column-pinning": "{\"left\":[],\"right\":[]}",

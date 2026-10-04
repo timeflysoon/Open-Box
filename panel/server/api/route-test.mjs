@@ -1,17 +1,23 @@
+import { FLIP_FALLBACK_TAG, flattenFlipRule, flipFlagOfRule } from '../engine/flip.mjs'
+import { readFlipState } from '../system/flip-files.mjs'
 import express from 'express'
 import net from 'node:net'
 import tls from 'node:tls'
 import { PANEL_INBOUND_PORT, PANEL_INBOUND_TAG } from '../engine/config.mjs'
-import { CLASH_API_BASE, hasDestinationCondition, matchLocalConditions, matchRuleSetList } from './penetration.mjs'
+import { CLASH_API_BASE, hasDestinationCondition, matchLocalConditions, matchRuleSetsByDomain } from './penetration.mjs'
 import { cidrContains } from '../system/local-subnets.mjs'
 import { fetchSelections } from './deploy-runner.mjs'
 import { flushDnsCache } from '../system/dns-cache.mjs'
+import { detectChallenge, parseHeaderBlock, pickProbeHeaders } from '../system/http-challenge.mjs'
 import { builtinTags } from '../engine/user-groups.mjs'
-import { normalizeRouting } from '../engine/routing-model.mjs'
+import { connectionOwner } from '../engine/rule-owner.mjs'
+import { normalizeRouting, stripNoDomainGuardText } from '../engine/routing-model.mjs'
 import { DNS_REWRITE_TAG, matchRewrite, normalizeDnsRewrite } from '../engine/dns-rewrite.mjs'
+import { isProxyResolverTag } from '../engine/dns.mjs'
+import { macForIp } from './traffic.mjs'
 
 // 「真实路由」:不只按规则推,而是真的走一遍——
-//   1. DNS 用哪台服务器:按生成配置里 dns.rules 的顺序判(规则集用内核 rule-set match,
+//   1. DNS 用哪台服务器:按生成配置里 dns.rules 的顺序判(规则集先用进程内索引比,答不了的才用内核 rule-set match,
 //      域名条件本地比),得到 dns-direct(直连解析)还是某个带 detour 的代理 DNS;
 //   2. 解析结果:问内核自己的 DNS(clash_api /dns/query),拿到的就是内核会用的答案;
 //   3. 实际出口:面板进程在路由器上真发一个 HTTPS 请求(会经过 tun 进内核),然后到
@@ -27,10 +33,10 @@ export const targetUrl = (host, port, secure) => {
   const defaultPort = secure ? 443 : 80
   return `${secure ? 'https' : 'http'}://${h}${port === defaultPort ? '' : `:${port}`}/`
 }
-// fake-ip 的地址段:sing-box / Clash / OpenClash 默认都在 198.15.0.0/15(RFC 2544 保留段,公网上
-// 不会有),sing-box 的 IPv6 默认 fc00::/18。解析结果落在这里面,只可能是某个做 fake-ip 的
-// 客户端替真正的 DNS 答的:查询是往 1.1.1.1 发的,却在半路(线路对端的透明代理)被截下来。
-export const isFakeIp = (ip) => /^198\.1[56]\.\d{1,3}\.\d{1,3}$/.test(String(ip)) || /^fc[0-3][0-9a-f]:/i.test(String(ip))
+// 诊断同时识别本机 198.19/16 和上游 Clash 常用的 198.18/16；198.15/16 是公网地址。
+// 使用实际 CIDR 边界，不能把整个 fc00::/7 的内网地址都误报成 FakeIP。
+export const isFakeIp = (ip) => net.isIP(String(ip)) !== 0
+  && ['198.18.0.0/15', 'fc00::/18'].some((cidr) => cidrContains(cidr, ip))
 const errorMessage = (err) => (err instanceof Error ? err.message : String(err))
 
 const fetchWithTimeout = async (fetchImpl, url, init = {}, timeoutMs = 8000) => {
@@ -49,7 +55,10 @@ const fetchWithTimeout = async (fetchImpl, url, init = {}, timeoutMs = 8000) => 
 // rewriteRules:档案里的 DNS 重写规则(engine/dns-rewrite.mjs 归一化后的);命中 dns-rewrite 服务器时把命中的
 // 那条(源 / 目标)一并回给前端,规则页画成「原域名 → 目标」
 // ignoreServers:跳过指向这些解析器的规则——重写服务要知道「没有重写时这个域名会怎么判」,就把 dns-rewrite 那条跳过
-export const decideDnsServer = async (ctx, paths, config, target, { sourceIp = '', rewriteRules = [], ignoreServers = [] } = {}) => {
+export const decideDnsServer = async (ctx, paths, config, target, { sourceIp = '', sourceMac = '', rewriteRules = [], ignoreServers = [], flipState } = {}) => {
+  // 热切换结构(engine/flip.mjs)里每个站点集两支规则都在:挂着开关的代理支此刻算不算数,看已部署的开关状态。
+  // 开关 OFF 的那条跳过,ON 的展平成普通规则再判;不是热切换结构时开关表是空的,下面和以前一样
+  const flags = flipState || await readFlipState(ctx, paths)
   const dns = config.dns || {}
   const ignored = new Set(ignoreServers)
   const servers = new Map((dns.servers || []).map((s) => [s.tag, s]))
@@ -73,31 +82,46 @@ export const decideDnsServer = async (ctx, paths, config, target, { sourceIp = '
     return { ...out, assumed: finalized }
   }
   for (let i = 0; i < rules.length; i++) {
-    const rule = rules[i]
+    const rule = flattenFlipRule(rules[i], flags)
     if (!rule || typeof rule !== 'object') continue
     if (rule.server && ignored.has(rule.server)) continue
     // 只管某些查询类型、又不含 A 的规则(代理 v6 降为 IPv4 时给走代理的域名回空 AAAA 的 predefined 那条)和这里
     // 无关:规则页推算的是「这个域名的 A 查询由谁解析」
     if (Array.isArray(rule.query_type) && rule.query_type.length && !rule.query_type.includes('A')) continue
     const hasDest = hasDestinationCondition(rule)
-    const hasSource = Object.prototype.hasOwnProperty.call(rule, 'source_ip_cidr')
+    // 来源条件:按 IP(source_ip_cidr)或按 MAC(source_mac_address,终端分流的 MAC 页签)
+    const hasSourceIp = Object.prototype.hasOwnProperty.call(rule, 'source_ip_cidr')
+    const hasSourceMac = Object.prototype.hasOwnProperty.call(rule, 'source_mac_address')
+    const hasSource = hasSourceIp || hasSourceMac
     const fake = rule.server && (servers.get(rule.server) || {}).type === 'fakeip'
+    // 热切换结构里兜底的代理支:去掉开关后没有任何条件、只有解析器——开关 ON 时它就是「上面都没命中的全走这里」
+    if (rule !== rules[i] && !hasDest && !hasSource && !fake && rule.server) {
+      const server = servers.get(rule.server) || { tag: rule.server }
+      return withFake({ ruleIndex: i, server, viaProxy: isProxyResolverTag(server.tag) })
+    }
     if (!hasDest && !hasSource && !fake) continue
-    if (hasSource && sourceIp) {
+    if (hasSourceIp && sourceIp) {
       const list = Array.isArray(rule.source_ip_cidr) ? rule.source_ip_cidr : [rule.source_ip_cidr]
       if (!list.some((c) => cidrContains(c, sourceIp))) continue
+    }
+    if (hasSourceMac && sourceMac) {
+      const list = [].concat(rule.source_mac_address).map((m) => String(m).toLowerCase())
+      if (!list.includes(sourceMac)) continue
     }
     let hit = !hasDest
     if (hasDest && matchLocalConditions(rule, target)) hit = true
     else if (hasDest && Object.prototype.hasOwnProperty.call(rule, 'rule_set')) {
-      const r = await matchRuleSetList(ctx, paths, srsPathByTag, rule.rule_set, target)
+      // 规则集按域名比走进程内索引(penetration.mjs 的 matchRuleSetsByDomain),解不开的才起内核进程
+      const r = await matchRuleSetsByDomain(ctx, paths, srsPathByTag, [].concat(rule.rule_set), target)
       if (r.error) return { error: `dns rule #${i + 1}: ${r.error}` }
       hit = r.hit
     }
     if (!hit) continue
     // 目标这一组命中了、但规则还要看来源而这次没给:记成前提,按不在该来源里的终端继续
-    if (hasSource && !sourceIp) {
-      const a = { ruleIndex: i, needs: ['sourceIp'], sourceIpCidr: [].concat(rule.source_ip_cidr) }
+    if ((hasSourceIp && !sourceIp) || (hasSourceMac && !sourceMac)) {
+      const a = hasSourceMac
+        ? { ruleIndex: i, needs: ['sourceMac'], sourceMac: [].concat(rule.source_mac_address) }
+        : { ruleIndex: i, needs: ['sourceIp'], sourceIpCidr: [].concat(rule.source_ip_cidr) }
       if (rule.server !== undefined) a.server = rule.server
       if (rule.action !== undefined) a.action = rule.action
       assumed.push(a)
@@ -109,10 +133,10 @@ export const decideDnsServer = async (ctx, paths, config, target, { sourceIp = '
       continue
     }
     const server = servers.get(rule.server) || { tag: rule.server }
-    return withFake({ ruleIndex: i, server, viaProxy: Boolean(server.detour) })
+    return withFake({ ruleIndex: i, server, viaProxy: isProxyResolverTag(server.tag) })
   }
   const server = servers.get(dns.final) || { tag: dns.final || '' }
-  return withFake({ ruleIndex: null, server, viaProxy: Boolean(server.detour) })
+  return withFake({ ruleIndex: null, server, viaProxy: isProxyResolverTag(server.tag) })
 }
 
 const clashHeaders = (secret) => (secret ? { Authorization: `Bearer ${secret}` } : {})
@@ -154,17 +178,24 @@ export const probeViaKernel = (host, { port = 443, secure = port !== 80, proxyPo
       const request = `HEAD / HTTP/1.1\r\nHost: ${hostHeader}\r\nUser-Agent: open-box-route-test\r\nConnection: keep-alive\r\n\r\n`
       const readStatus = (stream) => {
         let head = ''
+        let done = false
         stream.on('data', (c) => {
+          if (done) return
           head += c.toString('latin1')
           const i = head.indexOf('\r\n')
           if (i === -1) return
+          // 头读到空行再报:要拿响应头认人机验证(system/http-challenge.mjs);16KB 还没到空行就只报状态行
+          const end = head.indexOf('\r\n\r\n')
+          if (end === -1 && head.length < 16384) return
+          done = true
           const m = /^HTTP\/\d(?:\.\d)? (\d{3})/.exec(head.slice(0, i))
+          const headers = end === -1 ? {} : pickProbeHeaders(parseHeaderBlock(head.slice(i + 2, end)))
           clearTimeout(timer)
           // 先不断开:调用方要趁连接还在的时候去内核连接表里找它,找完再 close()。
           // 兜底 15 秒后自动断,免得调用方忘了。
           const close = () => { try { stream.destroy() } catch { /* ignore */ } try { socket.destroy() } catch { /* ignore */ } }
           setTimeout(close, 15000).unref?.()
-          finish(m ? { ok: true, status: Number(m[1]), close } : { ok: false, error: `bad response: ${head.slice(0, i)}`, close })
+          finish(m ? { ok: true, status: Number(m[1]), headers, close } : { ok: false, error: `bad response: ${head.slice(0, i)}`, close })
         })
         stream.once('error', (err) => { clearTimeout(timer); finish({ ok: false, error: err.message }) })
         stream.once('close', () => { clearTimeout(timer); finish({ ok: false, error: 'connection closed' }) })
@@ -192,7 +223,7 @@ export const registerRouteTestRoutes = (app, { store, ctx, paths, fetchImpl = gl
     try {
       config = JSON.parse(await ctx.readFile(paths.configPath))
     } catch {
-      return res.status(503).json({ message: '还没有生成过配置(内核没启动过)' })
+      return res.status(503).json({ message: '还没有生成过配置（内核没启动过）' })
     }
     const secret = store.getClashSecret ? store.getClashSecret() : ''
     const routingConf = normalizeRouting((store.getProfile ? store.getProfile() : {}).routing)
@@ -205,7 +236,8 @@ export const registerRouteTestRoutes = (app, { store, ctx, paths, fetchImpl = gl
       try {
         const sourceIp = req.body && typeof req.body.sourceIp === 'string' && net.isIP(req.body.sourceIp.trim()) ? req.body.sourceIp.trim() : ''
         const rewrite = typeof store?.getProfile === 'function' ? normalizeDnsRewrite(store.getProfile().dns) : { enabled: true, rules: [] }
-        out.dns = await decideDnsServer(ctx, paths, config, target, { sourceIp, rewriteRules: rewrite.enabled ? rewrite.rules : [] })
+        const sourceMac = sourceIp ? await macForIp(ctx, paths, sourceIp) : ''
+        out.dns = await decideDnsServer(ctx, paths, config, target, { sourceIp, sourceMac, rewriteRules: rewrite.enabled ? rewrite.rules : [] })
         // 下面的解析和访问都是面板自己发起的:内核的 DNS 查询接口(clash API /dns/query)不带原终端来源,
         // 回环 mixed 入站的探测来源也是本机——指定终端的来源规则在这两步里没有生效,不能把它们画成
         // "该终端的实测"(复审 S4)
@@ -238,15 +270,16 @@ export const registerRouteTestRoutes = (app, { store, ctx, paths, fetchImpl = gl
           out.dns.runtimeLeaf = out.dns.runtimeChain.at(-1)
         }
         // 这条决策归谁管:一条规则都没命中就是兜底,命中了就按条件反查是哪个站点集写的
-        const hitRule = out.dns.ruleIndex === null || out.dns.ruleIndex === undefined
-          ? null
-          : (config.dns.rules || [])[out.dns.ruleIndex] || {}
+        // 热切换结构里命中的可能是挂着开关的代理支:去掉开关再拿条件反查;兜底的代理支去掉开关后没有条件,单独认
+        const rawHit = out.dns.ruleIndex === null || out.dns.ruleIndex === undefined ? null : (config.dns.rules || [])[out.dns.ruleIndex] || {}
+        const fallbackHit = rawHit && (flipFlagOfRule(rawHit) === FLIP_FALLBACK_TAG || (Array.isArray(rawHit.rule_set) && rawHit.rule_set.length === 1 && rawHit.rule_set[0] === FLIP_FALLBACK_TAG))
+        const hitRule = rawHit && !fallbackHit ? flattenFlipRule(rawHit, true) || {} : null
         const owner = hitRule
           ? (routingConf.activePolicies || []).find((p) => (hitRule.rule_set && p.rulesets.join() === [].concat(hitRule.rule_set).join()) || (hitRule.domain_suffix && p.domainSuffix.join() === [].concat(hitRule.domain_suffix).join()))
           : routingConf.fallback
         if (owner && Object.prototype.hasOwnProperty.call(selections, owner.name)) {
-          // 带 detour 的解析器 = 当时判成走代理;dns-direct / dns-local 没有 detour = 判成走直连
-          const baked = detour ? 'proxy' : 'direct'
+          // 代理侧解析器 = 当时判成走代理;dns-direct / dns-local = 判成走直连。按 tag 认:代理侧上游按目标分流走直连时没有 detour
+          const baked = isProxyResolverTag(out.dns.server.tag) ? 'proxy' : 'direct'
           const now = leafOf(owner.name) === directTag ? 'direct' : 'proxy'
           if (now !== baked) out.dns.stale = now
         }
@@ -361,6 +394,11 @@ export const registerRouteTestRoutes = (app, { store, ctx, paths, fetchImpl = gl
     await looking
     exit = { ...exit, ok: r.ok, status: r.status, ms: r.ms }
     if (!r.ok) exit.error = r.error
+    if (r.headers && typeof r.headers === 'object') {
+      exit.headers = r.headers
+      const challenge = detectChallenge(r.status, r.headers)
+      if (challenge) exit.challenge = challenge
+    }
     if (found.hit) {
       exit.chains = Array.isArray(found.hit.chains) ? found.hit.chains.slice().reverse() : []
       exit.rule = found.hit.rule || ''
@@ -368,10 +406,15 @@ export const registerRouteTestRoutes = (app, { store, ctx, paths, fetchImpl = gl
       exit.destinationIP = found.hit.metadata.destinationIP || ''
       // 链路末尾是节点还是内置的直连 / 拒绝:走节点的,前端要写明节点拿到的是 IP 还是 fake-ip
       const leaf = exit.chains.at(-1)
-      if (leaf) {
-        const tags = builtinTags(store.getGroups ? store.getGroups() : [])
-        exit.viaProxy = leaf !== tags.direct && leaf !== tags.block
-      }
+      const tags = builtinTags(store.getGroups ? store.getGroups() : [])
+      if (leaf) exit.viaProxy = leaf !== tags.direct && leaf !== tags.block
+      // 这条连接归哪个站点集 / 前置自定义 / 内置规则:链路根是站点集就是它,否则拿内核记的规则原文对回正在跑的配置
+      const owner = connectionOwner({ chains: exit.chains, rule: exit.rule, routeRules: config && config.route ? config.route.rules : [], routing: (store.getProfile ? store.getProfile() : {}).routing, builtin: tags })
+      if (owner) exit.owner = owner
+      // 站点集按 IP 判的那一份带「连接没有域名」的前提:原文里那段正则去掉,改成 noDomain 标记
+      const readable = stripNoDomainGuardText(exit.rule)
+      exit.rule = readable.rule
+      if (readable.noDomain) exit.noDomain = true
     } else if (connectionsError) {
       exit.connectionsError = connectionsError
     } else {

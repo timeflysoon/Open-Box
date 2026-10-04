@@ -1,5 +1,5 @@
 import { createNode } from './node-model.mjs'
-import { normalizeRealityShortId, normalizeUtlsFingerprint, normalizeVlessFlow, sip003Plugin } from './node-fields.mjs'
+import { normalizeHopInterval, normalizeHopPorts, normalizeRealityShortId, normalizeUtlsFingerprint, normalizeVlessFlow, sip003Plugin } from './node-fields.mjs'
 import { decodeBase64, parseUri } from './codec.mjs'
 
 export const SHARELINK_SCHEMES = ['ss', 'vmess', 'vless', 'trojan', 'hysteria2', 'tuic', 'anytls', 'socks', 'socks5']
@@ -210,8 +210,22 @@ const parseAnytls = (uri) => {
 // 带 insecure=1 是常态(实测正式路由器上 tuic / hy2 节点因此全部报
 // "x509: certificate has expired",而同一台服务器的 vless 正常)。
 const parseHysteria2 = (uri) => {
+  // 端口跳跃(GitHub #171)两种写法:查询参数 mport=20000-40000(v2rayN / NekoBox),或官方写法直接写在端口位置
+  // host:20000-40000 / host:443,20000-40000。后一种先摘出来换成第一个端口,通用的 parseUri 才认得
+  let hopSpec = ''
+  const authorityPorts = /^([a-z0-9]+:\/\/[^/?#]*?):(\d{1,5}(?:[-,]\d{1,5})+)(?=[/?#]|$)/i.exec(uri)
+  if (authorityPorts) {
+    hopSpec = authorityPorts[2]
+    uri = `${authorityPorts[1]}:${/^\d+/.exec(hopSpec)[0]}${uri.slice(authorityPorts[0].length)}`
+  }
   const u = parseUri(uri)
   const fields = { password: safeDecode(u.userinfo) }
+  const server_ports = normalizeHopPorts(u.query.get('mport') || hopSpec)
+  if (server_ports.length) {
+    fields.server_ports = server_ports
+    const hop_interval = normalizeHopInterval(u.query.get('hop-interval') || u.query.get('hopInterval') || u.query.get('hop_interval'))
+    if (hop_interval) fields.hop_interval = hop_interval
+  }
   if (!u.query.get('security')) u.query.set('security', 'tls')
   fields.tls = buildTlsFromQuery(u.query, u.host) || { enabled: true, ...(u.host ? { server_name: u.host } : {}) }
   const obfs = u.query.get('obfs')
@@ -288,6 +302,38 @@ const parseSocks = (uri, version) => {
   // 内核默认就是 5,只有 4 / 4a 需要写出来
   if (version && version !== '5') fields.version = version
   return createNode({ tag: fragment, type: 'socks', server, server_port: port, fields, source: 'sharelink' })
+}
+
+// http://user:pass@host:port  /  https://user:pass@host:port(先和代理服务器握 TLS,再 CONNECT):住宅代理商给的
+// HTTP 代理账号。只给链式代理用(engine/chain-proxy.mjs),不进上面的分享链接分发——订阅正文和订阅地址检测里
+// 的 http(s):// 是网址,不能当节点
+export const parseHttpProxyLink = (uri) => {
+  const m = /^(https?):\/\/(.*)$/i.exec(String(uri || '').trim())
+  if (!m) return null
+  let rest = m[2]
+  let fragment = ''
+  const hashIdx = rest.indexOf('#')
+  if (hashIdx >= 0) {
+    fragment = safeDecode(rest.slice(hashIdx + 1))
+    rest = rest.slice(0, hashIdx)
+  }
+  rest = rest.replace(/[/?].*$/, '')
+  let creds = ''
+  let hostport = rest
+  const at = rest.lastIndexOf('@')
+  if (at >= 0) {
+    creds = safeDecode(rest.slice(0, at))
+    hostport = rest.slice(at + 1)
+  }
+  const [server, port] = splitHostPort(hostport)
+  const fields = {}
+  if (creds) {
+    const ci = creds.indexOf(':')
+    fields.username = ci >= 0 ? creds.slice(0, ci) : creds
+    if (ci >= 0) fields.password = creds.slice(ci + 1)
+  }
+  if (m[1].toLowerCase() === 'https') fields.tls = { enabled: true, server_name: server }
+  return createNode({ tag: fragment, type: 'http', server, server_port: port, fields, source: 'sharelink' })
 }
 
 export const parseShareLink = (uri) => {

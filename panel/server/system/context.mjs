@@ -17,6 +17,9 @@ export const createMockContext = (options = {}) => {
       // 值可以是函数:同一条命令连续几次要给不同结果时用(比如 status 先 running 后 not)
       const configured = execResults[key]
       const result = (typeof configured === 'function' ? configured() : configured) || defaultExec
+      // 和真的 sing-box 一样:`rule-set compile --output X` 成功就有 X(编到临时文件再换上的流程要读它,system/rulesets.mjs)
+      const out = args[0] === 'rule-set' && args[1] === 'compile' ? args[args.indexOf('--output') + 1] : ''
+      if (out && (result.code ?? 0) === 0 && !(out in files)) files[out] = `compiled:${args[args.length - 1]}`
       return { code: result.code ?? 0, stdout: result.stdout ?? '', stderr: result.stderr ?? '' }
     },
     async readFile(path) {
@@ -31,6 +34,11 @@ export const createMockContext = (options = {}) => {
       // mock 里按 Buffer 原样存,断言可以直接比对字节数
       files[path] = data
       writes.push({ path, content: data })
+    },
+    async copyFile(from, to) {
+      if (!(from in files)) throw new Error(`ENOENT: no such file: ${from}`)
+      files[to] = files[from]
+      writes.push({ path: to, content: files[from], copiedFrom: from })
     },
     async exists(path) {
       return path in files

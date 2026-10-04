@@ -37,6 +37,16 @@ export const readMeta = async (ctx, paths) => {
   }
 }
 
+// 内核自己报的版本号(如 1.14.1-openbox-tcp11);二进制缺失 / 跑不起来就是空串。要起一次内核进程,别放在常被调的接口里
+export const readKernelVersion = async (ctx, paths) => {
+  try {
+    const { code, stdout } = await ctx.exec(paths.singbox, ['version'])
+    return code === 0 ? (/version\s+(\S+)/.exec(stdout) || [])[1] || '' : ''
+  } catch {
+    return ''
+  }
+}
+
 export const readChannel = async (ctx, paths) => {
   try {
     const [mode, prefix] = (await ctx.readFile(paths.channelPath)).split('\n')
@@ -136,6 +146,53 @@ export const fetchLatestTag = async (fetchImpl, repo, { sources = ['', ...UPDATE
 // Open-Box 自身的最新版:直连不通就依次试镜像
 export const fetchLatestVersion = async (fetchImpl = globalThis.fetch, { mirrors = UPDATE_MIRRORS, timeoutMs = 8000 } = {}) =>
   fetchLatestTag(fetchImpl, REPO, { sources: ['', ...mirrors.filter(Boolean)], timeoutMs })
+
+// 更新日志(用户 2026-10-02:检查到新版时弹窗里列出「更新了什么」,取 Release 说明;只显示最新那一版,最后一行给 Release 列表
+// 的链接看其它版本)。先直连 GitHub API 取最新那一版的说明;镜像站不代理 api.github.com(ghfast.top 回 403 Invalid input),
+// 直连不通(比如本机内核没真节点、直连 GitHub 被重置)就从各来源取它的 release-notes.md 附件(v0.1.276 起随 Release 上传,
+// 和升级包同一批来源:直连 + 镜像)。都取不到 note 为空、带上原因
+export const RELEASE_NOTES_ASSET = 'release-notes.md'
+export const RELEASES_PAGE = `https://github.com/${REPO}/releases`
+const MAX_NOTE_CHARS = 20_000
+export const fetchReleaseNote = async (fetchImpl = globalThis.fetch, { latest = '', mirrors = UPDATE_MIRRORS, timeoutMs = 8000 } = {}) => {
+  const tag = /^[A-Za-z0-9._-]+$/.test(latest) ? latest : ''
+  const base = { url: RELEASES_PAGE }
+  if (!tag) return { ...base, note: null, via: '', error: '不知道最新版本号' }
+  const get = async (target, init = {}) => {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), timeoutMs)
+    try {
+      return await fetchImpl(target, { ...init, signal: controller.signal })
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+  let apiError = ''
+  try {
+    const res = await get(`https://api.github.com/repos/${REPO}/releases/tags/${tag}`, { headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'Open-Box' } })
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    const r = await res.json()
+    if (!r || typeof r !== 'object') throw new Error('GitHub 返回的不是 Release')
+    const body = String(r.body || '').slice(0, MAX_NOTE_CHARS).trim()
+    return { ...base, note: { version: tag, date: typeof r.published_at === 'string' ? r.published_at : '', body }, via: 'api' }
+  } catch (err) {
+    apiError = err instanceof Error ? err.message : String(err)
+  }
+  for (const source of ['', ...mirrors.filter(Boolean)]) {
+    const prefix = source && !source.endsWith('/') ? `${source}/` : source
+    try {
+      const res = await get(`${prefix}https://github.com/${REPO}/releases/download/${tag}/${RELEASE_NOTES_ASSET}`)
+      if (!res.ok) continue
+      const text = String(await res.text())
+      // 镜像出错时可能回 200 的网页:不像 Markdown 的不要
+      if (!text.trim() || /^\s*</.test(text)) continue
+      return { ...base, note: { version: tag, date: '', body: text.slice(0, MAX_NOTE_CHARS).trim() }, via: prefix || 'direct' }
+    } catch {
+      // 下一个来源
+    }
+  }
+  return { ...base, note: null, via: '', error: apiError || '所有来源都取不到' }
+}
 
 export const readJsonFile = async (ctx, path, fallback = {}) => {
   try { return JSON.parse(await ctx.readFile(path)) } catch { return fallback }

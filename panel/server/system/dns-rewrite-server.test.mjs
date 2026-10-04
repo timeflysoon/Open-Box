@@ -29,7 +29,7 @@ const kernel = async (name, qtype) => {
 const q = (qname, qtype) => ({ id: 1, rd: true, qname, qtype, qclass: 1, udpSize: 4096, questionRaw: Buffer.alloc(0) })
 const opts = (over = {}) => ({ rules: RULES, ipv6: true, resolveKernel: kernel, resolveFallback: async () => ({ rcode: RCODE.SERVFAIL, records: [] }), ...over })
 
-test('域名型:回 CNAME 链 + 目标的 A / AAAA(所有者是目标),CNAME 的 TTL 跟目标记录里最短的走', async () => {
+test('域名型:回 CNAME 链 + 目标的 A / AAAA（所有者是目标）,CNAME 的 TTL 跟目标记录里最短的走', async () => {
   const a = await answerQuery(q('services.googleapis.cn', QTYPE.A), opts())
   assert.equal(a.rcode, RCODE.NOERROR)
   assert.deepEqual(a.answers, [
@@ -229,7 +229,7 @@ test('代理 v6 降为 IPv4:走代理的源域名 AAAA 回空、直连的照给;
     await assert.rejects(resolver.resolve6('proxy-v6.review.test'), (e) => e.code === 'ENODATA')
     assert.deepEqual(await resolver.resolve6('direct-v6.review.test'), ['2001:db8::9'])
     await assert.rejects(resolver.resolve6('proxy-v6.review.test'), (e) => e.code === 'ENODATA')
-    assert.equal(asked, 2, '同一域名的归类只判一次(缓存)')
+    assert.equal(asked, 2, '同一域名的归类只判一次（缓存）')
   } finally {
     server.stop()
   }

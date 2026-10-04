@@ -5,10 +5,10 @@
 // 实测:节点写的是 hk-node.angeworld.xyz,SSH 到它的 IP 却经香港节点转发。这里把域名此刻
 // 的解析结果也写进去,裸 IP 连接也能命中。
 //
-// 解析直接问 WAN 下发的上游(servers,和内核自己直连解析用的是同一批),不走路由器的系统
-// resolver:内核刚被停掉时 dnsmasq 的上游已还原成路由器原来的那台(可能是局域网里一台挂了的
-// AdGuard),经它解析全部超时,正式路由器上实测 45 个域名只解出 8 个。没有上游时才退回系统
-// resolver。失败或超时一律跳过,不能让部署失败。
+// 解析直接问直连 DNS(servers,和内核自己直连解析用的是同一批:档案里的直连 DNS,上游 DNS 展开成系统的上游 DNS,
+// 见 engine/dns.mjs 的 directResolverServers),不走路由器的系统 resolver:内核刚被停掉时 dnsmasq 的上游
+// 已还原成路由器原来的那台(可能是局域网里一台挂了的 AdGuard),经它解析全部超时,正式路由器上实测
+// 45 个域名只解出 8 个。没有上游时才退回系统 resolver。失败或超时一律跳过,不能让部署失败。
 import dns from 'node:dns/promises'
 import net from 'node:net'
 
@@ -25,6 +25,14 @@ const makeUpstreamLookup = (servers) => {
   }
 }
 
+// node:dns 的 setServers 认的写法:裸 IP,或不在 53 端口时的 ip:port / [ipv6]:port
+export const isResolverServer = (s) => {
+  if (typeof s !== 'string') return false
+  if (net.isIP(s) !== 0) return true
+  const m = /^\[([^\]]+)\]:(\d{1,5})$/.exec(s) || /^([^:]+):(\d{1,5})$/.exec(s)
+  return Boolean(m) && net.isIP(m[1]) !== 0 && Number(m[2]) >= 1 && Number(m[2]) <= 65535
+}
+
 const withTimeout = (p, ms) => new Promise((resolve) => {
   const timer = setTimeout(() => resolve([]), ms)
   p.then((v) => { clearTimeout(timer); resolve(v) }, () => { clearTimeout(timer); resolve([]) })
@@ -32,8 +40,8 @@ const withTimeout = (p, ms) => new Promise((resolve) => {
 
 export const resolveHostsToCidrs = async (domains, { servers = [], lookup, timeoutMs = 3000 } = {}) => {
   const list = [...new Set((domains || []).map((d) => String(d || '').trim().toLowerCase()).filter(Boolean))]
-  // 只认真正的 IP:resolv.conf 里的 fe80::1%wan6 这类带 zone 的地址会让 setServers 同步抛错
-  const upstreams = (Array.isArray(servers) ? servers : []).filter((s) => typeof s === 'string' && net.isIP(s) !== 0)
+  // 只认真正的 IP(可带端口):resolv.conf 里的 fe80::1%wan6 这类带 zone 的地址会让 setServers 同步抛错
+  const upstreams = (Array.isArray(servers) ? servers : []).filter(isResolverServer)
   let doLookup = lookup
   if (!doLookup && upstreams.length) {
     try {

@@ -7,6 +7,8 @@ import { groupNodesByRegion } from '../engine/groups.mjs'
 import { assertPublicUrl, pinnedLookup } from './net-guard.mjs'
 import { subscriptionFetch } from '../system/insecure-fetch.mjs'
 import { curlFetchText } from '../system/curl-fetch.mjs'
+import { userinfoFromHeaders } from '../engine/subscription-userinfo.mjs'
+import { normalizeNodeDns, validateNodeDns } from '../engine/node-dns.mjs'
 
 // 面板本身跑在网关上,订阅拉取又是"服务端发起、URL 客户端可控"的经典 SSRF 面——
 // 不加限制的话可以拿它当跳板探测回环/内网端口。P4a 复审证明了仅做"字面 IP"层面拒绝远远
@@ -120,6 +122,9 @@ const describeFetchError = (err) => {
 const fetchSubscriptionResponse = async (initialUrl, fetchImpl, lookup, userAgent) => {
   let currentUrl = initialUrl
   let redirectsFollowed = 0
+  // 流量 / 到期这个头**不一定在最后那跳上**:不少机场是 302 到文件地址,头挂在 302 那一跳,
+  // 跟完重定向就没了(GitHub #212)。所以每跳都看一眼,记住第一个拿到的
+  let hopUsage = null
 
   for (;;) {
     // 校验和建连必须是同一次解析:把校验过的地址交给 fetch 实现按它去连(insecure-fetch 会
@@ -143,6 +148,8 @@ const fetchSubscriptionResponse = async (initialUrl, fetchImpl, lookup, userAgen
       throw new Error('failed to fetch subscription: no response')
     }
 
+    if (!hopUsage) hopUsage = userinfoFromHeaders(res.headers)
+
     if (res.status >= 300 && res.status < 400) {
       if (redirectsFollowed >= MAX_SUBSCRIPTION_REDIRECTS) {
         throw new Error('too many redirects while fetching subscription')
@@ -165,13 +172,21 @@ const fetchSubscriptionResponse = async (initialUrl, fetchImpl, lookup, userAgen
       throw err
     }
 
-    return res
+    // 最后那跳没给就用重定向路上看到的那份
+    return { res, usage: userinfoFromHeaders(res.headers) || hopUsage }
   }
 }
 
 export const fetchSubscriptionText = async (url, fetchImpl, lookup, userAgent) => {
-  const res = await fetchSubscriptionResponse(url, fetchImpl, lookup, userAgent)
+  const { res } = await fetchSubscriptionResponse(url, fetchImpl, lookup, userAgent)
   return readSubscriptionBody(res, MAX_SUBSCRIPTION_RESPONSE_BYTES)
+}
+
+// 正文 + 响应头里的流量 / 到期信息(engine/subscription-userinfo.mjs);没有这个头就是 null
+export const fetchSubscriptionPayload = async (url, fetchImpl, lookup, userAgent) => {
+  const { res, usage } = await fetchSubscriptionResponse(url, fetchImpl, lookup, userAgent)
+  const text = await readSubscriptionBody(res, MAX_SUBSCRIPTION_RESPONSE_BYTES)
+  return { text, usage }
 }
 
 // 一个节点都没解析出来时,把原因说清楚。以前这种情况是"静默成功":订阅照样存下、
@@ -179,21 +194,43 @@ export const fetchSubscriptionText = async (url, fetchImpl, lookup, userAgent) =
 // 协议不支持——用户除了反复点刷新无事可做。
 const describeEmptyResult = ({ format, skipped }) => {
   if (format === 'unknown') {
-    return '无法识别订阅内容的格式(既不是 Clash YAML、sing-box JSON,也不是分享链接)。' +
+    return '无法识别订阅内容的格式（既不是 Clash YAML、sing-box JSON,也不是分享链接）。' +
       '请确认订阅地址填的是订阅链接本身,而不是机场的网页地址。'
   }
   const types = [...new Set((skipped || []).map((s) => s.type).filter(Boolean))]
   if (types.length) {
-    return `订阅解析成功(${format} 格式),但其中 ${skipped.length} 个节点使用的协议都不受支持:` +
+    return `订阅解析成功（${format} 格式）,但其中 ${skipped.length} 个节点使用的协议都不受支持:` +
       `${types.join('、')}。`
   }
-  return `订阅解析成功(${format} 格式),但里面一个节点都没有。`
+  return `订阅解析成功（${format} 格式）,但里面一个节点都没有。`
 }
 
-// 定期更新:{ enabled, days(1~30), hour(0~23) }——每隔几天、几点重新拉一次(system/scheduler.mjs
-// 到点来做)。关掉或不合法就是 null。小时粒度和后端设置里 Geo / 自身升级的计划一致。
+// 所有尝试都被服务器按状态码拒了:按状态码说原因,一句话、给出下一步(用户 2026-09-30:瞬云订阅链接失效,刷新没有任何提示、
+// 以前的报错把 12 次尝试逐条列出来还让去问机场)。逐条的明细只进日志
+const LINK_INVALID_STATUSES = new Set([401, 403, 404, 410])
+export const describeRejection = (statuses, tried) => {
+  // 第一次请求就 429 才是真限流;先被 403 拒、换 UA 重试时才 429,那是我们自己敲出来的,原因还是前面的状态码
+  if (statuses[0] === 429) return '订阅服务器限流了(HTTP 429,请求太频繁),过一会儿再刷新'
+  const codes = [...new Set(statuses.filter((c) => c !== 429))].sort((a, b) => a - b)
+  const codeText = `HTTP ${codes.join(' / ')}`
+  if (codes.length && codes.every((c) => LINK_INVALID_STATUSES.has(c))) {
+    return `订阅链接被机场拒绝(${codeText},换了 ${tried} 种客户端标识都一样):多半是订阅链接已重置或失效,节点通常也跟着失效。请到机场网站复制新的订阅链接,点这条订阅的「修改」换上`
+  }
+  if (codes.length && codes.every((c) => c >= 500)) return `订阅服务器出错(${codeText}),稍后再试;一直这样请联系机场`
+  return `订阅服务器拒绝了请求(${codeText},换了 ${tried} 种客户端标识都不行),请联系机场确认是否限制第三方客户端`
+}
+const hostOf = (url) => { try { return new URL(url).hostname } catch { return '订阅地址' } }
+
+// 定期更新,两种写法(system/scheduler.mjs 到点来做),关掉或不合法就是 null:
+//   · { enabled, days(1~30), hour(0~23) }——每隔几天、几点重新拉一次,和后端设置里自身升级的计划一致;
+//   · { enabled, mode: 'hours', hours(1~23) }——每隔几小时拉一次,从上一次拉取算起(GitHub #14:
+//     CF 优选这类订阅一天要换几次 IP,按天太慢)。
 export const normalizeAutoUpdate = (raw) => {
   if (!raw || typeof raw !== 'object' || raw.enabled !== true) return null
+  if (raw.mode === 'hours') {
+    const hours = Math.min(23, Math.max(1, Math.round(Number(raw.hours)) || 6))
+    return { enabled: true, mode: 'hours', hours }
+  }
   const days = Math.min(30, Math.max(1, Math.round(Number(raw.days)) || 1))
   const hour = Math.min(23, Math.max(0, Math.round(Number(raw.hour)) || 0))
   return { enabled: true, days, hour }
@@ -262,6 +299,8 @@ export const resolveNodes = async ({ url, urls, content, name }, fetchImpl, rena
       format: parsed.format,
       preview: previewRename(kept, opts),
       renameOptions: base,
+      // 机场给的已用 / 总量 / 到期(响应头 subscription-userinfo),粘贴内容的订阅没有
+      usage: parsed.usage || null,
     }
   }
 
@@ -281,25 +320,37 @@ export const resolveNodes = async ({ url, urls, content, name }, fetchImpl, rena
   const fetchOne = async (oneUrl) => {
     let firstParsed = null
     const rejected = []
+    // 服务器回的状态码(按它说原因);429 = 限流,再换 UA 接着敲只会更久,立刻停
+    const statuses = []
+    // curl 那一轮本身没跑完(传输中断、连不上):服务器要是已经回了 2xx,就不是「被拒」,是没下载完整
+    let curlFailure = null
+    // Node 这边不是被状态码拒、而是传输 / 解析层抛错(典型:机场响应头超长,undici 报
+    // HPE_HEADER_OVERFLOW,GitHub #3):换 UA 没意义,但系统 curl 的解析器不受这个限制,拿第一个 UA 试一次
+    let transportError = null
     for (const userAgent of SUBSCRIPTION_USER_AGENTS) {
       let text
+      let usage = null
       try {
-        text = await fetchSubscriptionText(oneUrl, fetchImpl, lookup, userAgent)
+        ({ text, usage } = await fetchSubscriptionPayload(oneUrl, fetchImpl, lookup, userAgent))
       } catch (err) {
         if (err && err.httpStatus) {
           rejected.push(`${userAgent} → HTTP ${err.httpStatus}`)
+          statuses.push(err.httpStatus)
+          if (err.httpStatus === 429) break
           continue
         }
-        throw err
+        transportError = err
+        rejected.push(`${userAgent} → ${errorMessage(err)}`)
+        break
       }
       const parsed = parseSubscription(text)
-      if (parsed.nodes.length) return parsed
+      if (parsed.nodes.length) return { ...parsed, usage }
       if (!firstParsed) firstParsed = parsed
     }
     // Node fetch 全被按状态码拒了:换系统 curl 再来一轮。有些机场的 WAF 认的是 TLS / HTTP 指纹而不是 UA——
     // 同一台机器、同一个出口、同一个 UA,Node 403、curl 200(GitHub #37)。curl 那边同样逐跳校验地址、钉死解析
-    if (curl && rejected.length) {
-      for (const userAgent of SUBSCRIPTION_USER_AGENTS) {
+    if (curl && rejected.length && !statuses.includes(429)) {
+      for (const userAgent of transportError ? SUBSCRIPTION_USER_AGENTS.slice(0, 1) : SUBSCRIPTION_USER_AGENTS) {
         let r
         try {
           r = await curl(oneUrl, { userAgent, lookup, maxBytes: MAX_SUBSCRIPTION_RESPONSE_BYTES, timeoutMs: SUBSCRIPTION_FETCH_TIMEOUT_MS })
@@ -308,18 +359,37 @@ export const resolveNodes = async ({ url, urls, content, name }, fetchImpl, rena
           break
         }
         if (!r || r.available === false) break
-        if (!r.status) { rejected.push(`curl ${userAgent} → ${r.error || 'failed'}`); break }
-        if (r.status < 200 || r.status >= 300) { rejected.push(`curl ${userAgent} → HTTP ${r.status}`); continue }
+        if (!r.status) {
+          rejected.push(`curl ${userAgent} → ${r.error || 'failed'}`)
+          curlFailure = r
+          break
+        }
+        if (r.status < 200 || r.status >= 300) {
+          rejected.push(`curl ${userAgent} → HTTP ${r.status}`)
+          statuses.push(r.status)
+          if (r.status === 429) break
+          continue
+        }
         const parsed = parseSubscription(r.text || '')
         if (parsed.nodes.length) {
-          console.log(`[subscription] Node fetch 全部被拒,改用系统 curl 拿到 ${(r.text || '').length} 字节(UA=${userAgent})`)
-          return parsed
+          console.log(`[subscription] Node fetch 全部被拒,改用系统 curl 拿到 ${(r.text || '').length} 字节（UA=${userAgent}）`)
+          return { ...parsed, usage: r.usage || null }
         }
         if (!firstParsed) firstParsed = parsed
       }
     }
     if (firstParsed) throw new Error(describeEmptyResult(firstParsed))
-    throw new Error(`订阅服务器拒绝了所有客户端标识(User-Agent),请联系机场确认是否限制第三方客户端:\n${rejected.join('\n')}`)
+    // 传输层的错原样抛(SSRF 校验、DNS 不通这些的报错文案上层和测试都认它);curl 那一轮的结果只进日志
+    if (transportError) {
+      if (rejected.length > 1) console.log(`[subscription] Node fetch 出错后系统 curl 也没拿到节点:${rejected.slice(1).join(';')}`)
+      throw transportError
+    }
+    console.log(`[subscription] ${hostOf(oneUrl)} 全部被拒:${rejected.join(';')}`)
+    if (curlFailure && curlFailure.httpStatus >= 200 && curlFailure.httpStatus < 300) {
+      throw new Error(`订阅内容没下载完整(${curlFailure.error || '传输中断'}),稍后再试`)
+    }
+    const tried = new Set(rejected.map((r) => r.replace(/^curl /, '').split(' → ')[0])).size
+    throw new Error(describeRejection(statuses, tried))
   }
 
   // 多个地址:逐个拉,任何一个失败整次失败——刷新时不能因为一个地址暂时不通就把它那份
@@ -345,7 +415,7 @@ export const resolveNodes = async ({ url, urls, content, name }, fetchImpl, rena
     }
   }
   const formats = [...new Set(parts.map((p) => p.format))]
-  return finish({ nodes, skipped: parts.flatMap((p) => p.skipped), format: formats.join('+') })
+  return finish({ nodes, skipped: parts.flatMap((p) => p.skipped), format: formats.join('+'), usage: (parts.find((p) => p.usage) || {}).usage || null })
 }
 
 // 把某订阅的新节点并入全局节点池:其它订阅的节点原样保留,按 subscriptions 记录的顺序
@@ -411,23 +481,37 @@ export const refreshSubscriptionById = async (store, id, { fetchImpl = subscript
     || current.name !== existing.name
     || (!renameOptions && !same(current.renameOptions || {}, existing.renameOptions || {}))
   if (settingsChanged) throw new Error('subscription was modified while refreshing; refresh it again')
-  const updated = { ...current, format, nodeCount: renamed.length, renameOptions: resolved.renameOptions || {}, updatedAt: Date.now() }
+  const updated = { ...current, format, nodeCount: renamed.length, renameOptions: resolved.renameOptions || {}, updatedAt: Date.now(), ...(resolved.usage ? { usage: { ...resolved.usage, at: Date.now() } } : {}) }
   const newNodesForSub = renamed.map((n) => ({ ...n, subscriptionId: id }))
   store.setNodes(rebuildNodePool(store.getNodes(), nowSubs, id, newNodesForSub))
   store.setSubscriptions(nowSubs.map((s) => (s.id === id ? updated : s)))
   return { id, name: updated.name, nodeCount: renamed.length, skipped }
 }
 
-export const registerSubscriptionRoutes = (app, { store, fetchImpl = subscriptionFetch, lookup = dns.lookup, curlFetch } = {}) => {
+// 在线更新的结果交给前端的样子:ok / 换了几个出站 / 没换进去的原因(内核没在跑时 skipped,启动就用上新的)
+export const appliedSummary = (r) => (r
+  ? { ok: r.ok !== false, changed: Number(r.changed) || 0, ...(r.skipped ? { skipped: r.skipped } : {}), ...(r.ok === false ? { reason: r.reason || '' } : {}) }
+  : undefined)
+
+// kernelStale:system/kernel-stale.mjs;列表里给每条订阅带上「内核还在用旧定义的节点有几个」(在线更新没换进去时才会不是 0)
+// applyNow:把此刻的节点在线换进内核(api/hot-apply.mjs 的 createHotApplier().runNow),不重启
+export const registerSubscriptionRoutes = (app, { store, fetchImpl = subscriptionFetch, lookup = dns.lookup, curlFetch, kernelStale = null, applyNow = null } = {}) => {
   const router = express.Router({ caseSensitive: true })
   router.use(express.json({ limit: '10mb' }))
 
-  // 订阅的任何动作都不自动重启内核——重启会把连接全断一次,什么时候重启该由用户决定。
-  // 但要如实告诉前端节点池变没变(新增 / 刷新 / 换地址 / 删除 / 排序都可能变),变了面板才提示
-  // "重启内核生效";上游没动的刷新、只是把规则原样存一遍,就说"节点没有变化"。每个路由进来
-  // 先拍一张节点池快照,写完再比一次:tag / 服务器 / 参数任何一处不同都算变。
+  // 订阅的任何动作都不重启内核(用户 2026-09-30:更新订阅节点不应该重启内核)。节点池变了(新增 / 刷新 / 换地址 / 删除 /
+  // 排序 / 启停)就在线换进内核再回复,前端拿到回复时内核里已经是新节点;上游没动的刷新、只是把规则原样存一遍,
+  // 就说"节点没有变化"。每个路由进来先拍一张节点池快照,写完再比一次:tag / 服务器 / 参数任何一处不同都算变。
   const snapshot = () => JSON.stringify(store.getNodes())
   const changedSince = (before) => snapshot() !== before
+  const applyIfChanged = async (changed) => {
+    if (!changed || typeof applyNow !== 'function') return undefined
+    try {
+      return appliedSummary(await applyNow())
+    } catch (error) {
+      return { ok: false, changed: 0, reason: errorMessage(error) }
+    }
+  }
 
   // 预览:纯解析/改名/分组,不落库。
   router.post('/preview', async (req, res) => {
@@ -438,6 +522,7 @@ export const registerSubscriptionRoutes = (app, { store, fetchImpl = subscriptio
       const { groups } = groupNodesByRegion(renamed, resolved.renameOptions)
       res.json({
         format,
+        usage: resolved.usage || null,
         nodes: renamed.map(nodeSummary),
         skipped,
         // 被过滤/被禁用的条目要如实报出来:它们会让节点凭空消失,不列出来的话
@@ -456,9 +541,11 @@ export const registerSubscriptionRoutes = (app, { store, fetchImpl = subscriptio
   router.post('/', async (req, res) => {
     const before = snapshot()
     try {
-      const { url, urls, content, name, renameOptions, autoUpdate } = req.body || {}
+      const { url, urls, content, name, renameOptions, autoUpdate, nodeDns } = req.body || {}
       const source = normalizeSource({ url, urls, content })
       if (typeof name !== 'string' || !name.trim()) throw new Error('name is required')
+      const nodeDnsError = validateNodeDns(nodeDns)
+      if (nodeDnsError) throw new Error(nodeDnsError)
 
       const resolved = await resolveNodes({ ...source, name }, fetchImpl, renameOptions, lookup, { curlFetch })
       const { renamed, skipped, format } = resolved
@@ -477,8 +564,11 @@ export const registerSubscriptionRoutes = (app, { store, fetchImpl = subscriptio
         format,
         nodeCount: renamed.length,
         renameOptions: resolved.renameOptions || {},
+        ...(resolved.usage ? { usage: { ...resolved.usage, at: now } } : {}),
         // 定期更新计划;粘贴来的订阅没有地址可回源,不给计划
         autoUpdate: source.urls ? normalizeAutoUpdate(autoUpdate) : null,
+        // 节点服务器域名的专用解析器(GitHub #136,engine/node-dns.mjs);没配就不存这个键
+        ...(normalizeNodeDns(nodeDns) ? { nodeDns: normalizeNodeDns(nodeDns) } : {}),
         createdAt: now,
         updatedAt: now,
       }
@@ -488,15 +578,22 @@ export const registerSubscriptionRoutes = (app, { store, fetchImpl = subscriptio
       store.setNodes(rebuildNodePool(store.getNodes(), subsInOrder, id, newNodesForSub))
       store.setSubscriptions(subsInOrder)
 
-      res.json({ id, name, nodeCount: renamed.length, skipped, changed: changedSince(before) })
+      const changed = changedSince(before)
+      res.json({ id, name, nodeCount: renamed.length, skipped, changed, applied: await applyIfChanged(changed) })
     } catch (err) {
       res.status(400).json({ error: errorMessage(err) })
     }
   })
 
   // 列表
-  router.get('/', (_req, res) => {
-    res.json({ subscriptions: store.getSubscriptions() })
+  router.get('/', async (_req, res) => {
+    const subs = store.getSubscriptions()
+    let stale = null
+    if (kernelStale) {
+      // 现算不用缓存:刚刷新完订阅,紧接着拉列表就要看到「重启内核生效」
+      try { stale = (await kernelStale.refresh()).bySubscription } catch { /* 算不出来就不提示 */ }
+    }
+    res.json({ subscriptions: stale ? subs.map((s) => ({ ...s, kernelStale: stale[s.id] || 0 })) : subs })
   })
 
   // 排序:ids 是全部订阅 id 的新顺序(必须一一对应,不能多也不能少)。节点池也按新顺序
@@ -516,7 +613,8 @@ export const registerSubscriptionRoutes = (app, { store, fetchImpl = subscriptio
     const ordered = ids.map((id) => byId.get(id))
     store.setSubscriptions(ordered)
     store.setNodes(orderNodesBySubscriptions(store.getNodes(), ordered))
-    res.json({ ok: true, subscriptions: ordered, changed: changedSince(before) })
+    const changed = changedSince(before)
+    res.json({ ok: true, subscriptions: ordered, changed, applied: await applyIfChanged(changed) })
   })
 
   // 删除:同时清掉该订阅的节点。幂等——id 不存在也返回 ok:true。
@@ -526,7 +624,8 @@ export const registerSubscriptionRoutes = (app, { store, fetchImpl = subscriptio
     store.setSubscriptions(store.getSubscriptions().filter((s) => s.id !== id))
     store.setNodes(store.getNodes().filter((n) => n.subscriptionId !== id))
     // 本来就不存在的 id、或者本来就没有节点的订阅:节点池没变,changed 就是 false
-    res.json({ ok: true, changed: changedSince(before) })
+    const changed = changedSince(before)
+    res.json({ ok: true, changed, applied: await applyIfChanged(changed) })
   })
 
   // 修改:改名 / 换订阅链接 / 调整重命名规则。
@@ -554,6 +653,18 @@ export const registerSubscriptionRoutes = (app, { store, fetchImpl = subscriptio
       if (body.enabled !== undefined && typeof body.enabled !== 'boolean') throw new Error('enabled must be a boolean')
       const enabled = body.enabled === undefined ? existing.enabled !== false : body.enabled
       const enabledFlipped = enabled !== (existing.enabled !== false)
+      // 节点专用解析器(#136):只是记录,改它不用重拉;但内核配置跟着变,算"变了"。传 null / 空地址就是去掉
+      if (body.nodeDns !== undefined) {
+        const nodeDnsError = validateNodeDns(body.nodeDns)
+        if (nodeDnsError) throw new Error(nodeDnsError)
+      }
+      const nodeDns = body.nodeDns === undefined ? normalizeNodeDns(existing.nodeDns) : normalizeNodeDns(body.nodeDns)
+      const nodeDnsChanged = JSON.stringify(nodeDns) !== JSON.stringify(normalizeNodeDns(existing.nodeDns))
+      const withNodeDns = (record) => {
+        const rest = { ...record }
+        delete rest.nodeDns
+        return nodeDns ? { ...rest, nodeDns } : rest
+      }
 
       // url(s) / content 两者都没传时沿用已存的来源;创建时就保证了至少有一个非空。
       const urls = body.urls === undefined && body.url === undefined
@@ -577,9 +688,10 @@ export const registerSubscriptionRoutes = (app, { store, fetchImpl = subscriptio
         JSON.stringify(renameOptions || {}) !== JSON.stringify(existing.renameOptions || {})
 
       if (!needsRefetch) {
-        const updated = { ...existing, name, autoUpdate, enabled, updatedAt: Date.now() }
+        const updated = withNodeDns({ ...existing, name, autoUpdate, enabled, updatedAt: Date.now() })
         store.setSubscriptions(subs.map((s, i) => (i === idx ? updated : s)))
-        res.json({ id, name, nodeCount: existing.nodeCount, skipped: [], changed: enabledFlipped })
+        const changed = enabledFlipped || nodeDnsChanged
+        res.json({ id, name, nodeCount: existing.nodeCount, skipped: [], changed, applied: await applyIfChanged(changed) })
         return
       }
 
@@ -597,6 +709,7 @@ export const registerSubscriptionRoutes = (app, { store, fetchImpl = subscriptio
         format,
         nodeCount: renamed.length,
         renameOptions: resolved.renameOptions || {},
+        ...(resolved.usage ? { usage: { ...resolved.usage, at: Date.now() } } : {}),
         updatedAt: Date.now(),
       }
       const newNodesForSub = renamed.map((n) => ({ ...n, subscriptionId: id }))
@@ -606,9 +719,10 @@ export const registerSubscriptionRoutes = (app, { store, fetchImpl = subscriptio
       const nowSubs = store.getSubscriptions()
       if (!nowSubs.some((s) => s.id === id)) throw new Error('subscription was deleted while refreshing')
       store.setNodes(rebuildNodePool(store.getNodes(), nowSubs, id, newNodesForSub))
-      store.setSubscriptions(nowSubs.map((s) => (s.id === id ? { ...s, ...updated } : s)))
+      store.setSubscriptions(nowSubs.map((s) => (s.id === id ? withNodeDns({ ...s, ...updated }) : s)))
 
-      res.json({ id, name, nodeCount: renamed.length, skipped, changed: changedSince(before) || enabledFlipped })
+      const changed = changedSince(before) || enabledFlipped || nodeDnsChanged
+      res.json({ id, name, nodeCount: renamed.length, skipped, changed, applied: await applyIfChanged(changed) })
     } catch (err) {
       res.status(400).json({ error: errorMessage(err) })
     }
@@ -625,7 +739,8 @@ export const registerSubscriptionRoutes = (app, { store, fetchImpl = subscriptio
     }
     try {
       const r = await refreshSubscriptionById(store, id, { fetchImpl, lookup, renameOptions: req.body && req.body.renameOptions, curlFetch })
-      res.json({ ...r, changed: changedSince(before) })
+      const changed = changedSince(before)
+      res.json({ ...r, changed, applied: await applyIfChanged(changed) })
     } catch (err) {
       res.status(400).json({ error: errorMessage(err) })
     }

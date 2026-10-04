@@ -3,7 +3,7 @@ import test from 'node:test'
 import { readFileSync } from 'node:fs'
 import { createMockContext } from './context.mjs'
 import { createPaths } from './paths.mjs'
-import { ensureRuleLists, fetchRuleList, listStatePath } from './rule-lists.mjs'
+import { ensureRuleLists, fetchRuleList, listStatePath, refreshRuleList } from './rule-lists.mjs'
 import { listTagForUrl } from '../engine/rule-list.mjs'
 
 const paths = createPaths('/opt/open-box')
@@ -22,7 +22,12 @@ test('第一次部署:拉回来、域名和 IP 各编成一份 .srs、记下时�
   assert.equal(r.ok, true)
   assert.deepEqual(r.updated, [TAG_A])
   const compiles = ctx.calls.filter((c) => c.args?.includes('compile'))
-  assert.deepEqual(compiles.map((c) => c.args[3]), [`${paths.rulesetDir}/${TAG_A}.srs`, `${paths.rulesetDir}/${TAG_A}-ip.srs`])
+  assert.deepEqual(compiles.map((c) => c.args[3]), [`${paths.rulesetDir}/${TAG_A}.srs.new`, `${paths.rulesetDir}/${TAG_A}-ip.srs.new`])
+  // 先编到 .new 再原子换上(#382:直接 --output 到内核正在监视的文件会被读到半截),临时文件不留
+  for (const out of [`${paths.rulesetDir}/${TAG_A}.srs`, `${paths.rulesetDir}/${TAG_A}-ip.srs`]) {
+    assert.ok(ctx.writes.some((w) => w.path === out && w.copiedFrom === `${out}.new`), out)
+    assert.equal(`${out}.new` in ctx.files, false)
+  }
   // 域名那份只有域名,IP 那份只有 IP:DNS 规则只能引用不含 IP 的规则集(见 engine/rule-list.mjs)
   const src = (name) => JSON.parse(ctx.writes.find((w) => w.path.endsWith(name)).content).rules
   assert.deepEqual(src(`${TAG_A}.json`), [{ domain_suffix: ['a.com'] }])
@@ -37,13 +42,13 @@ test('第一次部署:拉回来、域名和 IP 各编成一份 .srs、记下时�
 test('只有域名的名单不出 IP 那份,还要把上次留下的 -ip.srs 删掉;只有 IP 的名单反过来', async () => {
   const ctx = createMockContext({ files: { [paths.singbox]: 'x', [`${paths.rulesetDir}/${TAG_A}-ip.srs`]: 'stale' } })
   const r = await ensureRuleLists(ctx, paths, routing([URL_A]), { fetchImpl: okFetch('a.com\nb.com\n'), now: () => 1000 })
-  assert.deepEqual(ctx.calls.filter((c) => c.args?.includes('compile')).map((c) => c.args[3]), [`${paths.rulesetDir}/${TAG_A}.srs`])
+  assert.deepEqual(ctx.calls.filter((c) => c.args?.includes('compile')).map((c) => c.args[3]), [`${paths.rulesetDir}/${TAG_A}.srs.new`])
   assert.equal(await ctx.exists(`${paths.rulesetDir}/${TAG_A}-ip.srs`), false, '过期的 IP 那份要删')
   assert.deepEqual(r.lists, { [TAG_A]: { domain: true, ip: false } })
 
   const ctx2 = createMockContext({ files: { [paths.singbox]: 'x' } })
   const r2 = await ensureRuleLists(ctx2, paths, routing([URL_A]), { fetchImpl: okFetch('IP-CIDR,1.2.3.0/24\n10.0.0.1\n'), now: () => 1000 })
-  assert.deepEqual(ctx2.calls.filter((c) => c.args?.includes('compile')).map((c) => c.args[3]), [`${paths.rulesetDir}/${TAG_A}-ip.srs`])
+  assert.deepEqual(ctx2.calls.filter((c) => c.args?.includes('compile')).map((c) => c.args[3]), [`${paths.rulesetDir}/${TAG_A}-ip.srs.new`])
   assert.deepEqual(r2.lists, { [TAG_A]: { domain: false, ip: true } })
 })
 
@@ -83,8 +88,8 @@ test('本地是老版式、名单没到重下时间:用内核解开旧文件离�
   const cmds = ctx.calls.filter((c) => c.cmd === paths.singbox).map((c) => `${c.args[1]} ${c.args[3]}`)
   assert.deepEqual(cmds, [
     `decompile ${paths.dataDir}/tmp/${TAG_A}.legacy.json`,
-    `compile ${paths.rulesetDir}/${TAG_A}.srs`,
-    `compile ${paths.rulesetDir}/${TAG_A}-ip.srs`,
+    `compile ${paths.rulesetDir}/${TAG_A}.srs.new`,
+    `compile ${paths.rulesetDir}/${TAG_A}-ip.srs.new`,
   ])
   assert.deepEqual(r.lists, { [TAG_A]: { domain: true, ip: true } })
   const state = JSON.parse(ctx.writes.find((w) => w.path === listStatePath(paths)).content)
@@ -92,7 +97,7 @@ test('本地是老版式、名单没到重下时间:用内核解开旧文件离�
   assert.equal(state[TAG_A].at, 1000, '离线重编不算重下,时间戳不动')
 })
 
-test('老版式又解不开(比如文件坏了):改为重新拉取', async () => {
+test('老版式又解不开（比如文件坏了）:改为重新拉取', async () => {
   const ctx = createMockContext({ files: { [paths.singbox]: 'x', [`${paths.rulesetDir}/${TAG_A}.srs`]: 'bin', [listStatePath(paths)]: legacyState() } })
   const r = await ensureRuleLists(ctx, paths, routing([URL_A]), { fetchImpl: okFetch('a.com\n'), now: () => 1000 + 3600_000 })
   assert.deepEqual(r.updated, [TAG_A])
@@ -146,8 +151,34 @@ test('链接指向 .mrs:自己解开 zstd,编出来的和文本名单走同一�
   assert.equal(src.rules[0].domain_suffix.length, 11)
   assert.ok(src.rules[0].domain_suffix.includes('tesla.com'))
   // 还是那一句 rule-set compile,内核那边完全不知道来源是 .mrs;纯域名的 .mrs 不出 IP 那份
-  assert.deepEqual(ctx.calls.filter((c) => c.args?.includes('compile')).map((c) => c.args[3]), [`${paths.rulesetDir}/${TAG_A}.srs`])
+  assert.deepEqual(ctx.calls.filter((c) => c.args?.includes('compile')).map((c) => c.args[3]), [`${paths.rulesetDir}/${TAG_A}.srs.new`])
   assert.deepEqual(r.lists, { [TAG_A]: { domain: true, ip: false } })
+})
+
+// GitHub #217:链接指向 sing-box 编好的 .srs(one-geoip 的 one-china.srs 那种)。JS 不自己解,写成临时文件让内核
+// rule-set decompile 出源格式,再按同一套拆成域名 / IP 两份重编。只有 IP 的名单不出域名那份
+test('链接指向 .srs:交给内核解开,再拆成域名 / IP 两份重编;临时文件用完删掉', async () => {
+  const srs = Buffer.concat([Buffer.from('SRS\x03', 'latin1'), Buffer.from('binary-payload')])
+  const decompiled = { [`${paths.dataDir}/tmp/${TAG_A}.srs.json`]: JSON.stringify({ version: 3, rules: [{ ip_cidr: ['1.0.1.0/24', '1.0.2.0/23'] }, { domain_suffix: 'cn' }] }) }
+  const ctx = createMockContext({ files: { [paths.singbox]: 'x', ...decompiled } })
+  const r = await ensureRuleLists(ctx, paths, routing([URL_A]), { fetchImpl: okFetch(srs), now: () => 1000 })
+  assert.equal(r.ok, true, r.message)
+  const cmds = ctx.calls.filter((c) => c.cmd === paths.singbox).map((c) => `${c.args[1]} ${c.args[3]}`)
+  assert.deepEqual(cmds, [
+    `decompile ${paths.dataDir}/tmp/${TAG_A}.srs.json`,
+    `compile ${paths.rulesetDir}/${TAG_A}.srs.new`,
+    `compile ${paths.rulesetDir}/${TAG_A}-ip.srs.new`,
+  ])
+  const ipSrc = JSON.parse(ctx.writes.find((w) => w.path.endsWith(`${TAG_A}-ip.json`)).content)
+  assert.deepEqual(ipSrc.rules[0].ip_cidr, ['1.0.1.0/24', '1.0.2.0/23'])
+  assert.deepEqual(r.lists, { [TAG_A]: { domain: true, ip: true } })
+  assert.equal(ctx.files[`${paths.dataDir}/tmp/${TAG_A}.srs`], undefined, '临时 .srs 用完删掉')
+  assert.equal(ctx.files[`${paths.dataDir}/tmp/${TAG_A}.srs.json`], undefined, '解出来的 JSON 也删掉')
+  // 内核解不开:整条失败(本地没有旧的就让部署停下来)
+  const bad = createMockContext({ files: { [paths.singbox]: 'x' }, defaultExec: { code: 1, stdout: '', stderr: 'invalid rule-set' } })
+  const r2 = await ensureRuleLists(bad, paths, routing([URL_A]), { fetchImpl: okFetch(srs), now: () => 1000 })
+  assert.equal(r2.ok, false)
+  assert.match(r2.message, /解不开/)
 })
 
 // 审查第 4 项:超时和 8MB 上限要管到响应体读完为止
@@ -195,10 +226,49 @@ test('fetchRuleList:响应头到了但正文一直不结束 → 总超时照样�
   assert.ok(Date.now() - t0 < 2000)
 })
 
-test('fetchRuleList:正常大小的流式响应照常读完;没有流的响应(旧桩)走一次性读', async () => {
+test('fetchRuleList:正常大小的流式响应照常读完;没有流的响应（旧桩）走一次性读', async () => {
   const fetchImpl = async () => new Response(streamOf({ chunk: 3, count: 4 }), { status: 200 })
   const buf = await fetchRuleList(fetchImpl, 'https://example.com/list.txt')
   assert.equal(buf.length, 12)
   const plain = await fetchRuleList(async () => ({ ok: true, status: 200, arrayBuffer: async () => Buffer.from('DOMAIN-SUFFIX,a.com\n') }), 'https://example.com/list.txt')
   assert.equal(plain.toString(), 'DOMAIN-SUFFIX,a.com\n')
+})
+
+test('立即更新(#155):没到重下时间也重拉重编、时间记成现在;构成没变不用重启,多出 IP 那一份才要;拉不动本地那份原样留着', async () => {
+  const files = () => ({
+    [paths.singbox]: 'x',
+    [`${paths.rulesetDir}/${TAG_A}.srs`]: 'old',
+    [listStatePath(paths)]: JSON.stringify({ [TAG_A]: { url: URL_A, at: 1000, split: 2, counts: { domain_suffix: 1 } }, other: { url: 'https://b.test/x', at: 5 } }),
+  })
+  // 部署那条路这时候是不拉的
+  let fetched = 0
+  const counting = (body) => async () => { fetched += 1; return okFetch(body)() }
+  await ensureRuleLists(createMockContext({ files: files() }), paths, routing([URL_A]), { fetchImpl: counting('a.com'), now: () => 2000 })
+  assert.equal(fetched, 0)
+  const ctx = createMockContext({ files: files() })
+
+  const r = await refreshRuleList(ctx, paths, URL_A, { fetchImpl: counting('DOMAIN-SUFFIX,a.com\nDOMAIN-SUFFIX,abcd.com\n'), now: () => 3000 })
+  assert.equal(fetched, 1)
+  assert.equal(r.tag, TAG_A)
+  assert.deepEqual(r.tags, [TAG_A, `${TAG_A}-ip`])
+  assert.equal(r.total, 2)
+  assert.equal(r.shapeChanged, false)
+  const state = () => JSON.parse(ctx.writes.filter((w) => w.path === listStatePath(paths)).at(-1).content)
+  assert.equal(state()[TAG_A].at, 3000)
+  assert.deepEqual(state()[TAG_A].counts, { domain_suffix: 2 })
+  assert.deepEqual(state().other, { url: 'https://b.test/x', at: 5 }, '别的名单的状态不动')
+  assert.deepEqual(ctx.calls.filter((c) => c.args?.includes('compile')).map((c) => c.args[3]), [`${paths.rulesetDir}/${TAG_A}.srs.new`])
+
+  // 名单里多了 IP:配置里要多引用一份 -ip.srs,得重启内核
+  const grown = await refreshRuleList(ctx, paths, URL_A, { fetchImpl: okFetch('a.com\n1.2.3.0/24\n'), now: () => 4000 })
+  assert.equal(grown.shapeChanged, true)
+
+  // 拉不动:抛出去,状态和文件都不动
+  const before = state()
+  await assert.rejects(refreshRuleList(ctx, paths, URL_A, { fetchImpl: async () => { throw new Error('ECONNRESET') }, now: () => 5000 }))
+  assert.deepEqual(state(), before)
+
+  // 还没部署过的链接:第一次编出来不算「构成变了」
+  const fresh = createMockContext({ files: { [paths.singbox]: 'x' } })
+  assert.equal((await refreshRuleList(fresh, paths, URL_A, { fetchImpl: okFetch('a.com\n1.2.3.0/24\n') })).shapeChanged, false)
 })

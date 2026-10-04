@@ -36,6 +36,21 @@ test('decideDnsServer:域名条件本地判;规则集经内核;都不中落到 f
   assert.equal(c.server.tag, 'dns-proxy'); assert.equal(c.ruleIndex, null)
 })
 
+test('decideDnsServer:按 MAC 的终端规则(source_mac_address)——给了 MAC 就实判,没给记成前提', async () => {
+  const cfg = {
+    dns: {
+      servers: [{ tag: 'dns-direct', type: 'udp', server: '223.5.5.5' }, { tag: 'dns-client-0', type: 'tcp', server: '1.1.1.1', detour: 'HK' }],
+      rules: [{ source_mac_address: ['aa:bb:cc:00:00:09'], server: 'dns-client-0' }],
+      final: 'dns-direct',
+    },
+  }
+  const ctx = createMockContext()
+  assert.equal((await decideDnsServer(ctx, paths, cfg, 'example.org', { sourceIp: '10.0.0.9', sourceMac: 'aa:bb:cc:00:00:09' })).server.tag, 'dns-client-0')
+  assert.equal((await decideDnsServer(ctx, paths, cfg, 'example.org', { sourceIp: '10.0.0.8', sourceMac: 'aa:bb:cc:00:00:08' })).ruleIndex, null)
+  const unknown = await decideDnsServer(ctx, paths, cfg, 'example.org', { sourceIp: '10.0.0.7' })
+  assert.deepEqual(unknown.assumed.map((a) => [a.needs, a.sourceMac]), [[['sourceMac'], ['aa:bb:cc:00:00:09']]])
+})
+
 test('POST /route-test:内核解析 + 真实访问 + 在连接表里找到这条连接的链路', async () => {
   // 规则集文件要在:第一条 dns 规则是 rule_set,缺文件会被判成"没法确认"而不是"不命中"
   const ctx = createMockContext({ files: { [paths.configPath]: JSON.stringify(config), [paths.singbox]: 'x', [`${paths.geoDir}/geosite-openai.srs`]: 'x' } })
@@ -82,7 +97,7 @@ test('POST /route-test:访问失败也报出站链路——请求挂着的时候
         // 别的终端到同一目标的连接,更新、走直连——不能被当成探测连接
         { metadata: { type: 'tun/tun-in', host: '', destinationIP: '8.8.8.8', destinationPort: '53', sourceIP: '192.168.3.10' }, chains: ['直连', '国内'], rule: 'x', start: '2026-09-05T00:00:01Z' },
         // 面板探测的那条:访问失败前在表里,失败后立刻消失
-        ...(withProbeConn && !probeDone ? [{ metadata: { type: 'mixed/panel-in', host: '', destinationIP: '8.8.8.8', destinationPort: '80', sourceIP: '127.0.0.1' }, chains: ['VW | 香港-OS-01', '香港-自动', '国外'], rule: 'rule_set=[geoip-google] => route(国外)', start: '2026-09-05T00:00:00Z' }] : []),
+        ...(withProbeConn && !probeDone ? [{ metadata: { type: 'mixed/panel-in', host: '', destinationIP: '8.8.8.8', destinationPort: '80', sourceIP: '127.0.0.1' }, chains: ['VW | 香港-OS-01', '香港-自动', '国外'], rule: 'rule_set=[geoip-google] => route（国外）', start: '2026-09-05T00:00:00Z' }] : []),
       ] }) }
       throw new Error('unexpected fetch ' + url)
     }
@@ -165,13 +180,15 @@ test('DNS 规则过期:内核里的选择和配置里定死的判断对不上就
   assert.equal(staleProxy.stale, 'proxy')
 })
 
-test('fake-ip:代理侧解析回 198.15.x.x 就标出是 detour 此刻落到的那个节点答的;直连解析回 fake-ip 不带节点', async () => {
-  assert.equal(isFakeIp('198.15.0.55'), true)
-  assert.equal(isFakeIp('198.16.255.1'), true)
+test('fake-ip:代理侧解析回 198.19.x.x 就标出是 detour 此刻落到的那个节点答的;直连解析回 fake-ip 不带节点', async () => {
+  assert.equal(isFakeIp('198.19.0.55'), true)
+  assert.equal(isFakeIp('198.18.255.1'), true)
   assert.equal(isFakeIp('198.17.0.1'), false)
   assert.equal(isFakeIp('142.250.66.4'), false)
   assert.equal(isFakeIp('fc00::1'), true)
   assert.equal(isFakeIp('fd00::1'), false)
+  for (const ip of ['198.18.0.0', '198.19.255.255', 'fc00:3fff:ffff:ffff:ffff:ffff:ffff:ffff']) assert.equal(isFakeIp(ip), true, ip)
+  for (const ip of ['198.15.0.1', '198.16.255.1', '198.20.0.0', '198.19.999.1', '198.19.1.1/16', 'fc00:4000::1', 'fc01::1', 'fc3f::1', 'fc00::garbage']) assert.equal(isFakeIp(ip), false, ip)
   const config = {
     dns: {
       servers: [
@@ -204,7 +221,7 @@ test('fake-ip:代理侧解析回 198.15.x.x 就标出是 detour 此刻落到的�
       await new Promise((r) => server.close(r))
     }
   }
-  const viaProxy = await run('www.google.com', '198.15.0.55')
+  const viaProxy = await run('www.google.com', '198.19.0.55')
   assert.equal(viaProxy.fakeIp, true)
   assert.equal(viaProxy.fakeIpFrom, 'VW | 香港-HOME-01')
   assert.deepEqual(viaProxy.chain, ['Google', '香港-自动', 'VW | 香港-HOME-01'])
@@ -214,7 +231,7 @@ test('fake-ip:代理侧解析回 198.15.x.x 就标出是 detour 此刻落到的�
   // 代理侧解析几毫秒就回来 = 命中内核缓存;TTL 原样带回去
   assert.equal(real.ttl, 287)
   assert.equal(real.cached, true)
-  const direct = await run('www.example.org', '198.15.1.2')
+  const direct = await run('www.example.org', '198.19.1.2')
   assert.equal(direct.fakeIp, true)
   assert.equal(direct.fakeIpFrom, undefined)
   assert.equal(direct.chain, undefined)
@@ -294,7 +311,7 @@ test('档案开了 IPv6:再查一次 AAAA,单独放 answers6;没开就没有这�
   assert.deepEqual(asked, ['A'])
 })
 
-test('decideDnsServer:带来源条件的 DNS 规则——没给来源 IP 判不了;给了按来源判;拒绝规则报 rejected(复审 R5)', async () => {
+test('decideDnsServer:带来源条件的 DNS 规则——没给来源 IP 判不了;给了按来源判;拒绝规则报 rejected（复审 R5）', async () => {
   const cfg = {
     dns: {
       servers: [{ type: 'udp', tag: 'dns-direct', server: '9.9.9.9' }, { type: 'tcp', tag: 'dns-client-0', server: '1.1.1.1', detour: '香港-自动' }],
@@ -320,7 +337,7 @@ test('decideDnsServer:带来源条件的 DNS 规则——没给来源 IP 判不�
   assert.equal(rejected.rejected, true)
 })
 
-test('S4:指定终端来源时,响应明确标出 DNS 判定是按终端预测的、解析和访问是面板自己发起的,没有该终端的来源(不冒充该终端实测)', async () => {
+test('S4:指定终端来源时,响应明确标出 DNS 判定是按终端预测的、解析和访问是面板自己发起的,没有该终端的来源（不冒充该终端实测）', async () => {
   const cfg = { ...config, dns: { ...config.dns, rules: [{ source_ip_cidr: ['192.168.3.9/32'], server: 'dns-policy-0' }, ...config.dns.rules] } }
   const ctx = createMockContext({ files: { [paths.configPath]: JSON.stringify(cfg), [paths.singbox]: 'x', [`${paths.geoDir}/geosite-openai.srs`]: 'x' } })
   const calls = []
@@ -353,14 +370,14 @@ test('S4:指定终端来源时,响应明确标出 DNS 判定是按终端预测�
   }
 })
 
-test('decideDnsServer:内核自己的 fakeip 规则先命中时记成 fakeIpRule,判定继续找真解析器;探测到占位地址标 fakeIpLocal 而不是"对端截下了查询"(第三轮 阶段 3)', async () => {
+test('decideDnsServer:内核自己的 fakeip 规则先命中时记成 fakeIpRule,判定继续找真解析器;探测到占位地址标 fakeIpLocal 而不是"对端截下了查询"（第三轮 阶段 3）', async () => {
   const paths = createPaths('/opt/open-box')
   const config = {
     dns: {
       servers: [
         { type: 'udp', tag: 'dns-direct', server: '192.168.3.5' },
         { type: 'tcp', tag: 'dns-policy-0', server: '1.1.1.1', detour: 'Google' },
-        { type: 'fakeip', tag: 'dns-fakeip', inet4_range: '198.15.0.0/15' },
+        { type: 'fakeip', tag: 'dns-fakeip', inet4_range: '198.19.0.0/16' },
       ],
       rules: [
         { domain_suffix: ['google.com'], query_type: ['A', 'AAAA'], server: 'dns-fakeip' },
@@ -384,7 +401,7 @@ test('decideDnsServer:内核自己的 fakeip 规则先命中时记成 fakeIpRule
   const store = { getClashSecret: () => 's', getGroups: () => [], getProfile: () => ({ routing: {} }) }
   const fetchImpl = async (url) => {
     if (url.includes('/proxies')) return { ok: true, status: 200, json: async () => ({ proxies: { Google: { now: 'HK-01' } } }) }
-    if (url.includes('/dns/query')) return { ok: true, status: 200, json: async () => ({ Answer: [{ data: '198.15.0.9', TTL: 1 }] }) }
+    if (url.includes('/dns/query')) return { ok: true, status: 200, json: async () => ({ Answer: [{ data: '198.19.0.9', TTL: 1 }] }) }
     if (url.includes('/connections')) return { ok: true, status: 200, json: async () => ({ connections: [] }) }
     throw new Error('unexpected fetch ' + url)
   }
@@ -436,4 +453,31 @@ test('decideDnsServer ignoreServers:跳过 dns-rewrite 那条,按后面的规则
   const fb = await decideDnsServer(ctx, paths, config, 'other.example', { ignoreServers: ['dns-rewrite'] })
   assert.equal(fb.server.tag, 'dns-proxy')
   assert.equal(fb.viaProxy, true)
+})
+
+test('内核诊断:探测拿到 403 + cf-mitigated: challenge 时 exit.challenge=cloudflare', async () => {
+  const { registerRouteTestRoutes } = await import('./route-test.mjs')
+  const express = (await import('express')).default
+  const { createMockContext } = await import('../system/context.mjs')
+  const { createPaths } = await import('../system/paths.mjs')
+  const paths = createPaths('/opt/open-box')
+  const ctx = createMockContext({ files: { [paths.configPath]: JSON.stringify({ dns: { servers: [], rules: [], final: 'dns-direct' }, route: { rules: [], rule_set: [] } }) } })
+  const store = { getProfile: () => ({}), getClashSecret: () => '', getGroups: () => [] }
+  const fetchImpl = async (url) => {
+    if (url.includes('/dns/query')) return { ok: true, status: 200, json: async () => ({ Answer: [{ data: '104.18.32.47' }] }) }
+    if (url.includes('/connections')) return { ok: true, status: 200, json: async () => ({ connections: [] }) }
+    return { ok: true, status: 204, json: async () => ({ proxies: {} }) }
+  }
+  const probe = async () => ({ ok: true, status: 403, ms: 9, headers: { server: 'cloudflare', 'cf-mitigated': 'challenge' } })
+  const app = express()
+  registerRouteTestRoutes(app, { store, ctx, paths, fetchImpl, probe })
+  const server = app.listen(0)
+  await new Promise((r) => server.once('listening', r))
+  try {
+    const res = await fetch(`http://127.0.0.1:${server.address().port}/api/openbox/route-test`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ target: 'chatgpt.com' }) })
+    const body = await res.json()
+    assert.equal(res.status, 200, JSON.stringify(body).slice(0, 200))
+    assert.equal(body.exit.status, 403)
+    assert.equal(body.exit.challenge, 'cloudflare')
+  } finally { await new Promise((r) => server.close(r)) }
 })

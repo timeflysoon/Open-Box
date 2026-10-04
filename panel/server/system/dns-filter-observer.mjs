@@ -1,29 +1,65 @@
 import { WebSocket } from 'ws'
+import { isLoopbackSource } from './dnsmasq-query-log.mjs'
 
 const HOUR = 3600000
 const DAY = 24 * HOUR
 const bucket = (at) => Math.floor(at / HOUR) * HOUR
 
+// 内核那条记录的来源是本机(dnsmasq 转来的)、dnsmasq 查询日志里还没读到对应那行时,最多等这么久再落库
+const RESOLVE_WAIT_MS = 5000
+
 // Query detail is bounded (24 hours / 20k rows). Aggregates have their own retention and are
 // not computed from the truncated detail table. Batch writes avoid a flash write per query.
-export const createDnsFilterStore = (db, { now = Date.now } = {}) => {
+// dnsmasq:dnsmasq 转发模式下的查询日志(system/dnsmasq-query-log.mjs)。落库前把 dnsmasq 转来的记录对回终端(via = 'dnsmasq'),
+// 再补上 dnsmasq 自己答掉、内核看不到的那些(缓存 cached / 本地 local)
+export const createDnsFilterStore = (db, { now = Date.now, dnsmasq = null } = {}) => {
   db.exec(`
     CREATE TABLE IF NOT EXISTS dns_filter_hours (hour INTEGER PRIMARY KEY, queries INTEGER NOT NULL DEFAULT 0, blocked INTEGER NOT NULL DEFAULT 0, elapsed REAL NOT NULL DEFAULT 0, timed INTEGER NOT NULL DEFAULT 0);
     CREATE TABLE IF NOT EXISTS dns_filter_domains (hour INTEGER, domain TEXT, count INTEGER NOT NULL, PRIMARY KEY(hour,domain));
     CREATE TABLE IF NOT EXISTS dns_filter_records (id INTEGER PRIMARY KEY, at INTEGER, domain TEXT, qtype TEXT, source TEXT, result TEXT, list TEXT, elapsed REAL);
     CREATE INDEX IF NOT EXISTS dns_filter_records_at ON dns_filter_records(at);
   `)
+  // via:终端是从哪认出来的。'' = 内核直接看到的来源;'dnsmasq' = 从 dnsmasq 查询日志认的(来源是本机时就是路由器自己查的)
+  if (!db.prepare('PRAGMA table_info(dns_filter_records)').all().some((c) => c.name === 'via')) db.exec("ALTER TABLE dns_filter_records ADD COLUMN via TEXT NOT NULL DEFAULT ''")
   const hourSql = db.prepare('INSERT INTO dns_filter_hours VALUES (?,?,?,?,?) ON CONFLICT(hour) DO UPDATE SET queries=queries+excluded.queries, blocked=blocked+excluded.blocked, elapsed=elapsed+excluded.elapsed, timed=timed+excluded.timed')
   const domainSql = db.prepare('INSERT INTO dns_filter_domains VALUES (?,?,?) ON CONFLICT(hour,domain) DO UPDATE SET count=count+excluded.count')
-  const recordSql = db.prepare('INSERT INTO dns_filter_records (at,domain,qtype,source,result,list,elapsed) VALUES (?,?,?,?,?,?,?)')
+  const recordSql = db.prepare('INSERT INTO dns_filter_records (at,domain,qtype,source,result,list,elapsed,via) VALUES (?,?,?,?,?,?,?,?)')
   let hours = new Map(), domains = new Map(), rows = [], pruned = 0
   const hour = (at) => { const key = bucket(at); if (!hours.has(key)) hours.set(key, { queries: 0, blocked: 0, elapsed: 0, timed: 0 }); return hours.get(key) }
-  const flush = () => {
+  const finish = (row) => {
+    const h = hour(row.at)
+    if (row.result === 'blocked') {
+      h.blocked++
+      const key = `${bucket(row.at)}:${row.domain}`
+      if (!domains.has(key) && domains.size < 5000) domains.set(key, { hour: bucket(row.at), domain: row.domain, count: 0 })
+      if (domains.has(key)) domains.get(key).count++
+    }
+    if (Number.isFinite(row.elapsed) && row.result !== 'blocked') { h.elapsed += row.elapsed; h.timed++ }
+    rows.push(row)
+    if (rows.length > 2000) rows.shift()
+  }
+  // force:面板停止时不再等 dnsmasq 那边,照原样落库
+  const flush = ({ force = false } = {}) => {
+    let keep = []
+    let ready = rows
+    if (dnsmasq && dnsmasq.active()) {
+      try { dnsmasq.poll() } catch { /* 读不到查询日志不影响落库 */ }
+      for (const row of dnsmasq.takeAnswered()) { hour(row.at).queries++; finish(row) }
+      ready = []
+      for (const row of rows) {
+        if (isLoopbackSource(row.source) && !row.via) {
+          const client = dnsmasq.resolve(row)
+          if (client) { ready.push({ ...row, source: client, via: 'dnsmasq' }); continue }
+          if (!force && now() - row.at < RESOLVE_WAIT_MS) { keep.push(row); continue }
+        }
+        ready.push(row)
+      }
+    }
     db.exec('BEGIN')
     try {
       for (const [key, h] of hours) hourSql.run(key, h.queries, h.blocked, h.elapsed, h.timed)
       for (const d of domains.values()) domainSql.run(d.hour, d.domain, d.count)
-      for (const r of rows) recordSql.run(r.at, r.domain, r.qtype, r.source || '', r.result, r.list || '', r.elapsed ?? null)
+      for (const r of ready) recordSql.run(r.at, r.domain, r.qtype, r.source || '', r.result, r.list || '', r.elapsed ?? null, r.via || '')
       if (now() - pruned > 60000) {
         db.prepare('DELETE FROM dns_filter_hours WHERE hour < ?').run(bucket(now()) - DAY)
         db.prepare('DELETE FROM dns_filter_domains WHERE hour < ?').run(bucket(now()) - DAY)
@@ -33,23 +69,12 @@ export const createDnsFilterStore = (db, { now = Date.now } = {}) => {
         pruned = now()
       }
       db.exec('COMMIT')
-      hours = new Map(); domains = new Map(); rows = []
+      hours = new Map(); domains = new Map(); rows = keep
     } catch (error) { db.exec('ROLLBACK'); throw error }
   }
   return {
     start: (at) => { hour(at).queries++ },
-    finish: (row) => {
-      const h = hour(row.at)
-      if (row.result === 'blocked') {
-        h.blocked++
-        const key = `${bucket(row.at)}:${row.domain}`
-        if (!domains.has(key) && domains.size < 5000) domains.set(key, { hour: bucket(row.at), domain: row.domain, count: 0 })
-        if (domains.has(key)) domains.get(key).count++
-      }
-      if (Number.isFinite(row.elapsed) && row.result !== 'blocked') { h.elapsed += row.elapsed; h.timed++ }
-      rows.push(row)
-      if (rows.length > 2000) rows.shift()
-    },
+    finish,
     flush,
     summary: () => {
       flush()
@@ -59,17 +84,20 @@ export const createDnsFilterStore = (db, { now = Date.now } = {}) => {
       const sum = hourly.reduce((a, h) => ({ queries: a.queries + h.queries, blocked: a.blocked + h.blocked, elapsed: a.elapsed + h.elapsed, timed: a.timed + h.timed }), { queries: 0, blocked: 0, elapsed: 0, timed: 0 })
       return { ...sum, averageMs: sum.timed ? sum.elapsed / sum.timed : null, hourly, topDomains: db.prepare('SELECT domain,SUM(count) AS count FROM dns_filter_domains WHERE hour >= ? GROUP BY domain ORDER BY count DESC LIMIT 5').all(since) }
     },
+    // result 'dnsmasq' = dnsmasq 自己答掉的(缓存 cached + 本地 local)
     records: ({ search = '', result = '', page = 1, pageSize = 20 } = {}) => {
       flush()
       const requestedSize = Number(pageSize)
       const size = Number.isFinite(requestedSize) && requestedSize >= 1 ? Math.min(1000, Math.trunc(requestedSize)) : 20
       const requestedPage = Number(page)
-      const where = 'at >= ? AND instr(domain, ?) > 0 AND (? = \'\' OR result = ?)'
-      const params = [now() - DAY, String(search).toLowerCase().slice(0, 253), String(result), String(result)]
+      const byDnsmasq = String(result) === 'dnsmasq'
+      const where = `at >= ? AND instr(domain, ?) > 0 AND ${byDnsmasq ? "result IN ('cached','local')" : "(? = '' OR result = ?)"}`
+      const params = [now() - DAY, String(search).toLowerCase().slice(0, 253), ...(byDnsmasq ? [] : [String(result), String(result)])]
       const total = db.prepare(`SELECT COUNT(*) AS count FROM dns_filter_records WHERE ${where}`).get(...params).count
       const lastPage = Math.max(1, Math.ceil(total / size))
       const p = Number.isFinite(requestedPage) && requestedPage >= 1 ? Math.min(lastPage, Math.trunc(requestedPage)) : 1
-      return { page: p, pageSize: size, total, rows: db.prepare(`SELECT * FROM dns_filter_records WHERE ${where} ORDER BY id DESC LIMIT ? OFFSET ?`).all(...params, size, (p - 1) * size) }
+      // 按时间排:等 dnsmasq 那边对回终端的记录会晚几秒落库,id 不再是时间顺序
+      return { page: p, pageSize: size, total, rows: db.prepare(`SELECT * FROM dns_filter_records WHERE ${where} ORDER BY at DESC, id DESC LIMIT ? OFFSET ?`).all(...params, size, (p - 1) * size) }
     },
   }
 }
@@ -145,7 +173,8 @@ export const createDnsEventParser = ({ data, now = Date.now, rules = [], names =
   }
 }
 
-export const createDnsFilterObserver = ({ data, readConfig, getSecret, getNames, enabled, url = 'ws://127.0.0.1:9095/logs?level=debug', log = () => {} }) => {
+// queryLog / queryLogWanted:dnsmasq 转发模式下的查询日志(system/dnsmasq-query-log.mjs)和「这次部署开没开它」(部署元数据)
+export const createDnsFilterObserver = ({ data, readConfig, getSecret, getNames, enabled, queryLog = null, queryLogWanted = async () => false, url = 'ws://127.0.0.1:9095/logs?level=debug', log = () => {} }) => {
   let socket, timer, parser, stopped = true, checking = false, version = '', connected = false
   const disconnect = () => { socket?.removeAllListeners(); socket?.on('error', () => {}); socket?.terminate(); socket = null; parser?.drain(); parser = null; connected = false }
   const tick = async () => {
@@ -153,7 +182,9 @@ export const createDnsFilterObserver = ({ data, readConfig, getSecret, getNames,
     checking = true
     try {
       data.flush()
-      if (!(await enabled())) { disconnect(); return }
+      const on = await enabled()
+      if (queryLog) await queryLog.sync(on && (await queryLogWanted()))
+      if (!on) { disconnect(); return }
       parser?.expire()
       const config = await readConfig()
       if (stopped) return
@@ -171,7 +202,7 @@ export const createDnsFilterObserver = ({ data, readConfig, getSecret, getNames,
   }
   return {
     start: () => { stopped = false; tick(); timer = setInterval(tick, 2000); timer.unref?.() },
-    stop: () => { stopped = true; clearInterval(timer); disconnect(); data.flush() },
+    stop: () => { stopped = true; clearInterval(timer); disconnect(); if (queryLog && queryLog.stop) queryLog.stop(); data.flush({ force: true }) },
     status: () => ({ connected }),
     tick,
   }

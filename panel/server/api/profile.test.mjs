@@ -49,7 +49,7 @@ test('validateProfilePatch ipv6 非布尔 → 报错', () => {
   assert.ok(validateProfilePatch({ ipv6: 'yes' }))
 })
 
-test('validateProfilePatch 只碰 ipv6 不要求提供 dns(部分 patch 只校验出现的字段)', () => {
+test('validateProfilePatch 只碰 ipv6 不要求提供 dns（部分 patch 只校验出现的字段）', () => {
   assert.equal(validateProfilePatch({ ipv6: false }), null)
 })
 
@@ -63,7 +63,7 @@ test('validateProfilePatch dns.mode 非法值 → 报错', () => {
   assert.ok(validateProfilePatch({ dns: { mode: 'foo' } }))
 })
 
-test('validateProfilePatch dns.mode 合法值(off/hijack/dnsmasq)通过', () => {
+test('validateProfilePatch dns.mode 合法值（off/hijack/dnsmasq）通过', () => {
   assert.equal(validateProfilePatch({ dns: { mode: 'dnsmasq' } }), null)
   assert.equal(validateProfilePatch({ dns: { mode: 'hijack' } }), null)
   assert.equal(validateProfilePatch({ dns: { mode: 'off' } }), null)
@@ -71,42 +71,6 @@ test('validateProfilePatch dns.mode 合法值(off/hijack/dnsmasq)通过', () => 
 
 test('validateProfilePatch dns 非对象 → 报错', () => {
   assert.ok(validateProfilePatch({ dns: 'nope' }))
-})
-
-test('validateProfilePatch routing.fallback 非字符串 → 报错', () => {
-  assert.ok(validateProfilePatch({ routing: { fallback: 1 } }))
-})
-
-test('validateProfilePatch routing.fallback 字符串通过', () => {
-  assert.equal(validateProfilePatch({ routing: { fallback: 'direct' } }), null)
-})
-
-test('validateProfilePatch routing.categories 非数组 → 报错', () => {
-  assert.ok(validateProfilePatch({ routing: { categories: 'nope' } }))
-})
-
-test('validateProfilePatch routing.categories 元素缺 target → 报错', () => {
-  assert.ok(validateProfilePatch({ routing: { categories: [{ ruleset: 'geosite-cn' }] } }))
-})
-
-test('validateProfilePatch routing.categories 元素 target 非字符串 → 报错', () => {
-  assert.ok(validateProfilePatch({ routing: { categories: [{ ruleset: 'geosite-cn', target: 1 }] } }))
-})
-
-test('validateProfilePatch routing.categories 合法通过', () => {
-  assert.equal(
-    validateProfilePatch({ routing: { categories: [{ ruleset: 'geosite-cn', target: 'PROXY' }] } }),
-    null,
-  )
-})
-
-test('validateProfilePatch routing.directRulesets 非数组或含非字符串 → 报错', () => {
-  assert.ok(validateProfilePatch({ routing: { directRulesets: 'nope' } }))
-  assert.ok(validateProfilePatch({ routing: { directRulesets: ['a', 2] } }))
-})
-
-test('validateProfilePatch routing.directRulesets 字符串数组通过', () => {
-  assert.equal(validateProfilePatch({ routing: { directRulesets: ['geosite-cn', 'geoip-cn'] } }), null)
 })
 
 test('validateProfilePatch routing 非对象 → 报错', () => {
@@ -118,50 +82,43 @@ test('validateProfilePatch 非对象 patch → 报错', () => {
   assert.ok(validateProfilePatch('nope'))
 })
 
-// -------- Important 5:规则集 tag 与 rulesetDir 内容校验 --------
-// directRulesets[]/adRuleset/categories[].ruleset 最终原样进入生成配置的 rule_set.path,
-// 并作为参数传给 `sing-box rule-set match`(execFile 无 shell,非命令注入,但属任意路径
-// 读取尝试 + 配置损坏)。rulesetDir 同理会被拼进每个 .srs 文件路径。
+// -------- Important 5:规则集 tag 内容校验 --------
+// policies[].rulesets 最终原样进入生成配置的 rule_set.path,并作为参数传给
+// `sing-box rule-set match`(execFile 无 shell,非命令注入,但属任意路径读取尝试 + 配置损坏)。
 
-test('validateProfilePatch routing.directRulesets 含路径穿越("../../../etc/passwd") → 报错', () => {
-  assert.ok(validateProfilePatch({ routing: { directRulesets: ['../../../etc/passwd'] } }))
-})
-
-test('validateProfilePatch rulesetDir 含 ".." ("/tmp/../etc") → 报错', () => {
-  assert.ok(validateProfilePatch({ rulesetDir: '/tmp/../etc' }))
-})
-
-test('validateProfilePatch rulesetDir 非绝对路径 → 报错', () => {
-  assert.ok(validateProfilePatch({ rulesetDir: 'relative/path' }))
-})
-
-test('validateProfilePatch rulesetDir 合法绝对路径通过', () => {
-  assert.equal(validateProfilePatch({ rulesetDir: '/opt/open-box/data/rulesets' }), null)
-})
-
-test('validateProfilePatch routing.adRuleset 含非法字符 → 报错;合法 tag 通过', () => {
-  assert.ok(validateProfilePatch({ routing: { adRuleset: '../../etc/passwd' } }))
-  assert.equal(validateProfilePatch({ routing: { adRuleset: 'geosite-category-ads-all' } }), null)
-})
-
-test('validateProfilePatch routing.categories[].ruleset 含非法字符 → 报错', () => {
-  assert.ok(
-    validateProfilePatch({
-      routing: { categories: [{ ruleset: '../../../etc/passwd', target: 'PROXY' }] },
-    }),
-  )
-})
-
-test('validateProfilePatch routing.directRulesets 合法 tag(字母数字点下划线连字符)通过', () => {
-  assert.equal(
-    validateProfilePatch({ routing: { directRulesets: ['geosite-cn', 'geoip-cn', 'my.custom_rule-1'] } }),
-    null,
-  )
+test('validateProfilePatch dns.direct / dns.proxy 只收裸 IP 或上游 DNS 记号 wan:域名、带协议 / 端口 / 路径、空串的报错;协议只认 udp / tcp;地区只认 cn / intl', () => {
+  assert.equal(validateProfilePatch({ dns: { direct: '223.5.5.5', proxy: '1.1.1.1' } }), null)
+  assert.equal(validateProfilePatch({ dns: { direct: '2400:3200::1' } }), null)
+  assert.match(validateProfilePatch({ dns: { proxy: 'dns.google' } }), /dns\.proxy/)
+  assert.match(validateProfilePatch({ dns: { proxy: 'https://1.1.1.1/dns-query' } }), /dns\.proxy/)
+  assert.match(validateProfilePatch({ dns: { direct: '223.5.5.5:53' } }), /dns\.direct/)
+  // 上游 DNS(系统的上游 DNS)记成 wan,主上游、备用都能用;同一侧最多一条
+  assert.equal(validateProfilePatch({ dns: { direct: 'wan', proxy: '1.1.1.1', directExtras: [{ server: '119.29.29.29' }], proxyExtras: [{ server: 'wan' }] } }), null)
+  assert.equal(validateProfilePatch({ dns: { proxy: 'wan' } }), null)
+  assert.match(validateProfilePatch({ dns: { direct: 'wan', directExtras: [{ server: 'wan' }] } }), /repeat/)
+  assert.match(validateProfilePatch({ dns: { direct: 'WAN' } }), /dns\.direct/)
+  assert.match(validateProfilePatch({ dns: { direct: '' } }), /dns\.direct/)
+  assert.match(validateProfilePatch({ dns: { proxy: '' } }), /dns\.proxy/)
+  assert.match(validateProfilePatch({ dns: { direct: '   ' } }), /dns\.direct/)
+  for (const region of ['cn', 'intl']) assert.equal(validateProfilePatch({ dns: { region } }), null, region)
+  assert.match(validateProfilePatch({ dns: { region: 'CN' } }), /dns\.region/)
+  assert.match(validateProfilePatch({ dns: { proxy: 1 } }), /dns\.proxy/)
+  for (const protocol of ['udp', 'tcp']) {
+    assert.equal(validateProfilePatch({ dns: { directProtocol: protocol, proxyProtocol: protocol } }), null, protocol)
+  }
+  assert.match(validateProfilePatch({ dns: { directProtocol: 'doh' } }), /dns\.directProtocol/)
+  assert.match(validateProfilePatch({ dns: { directProtocol: 'tls' } }), /dns\.directProtocol/)
+  assert.match(validateProfilePatch({ dns: { proxyProtocol: 'https' } }), /dns\.proxyProtocol/)
+  assert.equal(validateProfilePatch({ dns: { directPort: 5353, proxyPort: 1 } }), null)
+  assert.match(validateProfilePatch({ dns: { directPort: 0 } }), /dns\.directPort/)
+  assert.match(validateProfilePatch({ dns: { proxyPort: '53' } }), /dns\.proxyPort/)
+  assert.match(validateProfilePatch({ dns: { proxyPort: 70000 } }), /dns\.proxyPort/)
+  assert.match(validateProfilePatch({ dns: { proxyProtocol: '' } }), /dns\.proxyProtocol/)
 })
 
 // -------- HTTP 路由集成测试 --------
 
-test('GET /api/openbox/profile 返回默认 profile(地区种子已翻译成站点集)', async () => {
+test('GET /api/openbox/profile 返回默认 profile（地区种子已翻译成站点集）', async () => {
   const { baseUrl, close } = await startApp()
   try {
     const res = await fetch(`${baseUrl}/api/openbox/profile`)
@@ -190,7 +147,7 @@ test('PUT /api/openbox/profile 深合并后返回并持久化,未提及字段保
     const body = await res.json()
     assert.equal(body.profile.ipv6, false)
     assert.equal(body.profile.dns.mode, 'dnsmasq')
-    assert.equal(body.profile.dns.direct, '223.5.5.5') // 未提及字段保留
+    assert.equal(body.profile.dns.direct, 'wan') // 未提及字段保留(默认是上游 DNS)
 
     assert.deepEqual(store.getProfile(), body.profile) // 已落库
   } finally {
@@ -232,85 +189,6 @@ test('PUT 非法 ipv6 → 400 且不写入', async () => {
     const res = await putJson(baseUrl, '/api/openbox/profile', { ipv6: 'yes' })
     assert.equal(res.status, 400)
     assert.deepEqual(store.getProfile(), before)
-  } finally {
-    await close()
-  }
-})
-
-test('PUT 非法 routing.categories(缺 target) → 400 且不写入', async () => {
-  const { baseUrl, store, close } = await startApp()
-  try {
-    const before = store.getProfile()
-    const res = await putJson(baseUrl, '/api/openbox/profile', {
-      routing: { categories: [{ ruleset: 'geosite-cn' }] },
-    })
-    assert.equal(res.status, 400)
-    assert.deepEqual(store.getProfile(), before)
-  } finally {
-    await close()
-  }
-})
-
-test('PUT 非法 routing.directRulesets(含非字符串) → 400 且不写入', async () => {
-  const { baseUrl, store, close } = await startApp()
-  try {
-    const before = store.getProfile()
-    const res = await putJson(baseUrl, '/api/openbox/profile', {
-      routing: { directRulesets: ['geosite-cn', 42] },
-    })
-    assert.equal(res.status, 400)
-    assert.deepEqual(store.getProfile(), before)
-  } finally {
-    await close()
-  }
-})
-
-// -------- Important 5(HTTP 层):恶意 directRulesets / rulesetDir 不得写入 --------
-
-test('PUT routing.directRulesets 含路径穿越("../../../etc/passwd") → 400 且不写入', async () => {
-  const { baseUrl, store, close } = await startApp()
-  try {
-    const before = store.getProfile()
-    const res = await putJson(baseUrl, '/api/openbox/profile', {
-      routing: { directRulesets: ['../../../etc/passwd'] },
-    })
-    assert.equal(res.status, 400)
-    const body = await res.json()
-    assert.ok(body.error)
-    assert.deepEqual(store.getProfile(), before)
-  } finally {
-    await close()
-  }
-})
-
-test('PUT rulesetDir("/tmp/../etc") → 400 且不写入', async () => {
-  const { baseUrl, store, close } = await startApp()
-  try {
-    const before = store.getProfile()
-    const res = await putJson(baseUrl, '/api/openbox/profile', {
-      rulesetDir: '/tmp/../etc',
-    })
-    assert.equal(res.status, 400)
-    const body = await res.json()
-    assert.ok(body.error)
-    assert.deepEqual(store.getProfile(), before)
-  } finally {
-    await close()
-  }
-})
-
-test('PUT 合法的 directRulesets 与 rulesetDir 仍能通过并落库', async () => {
-  const { baseUrl, store, close } = await startApp()
-  try {
-    const res = await putJson(baseUrl, '/api/openbox/profile', {
-      routing: { directRulesets: ['geosite-cn', 'geoip-cn'] },
-      rulesetDir: '/opt/open-box/data/rulesets2',
-    })
-    assert.equal(res.status, 200)
-    const body = await res.json()
-    assert.deepEqual(body.profile.routing.directRulesets, ['geosite-cn', 'geoip-cn'])
-    assert.equal(body.profile.rulesetDir, '/opt/open-box/data/rulesets2')
-    assert.deepEqual(store.getProfile(), body.profile)
   } finally {
     await close()
   }
@@ -400,7 +278,7 @@ test('PUT 校验:策略的规则集仍然要过路径安全那道正则', async 
   }
 })
 
-test('PUT 校验:域名条件不限制字符(带下划线、斜杠的 CIDR 都合法)', async () => {
+test('PUT 校验:域名条件不限制字符（带下划线、斜杠的 CIDR 都合法）', async () => {
   const { baseUrl, close } = await startApp()
   try {
     const res = await putJson(baseUrl, '/api/openbox/profile', {
@@ -430,7 +308,7 @@ test('PUT 校验:兜底只收字符串;「其他」是兜底占着的名字,站�
   }
 })
 
-test('GET 时把地区翻译成站点集写回档案:界面看到的和内核跑的必须是同一份', async () => {
+test('带地区数据的老档案写进 store 时翻译成站点集:界面看到的和内核跑的必须是同一份', async () => {
   const store = memStore()
   store.setProfile({
     routing: {
@@ -452,7 +330,7 @@ test('GET 时把地区翻译成站点集写回档案:界面看到的和内核跑
   }
 })
 
-test('PUT 校验:测速地址必须是 http(s) URL', async () => {
+test('PUT 校验:测速地址必须是 http 或 https URL', async () => {
   const { baseUrl, close } = await startApp()
   try {
     assert.equal((await putJson(baseUrl, '/api/openbox/profile', { testUrl: 'http://connect.rom.miui.com/generate_204' })).status, 200)
@@ -481,6 +359,21 @@ test('servers 校验:协议/端口/凭据/重复端口/保留端口', async () =
   assert.match(validateServers([{ id: 'm', name: 'M', protocol: 'mixed', port: 7080, password: 'p' }]), /set together/)
 })
 
+test('bypassPorts(#183):空串或端口 / 范围写法,别的不收', () => {
+  assert.equal(validateProfilePatch({ bypassPorts: '' }), null)
+  assert.equal(validateProfilePatch({ bypassPorts: '21114-21119, 2233' }), null)
+  assert.match(String(validateProfilePatch({ bypassPorts: '22; flush ruleset' })), /bypassPorts/)
+  // 名单怎么用(#198 / #199):只认这两个值 —— 别的值落进档案会被当成黑名单,规则和界面对不上
+  assert.equal(validateProfilePatch({ bypassPortsMode: 'blacklist' }), null)
+  assert.equal(validateProfilePatch({ bypassPortsMode: 'whitelist' }), null)
+  assert.match(String(validateProfilePatch({ bypassPortsMode: 'allow' })), /bypassPortsMode/)
+  assert.match(String(validateProfilePatch({ bypassPorts: 2233 })), /bypassPorts/)
+  // 白名单那份同一套写法
+  assert.equal(validateProfilePatch({ bypassPortsWhitelist: '443, 8000-8100' }), null)
+  assert.equal(validateProfilePatch({ bypassPortsWhitelist: '' }), null)
+  assert.match(String(validateProfilePatch({ bypassPortsWhitelist: '22; flush ruleset' })), /bypassPortsWhitelist/)
+})
+
 test('clientRoutes 校验:来源必须是 IP/网段,出口必填,id 不重复', async () => {
   const { validateClientRoutes } = await import('./profile.mjs')
   const ok = [{ id: 'tv', enabled: true, name: '电视', sources: ['10.0.0.5', '10.0.1.0/24'], outbound: '香港-自动' }]
@@ -489,6 +382,14 @@ test('clientRoutes 校验:来源必须是 IP/网段,出口必填,id 不重复', 
   assert.match(validateClientRoutes([{ ...ok[0], sources: [] }]), /sources/)
   assert.match(validateClientRoutes([{ ...ok[0], outbound: '' }]), /outbound/)
   assert.match(validateClientRoutes([ok[0], { ...ok[0] }]), /duplicated/)
+  // 只让这些进内核(#187):和「不进内核」一样按 MAC,不填出口;两样不能同时开
+  const admit = { id: 'pc', name: '电脑', sources: ['10.0.0.20'], admit: true, macs: ['aa:bb:cc:00:00:01'] }
+  assert.equal(validateClientRoutes([admit]), null)
+  assert.match(validateClientRoutes([{ ...admit, match: 'mac', macs: [] }]), /when matching by MAC/)
+  assert.equal(validateClientRoutes([{ ...admit, match: 'ip', macs: [] }]), null, '按 IP 的白名单')
+  assert.match(validateClientRoutes([{ ...admit, macs: ['nope'] }]), /invalid MAC/)
+  assert.match(validateClientRoutes([{ ...admit, bypass: true }]), /both bypass and admit/)
+  assert.match(validateClientRoutes([{ ...admit, admit: 'yes' }]), /admit must be a boolean/)
 })
 
 test('站点集不能和节点组 / 内置直连拒绝 / dnsmasq 回送出站同名,也不能彼此重名——都是同一个出站命名空间', () => {
@@ -509,7 +410,7 @@ test('validateProfilePatch routing.displayOrder 必须是字符串数组', () =>
   assert.ok(validateProfilePatch({ routing: { displayOrder: 'Speed' } }))
 })
 
-test('validateProfilePatch 图标缩放必须是 ±20 以内的整数(站点集与兜底都一样)', () => {
+test('validateProfilePatch 图标缩放必须是 ±20 以内的整数（站点集与兜底都一样）', () => {
   assert.equal(validateProfilePatch({ routing: { fallbackIconScale: 20, policies: [{ id: 'p', name: 'A', iconScale: -20 }] } }), null)
   assert.ok(validateProfilePatch({ routing: { fallbackIconScale: 1.5 } }))
   assert.ok(validateProfilePatch({ routing: { fallbackIconScale: 21 } }))
@@ -517,7 +418,7 @@ test('validateProfilePatch 图标缩放必须是 ±20 以内的整数(站点集�
   assert.ok(validateProfilePatch({ routing: { policies: [{ id: 'p', name: 'A', iconScale: '1' }] } }))
 })
 
-test('validateProfilePatch 校验前置自定义分流(一行一条规则、一行一个出口)', () => {
+test('validateProfilePatch 校验前置自定义分流（一行一条规则、一行一个出口）', () => {
   const ok = { routing: { custom: { rules: [{ type: 'domainSuffix', value: 'a.com', outbound: 'HK' }] } } }
   assert.equal(validateProfilePatch(ok), null)
   assert.equal(validateProfilePatch({ routing: { custom: { enabled: false } } }), null)
@@ -551,12 +452,106 @@ test('validateProfilePatch ipv6Proxy 只认 node / ipv4', () => {
   assert.match(validateProfilePatch({ ipv6Proxy: 'off' }), /ipv6Proxy/)
 })
 
-test('validateClientRoutes:不进内核(bypass)要至少一个合法 MAC、出站可以不填;普通规则出站必填', async () => {
+test('validateClientRoutes:不进内核（bypass）要至少一个合法 MAC、出站可以不填;普通规则出站必填', async () => {
   const { validateClientRoutes } = await import('./profile.mjs')
   assert.equal(validateClientRoutes([{ id: 'a', name: 'Switch', sources: ['10.0.0.9'], bypass: true, macs: ['AA:BB:CC:DD:EE:FF'] }]), null)
   assert.equal(validateClientRoutes([{ id: 'a', name: 'Switch', sources: ['10.0.0.9'], bypass: true, macs: ['aa-bb-cc-dd-ee-ff'], outbound: '' }]), null)
-  assert.match(validateClientRoutes([{ id: 'a', name: 'Switch', sources: ['10.0.0.9'], bypass: true }]), /macs is required/)
+  // 终端按 IP 或按 MAC 认,二选一:按 IP 的不进内核不用 MAC;按 MAC 的要有 MAC
+  assert.equal(validateClientRoutes([{ id: 'a', name: 'Switch', sources: ['10.0.0.9'], bypass: true }]), null)
+  assert.equal(validateClientRoutes([{ id: 'a', name: 'Switch', match: 'mac', sources: [], macs: ['aa:bb:cc:dd:ee:ff'], bypass: true }]), null)
+  assert.match(validateClientRoutes([{ id: 'a', name: 'Switch', match: 'mac', sources: ['10.0.0.9'], bypass: true }]), /when matching by MAC/)
+  assert.match(validateClientRoutes([{ id: 'a', name: 'Switch', match: 'ip', sources: [], bypass: true }]), /sources must be a non-empty/)
+  assert.match(validateClientRoutes([{ id: 'a', name: 'Switch', match: 'x', sources: ['10.0.0.9'], bypass: true }]), /match must be ip or mac/)
+  assert.equal(validateClientRoutes([{ id: 'a', name: 'TV', match: 'mac', macs: ['aa:bb:cc:dd:ee:ff'], outbound: '香港-自动' }]), null, '按 MAC 指定出站')
   assert.match(validateClientRoutes([{ id: 'a', name: 'Switch', sources: ['10.0.0.9'], bypass: true, macs: ['nope'] }]), /invalid MAC/)
   assert.match(validateClientRoutes([{ id: 'a', name: 'Switch', sources: ['10.0.0.9'], bypass: 'yes', macs: ['aa:bb:cc:dd:ee:ff'] }]), /bypass must be a boolean/)
   assert.match(validateClientRoutes([{ id: 'a', name: 'TV', sources: ['10.0.0.8'] }]), /outbound must be a non-empty string/)
+})
+
+test('PUT /profile chainProxies:存库时按节点内容重算摘要;名称撞上订阅节点 → 400;节点内容解析不出 → 400;存空数组即全部删除', async () => {
+  const { store, baseUrl, close } = await startApp()
+  try {
+    store.setNodes([{ tag: 'HK-01', type: 'shadowsocks', server: 'hk.example.com', server_port: 443, fields: {}, source: 'sharelink' }])
+    const entry = { id: 'c1', enabled: true, name: '住宅-美国', link: 'socks5://u:p@res.example.net:1080#x', upstream: 'HK-01', node: { type: 'fake', server: 'x', port: 1 } }
+    const ok = await putJson(baseUrl, '/api/openbox/profile', { chainProxies: [entry] })
+    assert.equal(ok.status, 200)
+    const saved = (await ok.json()).profile.chainProxies
+    assert.equal(saved.length, 1)
+    assert.deepEqual(saved[0].node, { type: 'socks', server: 'res.example.net', port: 1080 }, '摘要由服务端按 link 算,不信客户端传来的')
+    const clash = await putJson(baseUrl, '/api/openbox/profile', { chainProxies: [{ ...entry, name: 'HK-01', upstream: '所有-自动' }] })
+    assert.equal(clash.status, 400)
+    assert.match((await clash.json()).error, /已被节点、节点组或站点集占用/)
+    const bad = await putJson(baseUrl, '/api/openbox/profile', { chainProxies: [{ ...entry, link: 'garbage' }] })
+    assert.equal(bad.status, 400)
+    assert.equal(store.getProfile().chainProxies.length, 1, '校验没过的不落库')
+    const del = await putJson(baseUrl, '/api/openbox/profile', { chainProxies: [] })
+    assert.deepEqual((await del.json()).profile.chainProxies, [])
+  } finally {
+    await close()
+  }
+})
+
+
+test('PUT /profile chainProxies:按 id 认出改名,节点组成员 / 故障转移页签 / 站点集默认出口 / 兜底 / 终端分流 / 别的链式代理的上游一并迁移', async () => {
+  const { store, baseUrl, close } = await startApp()
+  try {
+    const link = 'socks5://u:p@res.example.net:1080#x'
+    store.setNodes([{ tag: 'HK-01', type: 'ss', server: '1.2.3.4', server_port: 1 }])
+    store.setProfile({ chainProxies: [{ id: 'c1', enabled: true, name: '住宅-旧', link, upstream: 'HK-01' }, { id: 'c2', enabled: true, name: '二级', link, upstream: '住宅-旧' }] })
+    store.setGroups([
+      { id: 'g-a', name: 'A', type: 'selector', mode: 'static', members: ['住宅-旧', 'HK-01'] },
+      { id: 'g-f', name: 'F', type: 'failover', lanes: [{ id: 'l1', name: '主用', members: ['住宅-旧'] }, { id: 'l2', name: '备用', members: ['HK-01'] }] },
+    ])
+    store.setProfile({ routing: { policies: [{ id: 'p1', name: 'Video', default: '住宅-旧', rulesets: ['geosite-netflix'] }], fallbackDefault: '住宅-旧' }, clientRoutes: [{ id: 'r1', name: 'tv', sources: ['192.168.1.10'], outbound: '住宅-旧' }] })
+    const res = await putJson(baseUrl, '/api/openbox/profile', { chainProxies: [{ id: 'c1', enabled: true, name: '住宅-新', link, upstream: 'HK-01' }, { id: 'c2', enabled: true, name: '二级', link, upstream: '住宅-旧' }] })
+    assert.equal(res.status, 200)
+    const body = await res.json()
+    assert.deepEqual(body.renamed, [{ from: '住宅-旧', to: '住宅-新' }])
+    assert.deepEqual(body.profile.chainProxies.map((e) => [e.name, e.upstream]), [['住宅-新', 'HK-01'], ['二级', '住宅-新']])
+    assert.equal(body.profile.routing.policies[0].default, '住宅-新')
+    assert.equal(body.profile.routing.fallbackDefault, '住宅-新')
+    assert.equal(body.profile.clientRoutes[0].outbound, '住宅-新')
+    const groups = store.getGroups()
+    assert.deepEqual(groups.find((g) => g.id === 'g-a').members, ['住宅-新', 'HK-01'])
+    assert.deepEqual(groups.find((g) => g.id === 'g-f').lanes.map((l) => l.members), [['住宅-新'], ['HK-01']])
+  } finally {
+    await close()
+  }
+})
+
+test('tun 参数校验(#236 #239):协议栈三选一,MTU / MSS 是 0 或范围内的整数;规则备注只能是字符串', async () => {
+  const { validateProfilePatch } = await import('./profile.mjs')
+  assert.equal(validateProfilePatch({ tun: { stack: 'gvisor', mtu: 1500, tcpMss: 1400 } }), null)
+  assert.equal(validateProfilePatch({ tun: { stack: 'mixed', mtu: 0, tcpMss: 0 } }), null)
+  assert.match(validateProfilePatch({ tun: { stack: 'lwip' } }), /tun\.stack/)
+  assert.match(validateProfilePatch({ tun: { mtu: 500 } }), /tun\.mtu/)
+  assert.match(validateProfilePatch({ tun: { mtu: 1500.5 } }), /tun\.mtu/)
+  assert.match(validateProfilePatch({ tun: { tcpMss: 100 } }), /tun\.tcpMss/)
+  assert.match(validateProfilePatch({ tun: 'mixed' }), /tun must be an object/)
+  assert.equal(validateProfilePatch({ routing: { policies: [{ name: 'PT', domainSuffix: ['a.com'], notes: { 'domainSuffix:a.com': 'PT 站' } }] } }), null)
+  assert.match(validateProfilePatch({ routing: { policies: [{ name: 'PT', domainSuffix: ['a.com'], notes: { 'domainSuffix:a.com': 1 } }] } }), /notes/)
+  assert.equal(validateProfilePatch({ routing: { custom: { rules: [{ type: 'domain', value: 'a.com', outbound: 'direct', note: '内网' }] } } }), null)
+  assert.match(validateProfilePatch({ routing: { custom: { rules: [{ type: 'domain', value: 'a.com', outbound: 'direct', note: 2 }] } } }), /note/)
+})
+
+test('PUT /api/openbox/profile:路由器在中国大陆时代理 DNS 不能用上游 DNS(按合并后的整份判);在中国大陆之外可以;改了地区就不再自动判', async () => {
+  const { baseUrl, store, close } = await startApp()
+  try {
+    store.setRaw('openbox/dns-region-detect', 'pending')
+    const bad = await putJson(baseUrl, '/api/openbox/profile', { dns: { proxy: 'wan' } })
+    assert.equal(bad.status, 400)
+    assert.match((await bad.json()).error, /中国/)
+    assert.equal(store.getRaw('openbox/dns-region-detect'), 'pending', '被挡住的请求不算用户选了地区')
+    const intl = await putJson(baseUrl, '/api/openbox/profile', { dns: { region: 'intl', proxy: 'wan', proxyProtocol: 'udp' } })
+    assert.equal(intl.status, 200)
+    assert.equal(store.getProfile().dns.proxy, 'wan')
+    assert.equal(store.getRaw('openbox/dns-region-detect'), null, '用户自己选了地区,后台自动判就不做了')
+    // 只把地区切回中国、代理还是上游 DNS:挡住
+    const back = await putJson(baseUrl, '/api/openbox/profile', { dns: { region: 'cn' } })
+    assert.equal(back.status, 400)
+    const ok = await putJson(baseUrl, '/api/openbox/profile', { dns: { region: 'cn', proxy: '1.1.1.1', proxyProtocol: 'tcp' } })
+    assert.equal(ok.status, 200)
+  } finally {
+    await close()
+  }
 })

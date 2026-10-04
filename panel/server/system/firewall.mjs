@@ -1,8 +1,14 @@
 import { serverFirewallProto, serverWanExposed } from '../engine/servers.mjs'
+import { panelPort } from './panel-port.mjs'
 
 const PANEL_RULE = 'firewall.openbox_panel'
 // 内核 DNS 入站 :7853,只放行 LAN(AdGuard Home / Pi-hole 等把上游指向路由器 IP:7853)
 const DNS_RULE = 'firewall.openbox_dns'
+const TUN_FORWARD_RULE = 'firewall.openbox_tun_forward'
+// 纯 tun 模式(auto_redirect 关)下,tun 的 system / mixed 协议栈把 TCP 交给本机监听:包从 tun 设备进来、
+// 目的是路由器自己,走的是 fw4 的 input 链;tun 设备不属于任何 zone,默认 input 策略是 REJECT 的固件会直接
+// 回 RST(GitHub #100)。和上面的 forward 放行是一对
+const TUN_INPUT_RULE = 'firewall.openbox_tun_input'
 const V6BLOCK_RULE = 'firewall.openbox_v6block'
 // 共享网络每台服务器一条:firewall.openbox_srv_<id>
 const SERVER_RULE_PREFIX = 'openbox_srv_'
@@ -67,7 +73,7 @@ const rulesInEffect = (wanted, live) => {
 
 export const commitFirewall = async (ctx) => {
   const commit = await ctx.exec('uci', ['commit', 'firewall'])
-  if (commit.code !== 0) throw new Error(`uci commit firewall 失败(code ${commit.code}):${String(commit.stderr || commit.stdout || '').trim() || '闪存可能已写满'}`)
+  if (commit.code !== 0) throw new Error(`uci commit firewall 失败（code ${commit.code}）:${String(commit.stderr || commit.stdout || '').trim() || '闪存可能已写满'}`)
   const reload = await ctx.exec('/etc/init.d/firewall', ['reload'])
   if (reload.code === 0) return
   const detail = String(reload.stderr || reload.stdout || '').trim()
@@ -76,7 +82,7 @@ export const commitFirewall = async (ctx) => {
     console.warn(`[firewall] reload 报了 code ${reload.code},但规则已在内核里生效,继续:${detail}`)
     return
   }
-  throw new Error(`firewall reload 失败(code ${reload.code}):${detail || '规则没有生效'}`)
+  throw new Error(`firewall reload 失败（code ${reload.code}）:${detail || '规则没有生效'}`)
 }
 const commitReload = commitFirewall
 
@@ -116,7 +122,7 @@ const ensureRule = async (ctx, section, desired) => {
   return true
 }
 
-export const applyPanelLanRule = async (ctx, { port = 2026, commit = true } = {}) => {
+export const applyPanelLanRule = async (ctx, { port = panelPort(), commit = true } = {}) => {
   const changed = await ensureRule(ctx, PANEL_RULE, { name: 'Open-Box Panel (LAN)', src: 'lan', proto: 'tcp', dest_port: port, target: 'ACCEPT' })
   if (changed && commit) await commitReload(ctx)
   return { applied: true, changed }
@@ -126,6 +132,26 @@ export const applyDnsLanRule = async (ctx, { port = 7853, commit = true } = {}) 
   const changed = await ensureRule(ctx, DNS_RULE, { name: 'Open-Box DNS (LAN)', src: 'lan', proto: 'tcp udp', dest_port: port, target: 'ACCEPT' })
   if (changed && commit) await commitReload(ctx)
   return { applied: true, changed }
+}
+
+// 纯 TUN 的策略路由仍经过 fw4 forward。仅允许可信 LAN 到本服务 TUN，
+// 不把整个 TUN 纳入 LAN zone，也不放开来自 WAN 的新连接。
+export const applyTunForwardRule = async (ctx, { device = '', commit = true } = {}) => {
+  if (device && !/^[A-Za-z0-9_.-]{1,15}$/.test(device)) throw new Error('TUN 接口名称无效')
+  const changed = await ensureRule(ctx, TUN_FORWARD_RULE, device
+    ? { name: 'Open-Box TUN (LAN)', src: 'lan', dest: '*', device, direction: 'out', proto: 'all', target: 'ACCEPT' }
+    : null)
+  if (changed && commit) await commitReload(ctx)
+  return { applied: Boolean(device), changed }
+}
+
+export const applyTunInputRule = async (ctx, { device = '', commit = true } = {}) => {
+  if (device && !/^[A-Za-z0-9_.-]{1,15}$/.test(device)) throw new Error('TUN 接口名称无效')
+  const changed = await ensureRule(ctx, TUN_INPUT_RULE, device
+    ? { name: 'Open-Box TUN (input)', src: '*', device, direction: 'in', proto: 'all', target: 'ACCEPT' }
+    : null)
+  if (changed && commit) await commitReload(ctx)
+  return { applied: Boolean(device), changed }
 }
 
 export const applyIpv6Block = async (ctx, { enabled, commit = true }) => {
@@ -178,6 +204,8 @@ export const applyServerPortRules = async (ctx, servers = [], { commit = true } 
 // 用户在最需要面板时反而被彻底锁在门外。
 export const removeProxyRules = async (ctx) => {
   await ctx.exec('uci', ['-q', 'delete', V6BLOCK_RULE])
+  await ctx.exec('uci', ['-q', 'delete', TUN_FORWARD_RULE])
+  await ctx.exec('uci', ['-q', 'delete', TUN_INPUT_RULE])
   await ctx.exec('uci', ['-q', 'delete', DNS_RULE])
   await deleteServerRules(ctx)
   await commitReload(ctx)
@@ -189,6 +217,8 @@ export const removeOpenBoxRules = async (ctx) => {
   await ctx.exec('uci', ['-q', 'delete', PANEL_RULE])
   await ctx.exec('uci', ['-q', 'delete', DNS_RULE])
   await ctx.exec('uci', ['-q', 'delete', V6BLOCK_RULE])
+  await ctx.exec('uci', ['-q', 'delete', TUN_FORWARD_RULE])
+  await ctx.exec('uci', ['-q', 'delete', TUN_INPUT_RULE])
   await deleteServerRules(ctx)
   await commitReload(ctx)
   return { removed: true }

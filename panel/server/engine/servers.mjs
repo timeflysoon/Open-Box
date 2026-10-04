@@ -8,11 +8,14 @@
 // 常用 7080),明文、可选用户名密码。它只给局域网用:不在 WAN 放行——一个没认证的明文代理
 // 开到公网就是给全世界开的免费出口。
 
+import { panelPort } from '../system/panel-port.mjs'
+
 export const SERVER_PROTOCOLS = ['shadowsocks', 'vless', 'tuic', 'hysteria2', 'mixed']
 export const SS_METHODS = ['aes-256-gcm', 'aes-128-gcm', 'chacha20-ietf-poly1305', '2022-blake3-aes-256-gcm']
 export const TLS_SERVER_NAME = 'open-box.local'
-// 面板、clash API、dns-in、面板回环入站占着的端口,不能拿来开服务器
-export const RESERVED_PORTS = new Set([2026, 9095, 7853, 7891, 53, 22, 80, 443])
+// 面板、clash API、dns-in、面板回环入站占着的端口,不能拿来开服务器。
+// 面板端口是可改的(装机时可选、LuCI 页面能改),所以按进程实际监听的那个算,别写死 2026。
+export const RESERVED_PORTS = new Set([panelPort(), 9095, 7853, 7891, 53, 22, 80, 443])
 
 export const serverTag = (s) => `share-${s.id}`
 

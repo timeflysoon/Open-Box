@@ -49,7 +49,7 @@ test('经代理 DNS 的查询:A 记下来源、命中规则、解析器、实际
   assert.equal(traceDnsQuery(PROXY, 'openai.com').seen, false)
 })
 
-test('直连解析、缓存命中、上游失败、规则直接处理(predefined)各自的结果', () => {
+test('直连解析、缓存命中、上游失败、规则直接处理（predefined）各自的结果', () => {
   const direct = ['[1 0ms] inbound/direct[dns-in]: inbound packet connection from 127.0.0.1:5', '[1 0ms] dns: exchange www.baidu.com. IN A', '[1 0ms] dns: match[19] rule_set=geosite-cn => route(dns-direct)',
     '[1 0ms] outbound/direct[直连]: outbound packet connection to 211.139.29.150:53', '[1 12ms] dns: exchanged www.baidu.com NOERROR 60', '[1 12ms] dns: exchanged A www.baidu.com. 60 IN A 183.240.99.224']
   const d = traceDnsQuery(direct, 'www.baidu.com').A
@@ -72,7 +72,7 @@ test('直连解析、缓存命中、上游失败、规则直接处理(predefined
   assert.equal(traceDnsQuery(pending, 'slow.example').A.result, 'pending')
 })
 
-test('同一时间窗里别的终端也在查同一个域名:优先取探测终端(或本机转发)发的那条,没有就取最后一条', () => {
+test('同一时间窗里别的终端也在查同一个域名:优先取探测终端（或本机转发）发的那条,没有就取最后一条', () => {
   const lines = [
     '[10 0ms] inbound/direct[dns-in]: inbound packet connection from 192.168.3.100:1', '[10 0ms] dns: exchange a.example. IN A', '[10 0ms] dns: match[9] x => route(dns-policy-4)', '[10 100ms] dns: exchanged a.example NOERROR 1', '[10 100ms] dns: exchanged A a.example. 1 IN A 1.1.1.1',
     '[11 0ms] inbound/direct[dns-in]: inbound packet connection from 192.168.3.167:2', '[11 0ms] dns: exchange a.example. IN A', '[11 0ms] dns: match[9] x => route(dns-policy-4)', '[11 90ms] dns: exchanged a.example NOERROR 1', '[11 90ms] dns: exchanged A a.example. 1 IN A 2.2.2.2',
@@ -83,7 +83,7 @@ test('同一时间窗里别的终端也在查同一个域名:优先取探测终�
   assert.deepEqual(traceDnsQuery(lines, 'a.example').A.answers, ['3.3.3.3'])
 })
 
-test('openKernelLogTap:连不上(拒绝 / 超时)时 ready=false 带原因;连上后攒 payload 行,close 不抛', async () => {
+test('openKernelLogTap:连不上（拒绝 / 超时）时 ready=false 带原因;连上后攒 payload 行,close 不抛', async () => {
   class Refused {
     constructor() { this.handlers = {}; setTimeout(() => this.handlers.error?.(new Error('connect ECONNREFUSED 127.0.0.1:9095')), 0) }
     on(ev, fn) { this.handlers[ev] = fn }

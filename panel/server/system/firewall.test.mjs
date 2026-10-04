@@ -1,7 +1,19 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createMockContext } from './context.mjs'
-import { applyPanelLanRule, applyIpv6Block, commitFirewall, removeProxyRules, removeOpenBoxRules } from './firewall.mjs'
+import { applyPanelLanRule, applyTunForwardRule, applyTunInputRule, applyIpv6Block, commitFirewall, removeProxyRules, removeOpenBoxRules } from './firewall.mjs'
+
+test('TUN 转发只允许 LAN 到指定接口，关闭时撤销，不扩大 WAN 入口权限', async () => {
+  const ctx = createMockContext()
+  await applyTunForwardRule(ctx, { device: 'tun0', commit: false })
+  for (const option of ['src=lan', 'dest=*', 'direction=out', 'device=tun0', 'proto=all', 'target=ACCEPT']) assert.ok(cmds(ctx).includes(`uci set firewall.openbox_tun_forward.${option}`))
+  assert.ok(!cmds(ctx).some((c) => /src=\*|src=wan|commit firewall/.test(c)))
+  ctx.calls.length = 0
+  await applyTunForwardRule(ctx)
+  assert.ok(cmds(ctx).includes('uci -q delete firewall.openbox_tun_forward'))
+  assert.ok(!cmds(ctx).some((c) => c.startsWith('uci set')))
+  await assert.rejects(applyTunForwardRule(ctx, { device: '*' }), /接口名称/)
+})
 
 const cmds = (ctx) => ctx.calls.map((c) => [c.cmd, ...c.args].join(' '))
 
@@ -36,7 +48,7 @@ test('IPv6 拦截关闭则删除规则', async () => {
   assert.ok(!c.some((x) => x.includes('openbox_v6block=rule')))
 })
 
-test('removeProxyRules 只删 v6 拦截 + reload,不动面板放行规则(供回滚使用)', async () => {
+test('removeProxyRules 只删 v6 拦截 + reload,不动面板放行规则（供回滚使用）', async () => {
   const ctx = createMockContext()
   const r = await removeProxyRules(ctx)
   assert.equal(r.removed, true)
@@ -46,7 +58,7 @@ test('removeProxyRules 只删 v6 拦截 + reload,不动面板放行规则(供回
   assert.ok(c.includes('/etc/init.d/firewall reload'))
 })
 
-test('removeOpenBoxRules 清两条(含面板放行)+ reload,仅供卸载使用', async () => {
+test('removeOpenBoxRules 清两条（含面板放行）+ reload,仅供卸载使用', async () => {
   const ctx = createMockContext()
   const r = await removeOpenBoxRules(ctx)
   assert.equal(r.removed, true)
@@ -162,7 +174,7 @@ const reloadFailedCtx = (nft) => createMockContext({
   },
 })
 
-test('reload 报 code 1 但规则已在内核里生效(别的软件包的坏配置段):不抛错,继续走', async () => {
+test('reload 报 code 1 但规则已在内核里生效（别的软件包的坏配置段）:不抛错,继续走', async () => {
   await commitFirewall(reloadFailedCtx(nftWith(2026)))
 })
 
@@ -179,4 +191,21 @@ test('reload 报 code 1 且规则确实没生效:照旧抛错', async () => {
   )
   // 读不到 nft(没装 / 输出为空):看不见就按失败处理,不放行
   await assert.rejects(() => commitFirewall(reloadFailedCtx(null)), /firewall reload 失败/)
+})
+
+test('TUN input 放行（GitHub #100）:从 tun 设备进来、目的是本机的包放行,任何 zone;关闭时撤销;回滚 / 卸载都删', async () => {
+  const ctx = createMockContext()
+  await applyTunInputRule(ctx, { device: 'openbox-tun', commit: false })
+  for (const option of ['src=*', 'direction=in', 'device=openbox-tun', 'proto=all', 'target=ACCEPT']) assert.ok(cmds(ctx).includes(`uci set firewall.openbox_tun_input.${option}`), option)
+  assert.ok(!cmds(ctx).some((c) => /openbox_tun_input\.dest=/.test(c)), 'input 规则没有 dest')
+  ctx.calls.length = 0
+  await applyTunInputRule(ctx)
+  assert.ok(cmds(ctx).includes('uci -q delete firewall.openbox_tun_input'))
+  await assert.rejects(applyTunInputRule(ctx, { device: 'bad name' }), /接口名称/)
+  const c2 = createMockContext()
+  await removeProxyRules(c2)
+  assert.ok(cmds(c2).includes('uci -q delete firewall.openbox_tun_input'))
+  const c3 = createMockContext()
+  await removeOpenBoxRules(c3)
+  assert.ok(cmds(c3).includes('uci -q delete firewall.openbox_tun_input'))
 })

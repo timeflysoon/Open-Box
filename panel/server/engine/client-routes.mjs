@@ -39,23 +39,118 @@ export const normalizeMac = (raw) => {
 }
 export const isMac = (raw) => normalizeMac(raw) !== ''
 
-// 「不进内核」的终端规则(GitHub #39,像 OpenClash 的黑名单):bypass=true 时按 MAC 在入口就放行——sing-box 1.14
-// tun 的 exclude_mac_address,只在 auto_redirect 下有效(engine/config.mjs);流量根本不进内核,NAT 行为和没装
-// 一样,游戏加速器 / 对 NAT 类型敏感的设备用它。没有 auto_redirect(纯 tun 兼容模式)时退回「直连」出站:
-// 这里把 outbound 写成内置直连的 tag(directTag),路由 / DNS 规则照直连处理
+// 一条终端规则按什么认终端:ip(sources,IP / 网段)或 mac(macs),编辑框里二选一(页签)。老档案没有这个字段:
+// 「不进内核」「只让这些进内核」那两种当时必须填 MAC(IP 只给纯 tun 兜底用),算 mac;其余算 ip
+export const clientMatch = (r) => {
+  if (r && (r.match === 'ip' || r.match === 'mac')) return r.match
+  return r && (r.bypass === true || r.admit === true) && Array.isArray(r.macs) && r.macs.length ? 'mac' : 'ip'
+}
+const cleanSources = (r) => [...new Set((Array.isArray(r.sources) ? r.sources : []).map(normalizeCidr).filter(Boolean))]
+const cleanMacs = (r) => [...new Set((Array.isArray(r.macs) ? r.macs : []).map(normalizeMac).filter(Boolean))]
+
+// 终端规则 → 路由 / DNS 规则要的形状(engine/routing.mjs、engine/dns.mjs):按 IP 的写 source_ip_cidr,
+// 按 MAC 的写 source_mac_address(sing-box 1.14,内核按邻居表 / DHCP 租约认 MAC)。
+// 「不进内核」(GitHub #39,像 OpenClash 的黑名单)的真正放行在入口:按 MAC 是 tun 的 exclude_mac_address,
+// 按 IP 是 inet openbox 表里打内核标记(system/entry-bypass.mjs),都只在 auto_redirect 下有效。这里仍给它一条
+// 「直连」规则:纯 tun 兼容模式下靠它,auto_redirect 下这些终端根本进不来,这条碰不到
 export const normalizeClientRoutes = (list, { directTag = '' } = {}) => {
   if (!Array.isArray(list)) return []
   const out = []
   for (const r of list) {
     if (!r || typeof r !== 'object' || r.enabled === false) continue
-    const sources = (Array.isArray(r.sources) ? r.sources : []).map(normalizeCidr).filter(Boolean)
+    // 「只让这些进内核」不是分流规则:它不指定出口,只决定谁进内核(见下面的 admitSources),路由 / DNS 规则里没有它
+    if (r.admit === true) continue
+    const match = clientMatch(r)
     const bypass = r.bypass === true
-    const macs = bypass ? [...new Set((Array.isArray(r.macs) ? r.macs : []).map(normalizeMac).filter(Boolean))] : []
     const outbound = bypass
       ? (directTag || (typeof r.outbound === 'string' && r.outbound.trim()) || 'direct')
       : (typeof r.outbound === 'string' ? r.outbound.trim() : '')
-    if (!sources.length || !outbound) continue
-    out.push({ id: String(r.id || ''), name: String(r.name || ''), sources, outbound, ...(bypass ? { bypass: true, macs } : {}) })
+    if (!outbound) continue
+    const base = { id: String(r.id || ''), name: String(r.name || ''), match, outbound, ...(bypass ? { bypass: true } : {}) }
+    if (match === 'mac') {
+      const macs = cleanMacs(r)
+      if (macs.length) out.push({ ...base, sources: [], macs })
+    } else {
+      const sources = cleanSources(r)
+      if (sources.length) out.push({ ...base, sources })
+    }
   }
   return out
 }
+
+// 一条整理过的终端规则在路由 / DNS 规则里的来源条件;没有终端的返回 null
+export const clientSourceMatch = (cr) => {
+  if (!cr) return null
+  if (cr.match === 'mac') return Array.isArray(cr.macs) && cr.macs.length ? { source_mac_address: cr.macs } : null
+  return Array.isArray(cr.sources) && cr.sources.length ? { source_ip_cidr: cr.sources } : null
+}
+
+// 启用的某一类规则(bypass / admit)里的终端,按认法分开合并:{ ips: [网段…], macs: [MAC…] }
+const collectSources = (list, flag) => {
+  const ips = []
+  const macs = []
+  for (const r of Array.isArray(list) ? list : []) {
+    if (!r || typeof r !== 'object' || r.enabled === false || r[flag] !== true) continue
+    if (clientMatch(r) === 'mac') macs.push(...cleanMacs(r))
+    else ips.push(...cleanSources(r))
+  }
+  return { ips: [...new Set(ips)], macs: [...new Set(macs)] }
+}
+
+// 「不进内核」(黑名单)的终端:按 IP 的在 nft 里打放行位,按 MAC 的两头都要——tun 的
+// exclude_mac_address(跳过内核 nft 重定向)加 nft 里按 ether saddr 打的同一个放行位(跳过策略路由),
+// 只写前者的话包照样被路由进 tun,等于没放行(#195)
+export const bypassSources = (list) => collectSources(list, 'bypass')
+
+// 终端分流里出口是「直连」的终端(不含「不进内核」那种):连接进了内核也是直连。「直连不进内核」开着、有 nft 重定向时,
+// 内核首包预判照规则表把它们在系统入口放行(engine/routing.mjs 的 preMatchBypassRules)
+export const isDirectClientRoute = (cr, directTag) => Boolean(cr) && cr.bypass !== true && Boolean(directTag) && cr.outbound === directTag
+
+// 哪些终端的 DNS 要由内核按终端答:在入口把它们的查询转给内核的 DNS 入站(system/entry-bypass.mjs 的 terminal_dns 链),
+// 内核才看得到是哪台终端在查,按它自己的规则给答案(engine/dns.mjs)。劫持模式下局域网的查询本来就进内核,只有「不进内核」
+// 的终端例外:它们的包在入口打了标记,DNS 劫持也跳过了,查询落到 dnsmasq,再由 dnsmasq 转给内核时已经分不出是谁。
+// dnsmasq 转发模式下所有终端都是这样。要按终端答的只有两类,都是整台不该进内核、答案里就不能有 FakeIP 占位地址的
+// (占位地址只有内核认得,拿着它的连接只能进内核):
+//   · 「不进内核」的终端;
+//   · 出口是「直连」、会在首包预判时放行的终端(「直连不进内核」开着、有 nft 重定向)。劫持模式下它们的查询内核本来就接得到。
+// 走代理 / 拒绝的终端整台进内核,dnsmasq 模式下解析仍按域名规则答(老样子)。没开分流解析(dns.split)时所有查询都是直连
+// 解析、没有占位地址,不用转
+export const terminalDnsRedirected = (cr, { dnsMode = 'hijack', autoRedirect = false, directBypass = true, splitDns = true, directTag = '' } = {}) => {
+  if (!cr || !autoRedirect || !splitDns) return false
+  if (dnsMode !== 'dnsmasq' && dnsMode !== 'hijack') return false
+  if (cr.bypass === true) return true
+  return dnsMode === 'dnsmasq' && directBypass !== false && isDirectClientRoute(cr, directTag)
+}
+
+// 「不进内核」的终端只转它发给路由器自己的查询(入口规则带 fib daddr type local):发给路由器的落到 dnsmasq、再转给内核时
+// 分不出是谁,答案里会有 FakeIP 占位地址,要转;它自己指定的外部 DNS(比如 223.5.5.5)不截,交给路由器按自己的路由发——
+// 用户 2026-10-01 定的原则「不进内核的交给路由器自行处理」。截进内核就按内核的线路查:多线路由器上 mwan3 让这台终端走
+// 另一条线时,拿到的地址和它实际走的线不是同一家运营商,跨网绕路、晚高峰丢包(正式路由器上的 s-ui 节点就是这样变慢的)
+export const terminalDnsLocalOnly = (cr) => Boolean(cr) && cr.bypass === true
+
+// 上面那些终端的来源,按认法合并(给入口的 DNS 转发规则用);list 是 normalizeClientRoutes 整理过的。
+// ips / macs:发往任何 53 端口的查询都转(「直连」终端);localIps / localMacs:只转发给路由器自己的(terminalDnsLocalOnly)
+export const terminalDnsSources = (list, options = {}) => {
+  const out = { ips: [], macs: [], localIps: [], localMacs: [] }
+  for (const cr of Array.isArray(list) ? list : []) {
+    if (!terminalDnsRedirected(cr, options)) continue
+    const local = terminalDnsLocalOnly(cr)
+    if (cr.match === 'mac') (local ? out.localMacs : out.macs).push(...(cr.macs || []))
+    else (local ? out.localIps : out.ips).push(...(cr.sources || []))
+  }
+  return Object.fromEntries(Object.entries(out).map(([key, list]) => [key, [...new Set(list)]]))
+}
+
+// 「只让这些终端进内核」按 IP 的(入口 nft 打标记放行名单外的终端,见 system/entry-bypass.mjs):名单外的终端整台不进内核,
+// 解析也要给真实地址——占位地址只有内核认得,打了标记的包到不了内核(GitHub #260 #270)。入口把它们的查询转给内核专门的
+// DNS 入站(engine/config.mjs 的 DNS_DIRECT_INBOUND_TAG),那里的查询一律直连解析(engine/dns.mjs)。谁算名单外只在入口判一次。
+// 只按 MAC 的名单走 tun 原生的 include_mac_address,不打标记,名单外终端拿到的占位地址还能进内核,不用转
+export const admitDnsDirect = (list, { dnsMode = 'hijack', autoRedirect = false, splitDns = true } = {}) =>
+  Boolean(autoRedirect && splitDns && (dnsMode === 'dnsmasq' || dnsMode === 'hijack') && admitSources(list).ips.length > 0)
+
+// 「只让这些终端进内核」(GitHub #187,像 OpenClash 的白名单):有一台以上时,局域网里不在名单上的终端在入口就放行、
+// 连 DNS 也不被劫持,和没装一样;路由器自己的流量不受影响。只有 MAC 时用 tun 的 include_mac_address(内核原生);
+// 有按 IP 的就整个交给 nft(system/entry-bypass.mjs:从局域网口进来、IP 和 MAC 都不在名单上的才打标记),
+// 不再写 include_mac_address——两边各管一半的话,按 IP 放进来的终端会被按 MAC 的名单挡掉。
+// 只在 auto_redirect 下有效,纯 tun 兼容模式下所有终端照常进内核。一条都没有(或都停用)就是默认的全部进内核
+export const admitSources = (list) => collectSources(list, 'admit')

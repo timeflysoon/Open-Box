@@ -3,6 +3,32 @@
 
 export const VLESS_FLOW_VISION = 'xtls-rprx-vision'
 
+// hysteria2 端口跳跃(GitHub #171):机场的 HY2 节点常靠它躲 UDP 限速 / 封端口,不带上就是全超时。
+// 来源写法:mihomo 的 ports「20000-40000,50000」、分享链接的 mport=、链接里直接 host:20000-40000;
+// 内核要的是 server_ports: ["20000:40000", "50000:50000"](sing-quic 的 ParsePorts:每一段必须带冒号,单个端口写 a:a)。
+// 有一段看不懂就整个不要(回空数组,按单端口连),免得一条写错的订阅让内核起不来;只有一个端口不算跳跃
+export const normalizeHopPorts = (value) => {
+  const parts = (Array.isArray(value) ? value : String(value ?? '').split(/[,，;\s]+/)).map((s) => String(s).trim()).filter(Boolean)
+  const out = []
+  for (const part of parts) {
+    const m = /^(\d{1,5})(?:\s*[-:~]\s*(\d{1,5}))?$/.exec(part)
+    if (!m) return []
+    const a = Number(m[1])
+    const b = m[2] === undefined ? a : Number(m[2])
+    if (a < 1 || b > 65535 || a > b) return []
+    out.push(`${a}:${b}`)
+  }
+  if (out.length === 1 && out[0].split(':')[0] === out[0].split(':')[1]) return []
+  return out
+}
+// 跳跃间隔:mihomo 的 hop-interval 是秒数,内核要带单位的时长;官方下限 5 秒,不合法就不写(内核默认 30 秒)
+export const normalizeHopInterval = (value) => {
+  if (value === undefined || value === null || value === '') return ''
+  const text = String(value).trim()
+  if (/^\d+$/.test(text)) return Number(text) >= 5 ? `${Number(text)}s` : ''
+  return /^\d+(ms|s|m|h)$/.test(text) ? text : ''
+}
+
 // sing-box 只支持 xtls-rprx-vision。Xray 的 -udp443 变体(vision + 拦 UDP 443)按 vision 用;
 // xtls-rprx-direct / origin 这些早已废弃的 flow 丢掉,节点照常保留(GitHub #23)
 export const normalizeVlessFlow = (flow) => {

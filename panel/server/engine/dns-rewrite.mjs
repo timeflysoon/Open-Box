@@ -92,7 +92,7 @@ export const validateDnsRewrite = (raw) => {
       const r = raw.rules[i]
       if (!r || typeof r !== 'object' || Array.isArray(r)) return `DNS 重写第 ${i + 1} 条不是对象`
       const source = normalizeDomain(r.source, { allowWildcard: true })
-      if (!source) return `DNS 重写第 ${i + 1} 条的源域名不合法:「${String(r.source ?? '')}」(精确域名或 *.example.com)`
+      if (!source) return `DNS 重写第 ${i + 1} 条的源域名不合法:「${String(r.source ?? '')}」（精确域名或 *.example.com）`
       if (seen.has(source)) return `DNS 重写的源域名重复:${source}`
       seen.add(source)
       const hasDomain = r.domain !== undefined && r.domain !== null && String(r.domain).trim() !== ''

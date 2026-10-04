@@ -12,7 +12,7 @@ const UDP = `  sl  local_address rem_address   st tx_queue rx_queue tr tm->when 
    0: 00000000:20FD 00000000:0000 07 00000000:00000000 00:00000000 00000000     0        0 3 2 0 0
 `
 
-test('parseProcNet:端口是十六进制,TCP 只算 LISTEN(0A),UDP 全算', async () => {
+test('parseProcNet:端口是十六进制,TCP 只算 LISTEN（0A）,UDP 全算', async () => {
   assert.deepEqual(parseProcNet(TCP), [{ port: 2026, state: '0A' }, { port: 8080, state: '01' }])
   const ctx = createMockContext({ files: { '/proc/net/tcp': TCP, '/proc/net/udp': UDP } })
   const { listeningPorts } = await import('./servers.mjs')

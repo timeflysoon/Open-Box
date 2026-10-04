@@ -1,4 +1,6 @@
-import { customOutboundTag, customPolicyActive, customRuleTag, normalizeRouting, parsePortSpec, routeRulesetTags, splitRuleSetConditions } from './routing-model.mjs'
+import { FLIP_FALLBACK_TAG, andRule, flipFlagMap } from './flip.mjs'
+import { customOutboundTag, customPolicyActive, customRuleTag, isIpRuleSetTag, noDomainGuard, normalizeRouting, ntpDirectRule, parsePortSpec, policyRouteMatches, routeRulesetTags, splitRuleSetConditions } from './routing-model.mjs'
+import { clientSourceMatch, isDirectClientRoute } from './client-routes.mjs'
 
 // 一条策略的匹配条件 → 一条 sing-box 路由规则。
 // 同一条规则里的域名 / IP 字段是「或」的关系(sing-box 规则内部目标地址各字段取并集),所以一条策略
@@ -36,6 +38,75 @@ const customRule = (rule, ruleLists, outbound) => {
     domainKeyword: 'domain_keyword', ipCidr: 'ip_cidr',
   }[rule.type]
   return field ? { [field]: [rule.value], outbound } : null
+}
+
+// 前置自定义分流的一行 → 进配置的一到两条规则。IP 只管 IP、域名只管域名(用户 2026-09-26,不管是哪里的分流):
+// IP 段 / geoip / 规则集链接编出来的 IP 那份带「连接没有域名」的前提(noDomain),域名那几档照常;端口行两类连接都管
+const customRuleParts = (rule, ruleLists, outbound) => {
+  const tag = customRuleTag(rule)
+  if (tag) {
+    const tags = routeRulesetTags({ rulesets: [tag] }, ruleLists)
+    const domainTags = tags.filter((t) => !isIpRuleSetTag(t))
+    const ipTags = tags.filter((t) => isIpRuleSetTag(t))
+    return [
+      ...(domainTags.length ? [{ rule: { rule_set: domainTags, outbound }, noDomain: false }] : []),
+      ...(ipTags.length ? [{ rule: { rule_set: ipTags, outbound }, noDomain: true }] : []),
+    ]
+  }
+  const emitted = customRule(rule, ruleLists, outbound)
+  return emitted ? [{ rule: emitted, noDomain: Object.prototype.hasOwnProperty.call(emitted, 'ip_cidr') }] : []
+}
+
+// 首包预判放行(sing-box 1.13+ 的 bypass 动作,auto_redirect 的 nfqueue 预判):新连接的第一个包先交给内核按路由规则比一遍,
+// 命中不带出口的 bypass 就在系统层打上内核自身流量的标记放走,整条连接不再进内核。只有本来要进内核的连接才会被预判(白名单
+// 模式下就是目标在「进内核」名单里的那些),其余照旧在入口直接放走、不打标记,多 WAN(mwan3)的选线不受影响。
+// 规则表里按直连走、又能在首包判定的两类用它:
+//   · 「订阅和节点站点直连」的地址(部署时节点 / 订阅的域名解析出来的 IP 也在里面):局域网设备连节点服务器;
+//   · 终端分流里出口是「直连」的终端。
+// 排在它们前面、可能把连接送去别处的,只有前置自定义分流里走代理 / 拒绝的行,和内置的 DNS 接管、tun 防回环:这些按 IP /
+// 规则集 / 端口判的条件原样取反挂上——命中的连接照常进内核、按原规则走,其余放行。按域名的条件不用挂:预判时连接只有目标
+// IP;FakeIP 占位地址会被找回成域名,而 bypass 对域名目标不生效,这类连接照常进内核按规则走。
+// 不带 outbound 的 bypass 只在预判里生效,正常路由时内核跳过它,后面原来那条直连规则照旧兜着。必须排在 sniff 前面:TCP 首包
+// 没有载荷,预判碰到 sniff 就停了。没有 nfqueue(缺内核模块)时预判不开,这几条等于不存在
+// directHostSet:订阅和节点站点直连的 IP 那份规则集(engine/direct-hosts.mjs 的 NODE_DIRECT_IP_TAG,部署的配置用它,地址变了
+// 只换文件);直接给 directHosts 地址的(测试)照旧写成 ip_cidr
+export const preMatchBypassRules = (conf, { clientRoutes = [], directHosts = null, directHostSet = '', directTag = 'direct', blockTag = 'block', ruleLists = {}, knownOutbounds = null, tunCidrs = [] } = {}) => {
+  const direct = (Array.isArray(clientRoutes) ? clientRoutes : []).filter((cr) => isDirectClientRoute(cr, directTag))
+  const hostCidrs = !directHostSet && directHosts && Array.isArray(directHosts.cidrs) ? directHosts.cidrs : []
+  if (!direct.length && !hostCidrs.length && !directHostSet) return []
+  const cidrs = [...tunCidrs]
+  const sets = []
+  const ports = [53]
+  const ranges = []
+  const add = (list, v) => { if (!list.includes(v)) list.push(v) }
+  if (customPolicyActive(conf.custom)) {
+    const builtinTags = { direct: directTag, block: blockTag }
+    for (const rule of conf.custom.rules) {
+      const target = customOutboundTag(rule, builtinTags)
+      if (target === directTag) continue
+      if (knownOutbounds && !knownOutbounds.has(target)) continue
+      for (const { rule: part } of customRuleParts(rule, ruleLists, target)) {
+        for (const c of part.ip_cidr || []) add(cidrs, c)
+        for (const t of part.rule_set || []) add(sets, t)
+        for (const p of part.port || []) add(ports, p)
+        for (const r of part.port_range || []) add(ranges, r)
+      }
+    }
+  }
+  const keep = [
+    ...(cidrs.length ? [{ ip_cidr: cidrs, invert: true }] : []),
+    ...(sets.length ? [{ rule_set: sets, invert: true }] : []),
+    { port: ports, ...(ranges.length ? { port_range: ranges } : {}), invert: true },
+  ]
+  const ips = [...new Set(direct.filter((cr) => cr.match !== 'mac').flatMap((cr) => cr.sources || []))]
+  const macs = [...new Set(direct.filter((cr) => cr.match === 'mac').flatMap((cr) => cr.macs || []))]
+  // 顺序和内核规则表一致:订阅和节点站点直连在终端分流前面
+  return [
+    ...(directHostSet ? [andRule([{ rule_set: [directHostSet] }, ...keep], { action: 'bypass' })] : []),
+    ...(hostCidrs.length ? [andRule([{ ip_cidr: hostCidrs }, ...keep], { action: 'bypass' })] : []),
+    ...(ips.length ? [andRule([{ source_ip_cidr: ips }, ...keep], { action: 'bypass' })] : []),
+    ...(macs.length ? [andRule([{ source_mac_address: macs }, ...keep], { action: 'bypass' })] : []),
+  ]
 }
 
 // 一条规则(前置自定义分流的一行 / 站点集)有没有按目标 IP 判的条件
@@ -107,19 +178,49 @@ export const buildRoute = (routing, rulesetDir, options = {}) => {
   // 终端分流都按这张表筛;规则集链接的形状表决定引用域名那份还是 IP 那份
   const known = options.knownOutbounds instanceof Set ? options.knownOutbounds : null
   const ruleLists = options.ruleLists || {}
-  const rules = [{ action: 'sniff' }]
+  // 订阅和节点站点直连的地址、终端分流「直连」的终端,在首包预判时照规则放行(preMatchBypassRules),排在 sniff 前面。
+  // 「直连不进内核」开着、有 nft 重定向时才写(options.preMatchBypass,engine/config.mjs 按档案算)
+  const preMatch = options.preMatchBypass
+    ? preMatchBypassRules(conf, { clientRoutes: options.clientRoutes, directHosts: options.directHosts, directHostSet: options.directHostSets ? options.directHostSets.ip : '', directTag: options.directTag || 'direct', blockTag: options.blockTag || 'block', ruleLists, knownOutbounds: known, tunCidrs: Array.isArray(options.tunCidrs) ? options.tunCidrs : [] })
+    : []
+  const rules = [...preMatch, { action: 'sniff' }]
   // IPv6 分层 · 代理 v6 降为 IPv4(engine/dns.mjs 的 ipv6ProxyMode):某条规则的出口此刻是代理线路时,
   // 先插一条同条件 + ip_version 6 的 reject——裸 v6 目标、终端自己解析出来的 v6 地址要走代理线路
   // 时明确失败,不能悄悄从 WAN 直出,也不影响直连出口的 v6(直连规则前面不插)。
   // rejectV6For(出口 tag) 由调用方按此刻的选择算(config.mjs)
   const rejectV6For = typeof options.rejectV6For === 'function' ? options.rejectV6For : null
-  const pushRule = (rule) => {
-    if (rejectV6For && rule.outbound && rejectV6For(rule.outbound)) {
-      const match = { ...rule }
-      delete match.outbound
-      rules.push({ ...match, ip_version: 6, action: 'reject' })
+  // 屏蔽 QUIC(GitHub #163):同一个套路——出口此刻是代理线路的规则前面插一条同条件 + UDP 443 的 reject,
+  // 浏览器收到拒绝就退回 TCP(HTTPS);不少节点转发 UDP 很差,YouTube 走 QUIC 反而卡。直连出口的 QUIC 不动。
+  // 规则自己带端口 / 协议条件的(前置自定义分流按端口写的)不插:那是用户明说的,再叠一个 443 语义就变了。
+  // rejectQuicFor(出口 tag) 同样由调用方按此刻的选择算
+  const rejectQuicFor = typeof options.rejectQuicFor === 'function' ? options.rejectQuicFor : null
+  const QUIC_MATCH = { network: 'udp', port: 443 }
+  // 热切换(engine/flip.mjs):出口是站点集的规则,v6 / QUIC 拒绝不按此刻的类别决定插不插,而是恒定插一条
+  // 「同条件 + 开关 + 附加条件」的 logical AND——开关 ON(不是直连)才命中,翻面只改写开关文件、不重启内核。
+  // 出口是节点 / 节点组 / 直连 / 拒绝的规则类别不会变,按 rejectV6For / rejectQuicFor 此刻的结论直接写
+  const flipFlags = flipFlagMap(conf)
+  const canQuic = (match) => match.port === undefined && match.port_range === undefined && match.network === undefined
+  // noDomain:这条是站点集按 IP 判的那一份,只管没有域名的连接(routing-model.mjs 的 noDomainGuard)。同条件的
+  // v6 / QUIC 拒绝也带着这个前提——有域名的连接按域名判出来走直连时,不能因为地址落在某个走代理的集合里被拒
+  const pushRule = (rule, { noDomain = false } = {}) => {
+    const match = { ...rule }
+    delete match.outbound
+    const guard = noDomain ? [noDomainGuard()] : []
+    const routed = noDomain ? andRule([match, ...guard], { outbound: rule.outbound }) : rule
+    const flag = rule.outbound ? flipFlags.get(rule.outbound) : undefined
+    if (flag) {
+      if (rejectV6For) rules.push(andRule([match, ...guard, { rule_set: [flag] }, { ip_version: 6 }], { action: 'reject' }))
+      if (rejectQuicFor && canQuic(match)) rules.push(andRule([match, ...guard, { rule_set: [flag] }, QUIC_MATCH], { action: 'reject' }))
+      rules.push(routed)
+      return
     }
-    rules.push(rule)
+    if (rejectV6For && rule.outbound && rejectV6For(rule.outbound)) {
+      rules.push(noDomain ? andRule([match, ...guard, { ip_version: 6 }], { action: 'reject' }) : { ...match, ip_version: 6, action: 'reject' })
+    }
+    if (rejectQuicFor && rule.outbound && rejectQuicFor(rule.outbound) && canQuic(match)) {
+      rules.push(noDomain ? andRule([match, ...guard, QUIC_MATCH], { action: 'reject' }) : { ...match, ...QUIC_MATCH, action: 'reject' })
+    }
+    rules.push(routed)
   }
   // off:Open-Box 不劫持任何 DNS——不改写、不回交,局域网的 53 端口流量当普通 UDP 按规则走
   // (配合 config.mjs 里关掉 auto_redirect,它自带 nft 层的 DNS 劫持,关不掉)。但内核 DNS 入站
@@ -133,7 +234,8 @@ export const buildRoute = (routing, rulesetDir, options = {}) => {
     // dnsmasq 接管模式下不能全局劫持 DNS 协议流量:tun 里到 dns-in 的转发查询也会
     // 匹配 {protocol:'dns'},被劫持回同一个 dns-in 入站,形成自环导致解析超时。
     // 仅劫持 dns-in 自身收到的查询,其余 DNS 流量按普通路由走(交给 dnsmasq 上游)。
-    rules.push({ inbound: ['dns-in'], action: 'hijack-dns' })
+    // 「只让这些终端进内核」名单外终端的专用入站(options.dnsDirectInbound)一样劫持
+    rules.push({ inbound: ['dns-in', ...(options.dnsDirectInbound ? [options.dnsDirectInbound] : [])], action: 'hijack-dns' })
     // sing-box 开了 auto_redirect 时会自带一条 nft DNAT:局域网发给任何 53 端口的查询
     // (包括发给路由器自己 dnsmasq 的)统统改写到 tun 对端 172.19.0.2:53 送进 tun。
     // hijack 模式靠 {protocol:'dns'} 把它们接住;dnsmasq 模式只劫持 dns-in,这些查询会
@@ -176,7 +278,8 @@ export const buildRoute = (routing, rulesetDir, options = {}) => {
   // 喂自己(真机上出现过几十秒把整机吃死),不是分流,不能被任何规则盖过。
   // 排在 ip_is_private 之前是有意的:否则"把某个内网段送到某个节点"(比如经 WireGuard
   // 访问对端局域网)永远写不出来,会被局域网直连那条先接走。
-  // 一行一条规则、一行一个出口,按行的先后进配置(内核首条命中生效)。
+  // 一行一个出口,按行的先后进配置(内核首条命中生效)。IP 只管 IP、域名只管域名:IP 那几档只管没有域名的连接
+  // (按域名访问对端局域网要写域名行),规则集链接拆成域名一条、IP 一条(customRuleParts)。
   // 出口必须是配置里真有的 outbound,指向已删掉的节点的那一行跳过,其余行照常生效。
   const custom = conf.custom
   if (customPolicyActive(custom)) {
@@ -184,46 +287,55 @@ export const buildRoute = (routing, rulesetDir, options = {}) => {
     for (const rule of custom.rules) {
       const target = customOutboundTag(rule, builtinTags)
       if (known && !known.has(target)) continue
-      const emitted = customRule(rule, ruleLists, target)
-      if (!emitted) continue
-      for (const tag of emitted.rule_set || []) addTag(tag)
-      pushRule(emitted)
+      for (const { rule: emitted, noDomain } of customRuleParts(rule, ruleLists, target)) {
+        for (const tag of emitted.rule_set || []) addTag(tag)
+        pushRule(emitted, { noDomain })
+      }
     }
   }
 
   // 内置的直连出站可以改名,tag 从调用方传进来
   rules.push({ ip_is_private: true, outbound: options.directTag || 'direct' })
+  // NTP 对时直连(GitHub #156):路由器自己和局域网设备的 NTP(UDP 123)一律直连。对时服务器多在国外
+  // (time.google.com、pool.ntp.org),落到走代理的站点集后,不转发 UDP 的节点上对时一直失败,电视这类
+  // 设备开机对不上时间。排在前置自定义分流后面:真要经节点对时,在那里写一条端口 123 就能盖过它
+  rules.push(ntpDirectRule(options.directTag || 'direct'))
 
-  // 订阅和节点站点直连(开关在后端设置):排在所有站点集之前,不受它们影响
+  // 订阅和节点站点直连(开关在后端设置):排在所有站点集之前,不受它们影响。部署的配置引用两份本地规则集(directHostSets,
+  // engine/direct-hosts.mjs):地址变了只换文件、不重启内核;直接给地址的(directHosts,测试)照旧写进规则
   const dh = options.directHosts
-  if (dh && ((dh.domains && dh.domains.length) || (dh.cidrs && dh.cidrs.length))) {
+  if (options.directHostSets) {
+    rules.push({ rule_set: [options.directHostSets.domain, options.directHostSets.ip], outbound: options.directTag || 'direct' })
+  } else if (dh && ((dh.domains && dh.domains.length) || (dh.cidrs && dh.cidrs.length))) {
     const rule = { outbound: options.directTag || 'direct' }
     if (dh.domains && dh.domains.length) rule.domain = dh.domains
     if (dh.cidrs && dh.cidrs.length) rule.ip_cidr = dh.cidrs
     rules.push(rule)
   }
 
-  // 终端分流:指定来源 IP / 网段的全部流量走某个出口,排在站点集之前(优先级高于按目标
+  // 终端分流:指定终端(来源 IP / 网段,或 MAC)的全部流量走某个出口,排在站点集之前(优先级高于按目标
   // 分流),但在前置自定义分流 / ip_is_private / 直连站点之后。
   // 出口必须是配置里真有的 outbound,否则内核 outbound not found 起不来,这种规则直接丢掉。
   for (const cr of Array.isArray(options.clientRoutes) ? options.clientRoutes : []) {
-    if (!cr || !Array.isArray(cr.sources) || !cr.sources.length || !cr.outbound) continue
+    const match = clientSourceMatch(cr)
+    if (!match || !cr.outbound) continue
     if (known && !known.has(cr.outbound)) continue
-    pushRule({ source_ip_cidr: cr.sources, outbound: cr.outbound })
+    pushRule({ ...match, outbound: cr.outbound })
   }
 
-  if (conf.adBlock) {
-    addTag(conf.adRuleset)
-    rules.push({ rule_set: conf.adRuleset, action: 'reject' })
-  }
-
-  // 站点集按用户排的顺序逐条匹配,首条命中生效。规则集 + 域名 / IP 的站点集拆成紧邻的两条(1.14 的规则集语义)
+  // 站点集按用户排的顺序逐条匹配,首条命中生效。每个站点集拆成「看域名」「看 IP」两份(routing-model.mjs 的
+  // policyRouteMatches):看 IP 的那份带着「连接没有域名」的前提——有域名的访问只按域名把站点集对一遍,都没命中就
+  // 落到 final(兜底),不会被某个站点集的 geoip / IP 段抢走;没有域名的连接只看 IP 那份。两类连接各走各的,所以
+  // 两份的先后不影响结果,照站点集顺序排。规则集 + 域名 / IP 字段再拆成紧邻的两条(1.14 的规则集语义)
   for (const policy of conf.activePolicies) {
     for (const tag of routeRulesetTags(policy, ruleLists)) addTag(tag)
-    for (const part of splitRuleSetConditions(policyRule(policy, ruleLists))) pushRule(part)
+    const { domain, ip } = policyRouteMatches(policy, ruleLists)
+    if (domain) for (const part of splitRuleSetConditions(domain)) pushRule({ ...part, outbound: policy.name })
+    if (ip) for (const part of splitRuleSetConditions(ip)) pushRule({ ...part, outbound: policy.name }, { noDomain: true })
   }
-  // 兜底此刻走代理:没命中的 v6 连接同样明确拒绝(final 写不了条件,单独一条)
-  if (rejectV6For && rejectV6For(conf.fallback.name)) rules.push({ ip_version: 6, action: 'reject' })
+  // 兜底走代理时,没命中的 v6 连接 / QUIC 同样明确拒绝(final 写不了条件,单独写;挂在兜底的开关上)
+  if (rejectV6For) rules.push(andRule([{ rule_set: [FLIP_FALLBACK_TAG] }, { ip_version: 6 }], { action: 'reject' }))
+  if (rejectQuicFor) rules.push(andRule([{ rule_set: [FLIP_FALLBACK_TAG] }, QUIC_MATCH], { action: 'reject' }))
 
   if (preResolve.length) rules.splice(preResolveAt, 0, ...preResolve)
 

@@ -61,7 +61,7 @@ test('classifyEntry:回复方改写成路由器自己的地址 = 被 redirect �
   assert.equal(r.evidence.conntrack, CT_REDIRECT)
 })
 
-test('classifyEntry:打了 tun 输入标记 = 进内核(tun);内核连接表里有 = 进内核(纯 tun 模式)', () => {
+test('classifyEntry:打了 tun 输入标记 = 进内核（tun）;内核连接表里有 = 进内核（纯 tun 模式）', () => {
   const marked = parseConntrack(CT_TUN_MARK)[0]
   assert.deepEqual([classifyEntry({ flow: marked, tunMark: TUN_INPUT_MARK }).kind, classifyEntry({ flow: marked, tunMark: TUN_INPUT_MARK }).via], ['kernel', 'tun'])
   const plain = parseConntrack(CT_FORWARD)[0]
@@ -135,7 +135,9 @@ test('ensureProbeNetns:按顺序建命名空间、veth 挂到 LAN 网桥、固�
   assert.equal(lease.mac, PROBE_MAC)
   assert.equal(lease.reused, false)
   assert.deepEqual(lease.dns, ['10.0.0.1'])
+  assert.equal(lease.override, null, 'DHCP 给的网关就是本机,不改')
   const cmds = ctx.calls.map((c) => [c.cmd, ...c.args].join(' '))
+  assert.ok(!cmds.some((c) => c.includes('route replace default')), '主路由模式下不动默认路由')
   const order = [
     `ip netns add ${PROBE_NETNS}`,
     `ip link add ${PROBE_VETH_HOST} type veth peer name ${PROBE_VETH_NS}`,
@@ -175,4 +177,19 @@ test('bypassSetHas:集合不存在 = 没有原生旁路;存在时按 nft get ele
   assert.deepEqual(await bypassSetHas(hit, '1.2.3.4'), { set: 'inet4_route_exclude_address_set', hit: true })
   const miss = createMockContext({ execResults: { 'nft get element inet sing-box inet6_route_exclude_address_set { 2001:db8::1 }': { code: 1 } } })
   assert.deepEqual(await bypassSetHas(miss, '2001:db8::1'), { set: 'inet6_route_exclude_address_set', hit: false })
+})
+
+test('ensureProbeNetns:旁路由(DHCP 给的网关不是本机)→ 默认路由和 DNS 改指本机 LAN 地址,记下 DHCP 原本给的(#132)', async () => {
+  const dhcpKey = `ip netns exec ${PROBE_NETNS} udhcpc -i ${PROBE_VETH_NS} -n -q -t 4 -T 1 -x hostname:openbox-probe -s ${PROBE_DHCP_SCRIPT}`
+  const ctx = createMockContext({ execResults: { 'ip netns list': { stdout: '' }, [dhcpKey]: { stdout: 'LEASE ip=192.168.5.10 mask=24 router=192.168.5.1 dns=192.168.5.1\n' } } })
+  await teardownProbeNetns(ctx)
+  ctx.calls.length = 0
+  const lease = await ensureProbeNetns(ctx, { lan: { device: 'br-lan', address: '192.168.5.120', mask: 24 } })
+  assert.equal(lease.gateway, '192.168.5.120')
+  assert.deepEqual(lease.dns, ['192.168.5.120'])
+  assert.deepEqual(lease.override, { gateway: '192.168.5.1', dns: ['192.168.5.1'] })
+  const cmds = ctx.calls.map((c) => [c.cmd, ...c.args].join(' '))
+  const i = cmds.indexOf(`ip netns exec ${PROBE_NETNS} ip route replace default via 192.168.5.120 dev ${PROBE_VETH_NS}`)
+  assert.ok(i > cmds.indexOf(dhcpKey), cmds.join(' | '))
+  await teardownProbeNetns(ctx)
 })

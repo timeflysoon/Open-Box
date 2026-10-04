@@ -1,8 +1,10 @@
 import { FALLBACK_TAG, normalizeRouting } from '../engine/routing-model.mjs'
+import { chainNodes, CHAIN_SOURCE_LABEL, CHAIN_SUBSCRIPTION_ID } from '../engine/chain-proxy.mjs'
 import express from 'express'
 import { normalizeGroups, emitUserGroups, GROUP_TYPES, GROUP_MODES, FAILOVER_INTERNAL_PREFIX, FAILOVER_LIMITS, FAILOVER_MAX_LANES, isInternalTag } from '../engine/user-groups.mjs'
 import { parseDuration } from '../engine/duration.mjs'
 import { DNSMASQ_OUTBOUND_TAG } from '../engine/config.mjs'
+import { appliedSummary } from './subscriptions.mjs'
 
 const isStr = (v) => typeof v === 'string' && v.trim().length > 0
 const numIn = (v, [lo, hi]) => {
@@ -20,7 +22,7 @@ export const validateFailoverGroup = (raw, { nodeTags, otherNames, previous }) =
   if (raw.mode !== undefined && raw.mode !== null && raw.mode !== 'static') {
     return `故障转移「${name}」只支持静态成员,mode 必须是 static`
   }
-  if (!Array.isArray(raw.lanes)) return `故障转移「${name}」缺少主备页签(lanes)`
+  if (!Array.isArray(raw.lanes)) return `故障转移「${name}」缺少主备页签（lanes）`
   if (raw.lanes.length > FAILOVER_MAX_LANES) return `故障转移「${name}」最多 ${FAILOVER_MAX_LANES} 个页签`
   const ids = new Set()
   const prevLaneMembers = new Map((previous?.lanes || []).map((l) => [l.id, new Set(l.members)]))
@@ -29,6 +31,7 @@ export const validateFailoverGroup = (raw, { nodeTags, otherNames, previous }) =
     if (!lane || typeof lane !== 'object') return `故障转移「${name}」第 ${i + 1} 个页签不是对象`
     if (lane.id !== undefined && lane.id !== null && !isStr(lane.id)) return `故障转移「${name}」第 ${i + 1} 个页签的 id 不合法`
     if (lane.icon !== undefined && lane.icon !== null && typeof lane.icon !== 'string') return `故障转移「${name}」第 ${i + 1} 个页签的图标不合法`
+    if (lane.manual !== undefined && lane.manual !== null && typeof lane.manual !== 'boolean') return `故障转移「${name}」第 ${i + 1} 个页签的选择方式不合法`
     const id = isStr(lane.id) ? lane.id.trim() : ''
     if (id) {
       if (ids.has(id)) return `故障转移「${name}」的页签 id 重复:${id}`
@@ -74,31 +77,42 @@ export const validateFailoverGroup = (raw, { nodeTags, otherNames, previous }) =
 
 // 用户自定义节点组的读写。整份列表一次性存取(PUT 全量覆盖),不做逐条 CRUD:
 // 组之间可以互相引用,逐条改会让"中间状态"出现悬空引用或环,而整份写入天然是原子的。
-export const registerGroupRoutes = (app, { store } = {}) => {
+// applyNow:存完在线换进内核再回复(api/hot-apply.mjs),节点组改了不用重启
+export const registerGroupRoutes = (app, { store, applyNow = null } = {}) => {
   const router = express.Router({ caseSensitive: true })
   router.use(express.json({ limit: '1mb' }))
 
   // 列表 + 可选成员清单(节点与其它组),供前端的成员选择器直接用,免得它自己再去
   // 拼一次"节点从哪来、组从哪来"。
+  // 节点池 = 订阅节点 + 链式代理的节点(engine/chain-proxy.mjs)
+  const poolNodes = () => [...store.getNodes(), ...chainNodes(typeof store.getProfile === 'function' ? store.getProfile() : {})]
+
   router.get('/groups', (_req, res) => {
     const groups = store.getGroups()
-    const nodes = store.getNodes()
+    // 链式代理的节点(档案的 chainProxies)也是候选:能当节点组成员、故障转移页签成员,也能在各处出口选择器里直接选
+    const nodes = poolNodes()
     // 每个节点带上它来自哪条订阅:成员选择器要按订阅筛选。用 subscriptionId 查名字,
     // 而不是从节点名里猜——节点名前缀是可选的,关掉前缀就什么都猜不出来了。
-    const subscriptionName = new Map(store.getSubscriptions().map((s) => [s.id, s.name]))
+    const subscriptionName = new Map([...store.getSubscriptions().map((s) => [s.id, s.name]), [CHAIN_SUBSCRIPTION_ID, CHAIN_SOURCE_LABEL]])
     res.json({
       groups,
       types: [...GROUP_TYPES],
       availableNodes: nodes.map((n) => ({
         name: n.tag,
         subscription: subscriptionName.get(n.subscriptionId) || '',
+        // 链式代理的节点带上它的上游:代理页把这种节点显示成「前置代理层 → 目标节点」两层;
+        // chain 标出来:动态组不收它(engine/user-groups.mjs 的 dynamicTags),页面算动态组成员时照样排除
+        ...(n.chain ? { chain: true } : {}),
+        ...(n.chain && n.detour ? { upstream: n.detour } : {}),
+        // 识别出的地区名:动态组按「地区名 + 节点名」匹配关键词(同 engine/user-groups.mjs 的 matchText)
+        ...(n.regionName ? { region: n.regionName } : {}),
       })),
       // 内置的直连/拒绝不在候选里:它们不是可以当成员的组
       availableGroups: groups.filter((g) => !g.kind).map((g) => g.name),
     })
   })
 
-  router.put('/groups', (req, res) => {
+  router.put('/groups', async (req, res) => {
     const body = req.body || {}
     if (!Array.isArray(body.groups)) {
       res.status(400).json({ error: 'groups must be an array' })
@@ -128,6 +142,9 @@ export const registerGroupRoutes = (app, { store } = {}) => {
     const routing = normalizeRouting(store.getProfile()?.routing)
     // 站点集(含停用的:一启用就撞)和 dnsmasq 回送出站也在同一个出站命名空间里
     const policyNames = new Set(routing.policies.map((p) => p.name))
+    // 链式代理的节点名也是出站 tag。2026-09-18 开发路由器:节点组和链式代理都叫「英国-住宅111」,链式节点被当重名丢掉,
+    // 组里只剩一个指向自己的成员,内核里挂了直连占位——流量根本没走住宅线路
+    const chainNames = new Set(chainNodes(typeof store.getProfile === 'function' ? store.getProfile() : {}).map((n) => n.tag))
     for (const g of normalized) {
       const fallbackName = routing.fallback.name
       if (g.name === FALLBACK_TAG || g.name === fallbackName) {
@@ -136,6 +153,10 @@ export const registerGroupRoutes = (app, { store } = {}) => {
       }
       if (policyNames.has(g.name) || g.name === DNSMASQ_OUTBOUND_TAG) {
         res.status(400).json({ error: `「${g.name}」已经是一个站点集的名字,分组不能和站点集同名` })
+        return
+      }
+      if (chainNames.has(g.name)) {
+        res.status(400).json({ error: `「${g.name}」已经是一个链式代理的名字,分组不能和它同名` })
         return
       }
       if (seen.has(g.name)) {
@@ -147,7 +168,7 @@ export const registerGroupRoutes = (app, { store } = {}) => {
 
     // 故障转移组按原始提交做严格校验(见 validateFailoverGroup)
     {
-      const nodeTags = new Set(store.getNodes().map((n) => n && n.tag).filter(Boolean))
+      const nodeTags = new Set(poolNodes().map((n) => n && n.tag).filter(Boolean))
       const previous = new Map(store.getGroups().map((g) => [g.id, g]))
       const submittedNames = new Set(body.groups.map((g) => (typeof g?.name === 'string' ? g.name.trim() : '')))
       for (const raw of body.groups) {
@@ -194,7 +215,7 @@ export const registerGroupRoutes = (app, { store } = {}) => {
 
     // 把这份定义按当前节点跑一遍,如实告诉调用方哪些组落地不了(成员为空/成环)。
     // 保存本身仍然成功——用户可能只是还没来得及挑成员。
-    const nodes = store.getNodes()
+    const nodes = poolNodes()
     const { dropped } = emitUserGroups(migrated, nodes)
     // 悬空引用(既不是节点也不是组的成员名)也要说出来:生成配置时它会被静默忽略,组没空
     // 的话连 dropped 都不会提到它
@@ -207,7 +228,11 @@ export const registerGroupRoutes = (app, { store } = {}) => {
         ? { name: g.name, members: g.lanes.flatMap((l) => l.members.filter((m) => !nodeTags.has(m))) }
         : { name: g.name, members: g.members.filter((m) => m !== g.name && !nodeTags.has(m) && !groupNames.has(m)) }))
       .filter((d) => d.members.length)
-    res.json({ ok: true, groups: store.getGroups(), dropped, dangling, renamed: [...renames].map(([from, to]) => ({ from, to })) })
+    let applied
+    if (typeof applyNow === 'function') {
+      try { applied = appliedSummary(await applyNow()) } catch (error) { applied = { ok: false, changed: 0, reason: error instanceof Error ? error.message : String(error) } }
+    }
+    res.json({ ok: true, groups: store.getGroups(), dropped, dangling, renamed: [...renames].map(([from, to]) => ({ from, to })), applied })
   })
 
   app.use('/api/openbox', router)

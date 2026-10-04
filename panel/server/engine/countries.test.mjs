@@ -7,7 +7,7 @@ import { matchRegion } from './rename.mjs'
 
 // 服务端的国家目录和前端 src/constant/countries.ts 是同一份数据:这里把前端那份按正则读出来
 // 逐条比对,两边谁改了另一边没跟上,这条就红
-test('服务端国家目录和前端 src/constant/countries.ts 逐条一致(代码、中文名、关键词)', () => {
+test('服务端国家目录和前端 src/constant/countries.ts 逐条一致（代码、中文名、关键词）', () => {
   const ts = readFileSync(fileURLToPath(new URL('../../src/constant/countries.ts', import.meta.url)), 'utf8')
   const rows = [...ts.matchAll(/\{ code: '([A-Z]{2})', zh: '([^']+)', tw: '[^']+', en: '[^']+', keywords: \[([^\]]*)\] \}/g)]
     .map((m) => ({ code: m[1], name: m[2], keywords: m[3].split(',').map((k) => k.trim().replace(/^'|'$/g, '')).filter(Boolean) }))

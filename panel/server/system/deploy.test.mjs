@@ -53,6 +53,42 @@ test('成功路径:写配置 + 防火墙 + 重启 + 验证', async () => {
   assert.ok(c.includes('/etc/init.d/openbox restart'))
 })
 
+test('代理侧 DNS 上游按目标分流判出的线路记进元数据(规则页 / 诊断包看),判不出来的带原因', async () => {
+  const ctx = okCtx()
+  const r = await deployConfig(ctx, paths, { config, profile, dnsUpstreamRoutes: [
+    { server: '1.1.1.1', port: 53, protocol: 'tcp', outbound: '国外', reject: false, owner: { kind: 'policy', name: '国外' }, chain: ['国外', 'HK-01'], ruleIndex: 49 },
+    { server: '8.8.8.8', port: 53, protocol: 'tcp', error: 'rule set unreadable' },
+  ] })
+  assert.equal(r.ok, true)
+  const meta = JSON.parse(ctx.files[configMetaPath(paths)])
+  assert.deepEqual(meta.dnsUpstreamRoutes, [
+    { server: '1.1.1.1', port: 53, protocol: 'tcp', outbound: '国外', reject: false, ruleIndex: 49, owner: { kind: 'policy', name: '国外' } },
+    { server: '8.8.8.8', port: 53, protocol: 'tcp', outbound: '', reject: false, ruleIndex: null, owner: null, error: 'rule set unreadable' },
+  ], '此刻的链路是运行时状态,不记')
+})
+
+test('带编号的坏节点直接定位，保留原配置且无需逐节点拆分校验', async () => {
+  const ctx = okCtx({ '/opt/open-box/bin/sing-box check -c /opt/open-box/etc/config.candidate.json': { code: 1, stderr: 'FATAL initialize outbound [1]: invalid public_key' } })
+  const r = await deployConfig(ctx, paths, { profile, config: { outbounds: [{ type: 'direct', tag: 'direct' }, { type: 'vless', tag: 'HK' }] }, nodes: [{ tag: 'HK', subscriptionId: 'sub' }], subscriptions: [{ id: 'sub', name: '机场' }] })
+  assert.equal(r.ok, false)
+  assert.match(r.message, /节点「HK」，订阅「机场」/)
+  assert.deepEqual(r.badTags, ['HK'])
+  assert.equal(ctx.writes.filter((w) => w.path.endsWith('config.probe.json')).length, 0)
+  assert.ok(!cmds(ctx).includes('/etc/init.d/openbox restart'))
+})
+
+test('DNS off 仍放行 LAN 到 TUN，DNS 不被重新接管，回滚撤掉转发规则', async () => {
+  const ctx = okCtx()
+  const r = await deployConfig(ctx, paths, { profile: { ...profile, dns: { mode: 'off' } }, config: { ...config, inbounds: [{ type: 'tun', interface_name: 'tun0' }] } })
+  assert.equal(r.ok, true)
+  assert.ok(cmds(ctx).includes('uci set firewall.openbox_tun_forward.device=tun0'))
+  assert.ok(cmds(ctx).includes('uci set firewall.openbox_tun_input.device=tun0'))
+  assert.ok(!cmds(ctx).some((c) => /uci (set|add_list) dhcp/.test(c)))
+  await rollbackToDirect(ctx, paths)
+  assert.ok(cmds(ctx).includes('uci -q delete firewall.openbox_tun_forward'))
+  assert.ok(cmds(ctx).includes('uci -q delete firewall.openbox_tun_input'))
+})
+
 test('部署按启用的 DNS 重写源生成 dnsmasq 例外:固定 IPv4 / IPv6、域名目标都支持,停用规则不生成', async () => {
   const ctx = okCtx()
   const r = await deployConfig(ctx, paths, {
@@ -141,6 +177,15 @@ test('启动后未 running → 回滚', async () => {
   assert.ok(cmds(ctx).includes('/etc/init.d/openbox stop'))
 })
 
+test('启动脚本直接返回节点错误时也显示节点和订阅名称', async () => {
+  const ctx = okCtx({ '/etc/init.d/openbox restart': { code: 1, stderr: 'FATAL initialize outbound [1]: invalid public_key' } })
+  const r = await deployConfig(ctx, paths, { profile, config: { outbounds: [{ type: 'direct', tag: 'direct' }, { type: 'vless', tag: 'HK' }] }, nodes: [{ tag: 'HK', subscriptionId: 'sub' }], subscriptions: [{ id: 'sub', name: '机场' }] })
+  assert.equal(r.stage, 'start')
+  assert.match(r.message, /节点「HK」，订阅「机场」/)
+  assert.deepEqual(r.badTags, ['HK'])
+  assert.ok(cmds(ctx).includes('/etc/init.d/openbox stop'))
+})
+
 test('模式切换:切回 hijack 但上次 dnsmasq 接管的备份仍在 → 部署时先还原 dnsmasq 上游', async () => {
   const ctx = createMockContext({
     files: {
@@ -201,7 +246,7 @@ test('重启失败且回滚也没成 → 提示写明恢复直连未完成、哪
   const r = await deployConfig(ctx, paths, { config, profile })
   assert.equal(r.ok, false)
   assert.equal(r.stage, 'start')
-  assert.match(r.message, /start failed,恢复直连未完成\(remove-firewall: firewall reload 失败.*fw4 broken\)/)
+  assert.match(r.message, /start failed,恢复直连未完成（remove-firewall: firewall reload 失败.*fw4 broken）/)
   assert.equal(r.rollback.ok, false)
   // 回滚全成功时照旧说"已恢复直连"
   const fine = await deployConfig(createMockContext({ files: { [paths.singbox]: '#!/bin/sh\n', [TUN_DEVICE]: '' }, execResults: { '/etc/init.d/openbox restart': { code: 1, stderr: 'start failed' } } }), paths, { config, profile })
@@ -218,7 +263,7 @@ test('部署途中 firewall reload 失败 → 不能报成功:stage:error、回�
   assert.ok(cmds(ctx).includes('/etc/init.d/openbox stop'))
 })
 
-test('rollbackToDirect 不移除面板 LAN 放行规则(否则自断恢复通道)', async () => {
+test('rollbackToDirect 不移除面板 LAN 放行规则（否则自断恢复通道）', async () => {
   const ctx = createMockContext({})
   const paths = createPaths('/opt/open-box')
   await rollbackToDirect(ctx, paths)
@@ -279,7 +324,7 @@ test('新安装开启 DNS 过滤：保留编译产物，补齐 Geo 后可通过�
   assert.ok(fetched.every((url) => !url.includes('dns-filter')))
 })
 
-test('安装包缺少规则集 → stage:rulesets,且不动系统(没落盘、没改 DNS/防火墙、没重启内核)', async () => {
+test('安装包缺少规则集 → stage:rulesets,且不动系统（没落盘、没改 DNS/防火墙、没重启内核）', async () => {
   const ctx = okCtx()
   const fetchImpl = async () => { throw new Error('ECONNREFUSED') }
   const r = await deployConfig(ctx, paths, { config: configWithRulesets, profile, fetchImpl })
@@ -292,7 +337,7 @@ test('安装包缺少规则集 → stage:rulesets,且不动系统(没落盘、�
   assert.ok(!cmds(ctx).some((c) => c.includes('uci')))
 })
 
-test('规则集已存在时不再下载(GitHub 连不上也能照常部署)', async () => {
+test('规则集已存在时不再下载（GitHub 连不上也能照常部署）', async () => {
   const ctx = okCtx()
   ctx.files[`${paths.geoDir}/geosite-cn.srs`] = Buffer.from('already-here')
   // 旧来源标记不参与选择，始终使用包内数据。
@@ -404,6 +449,11 @@ test('auto_redirect 在 nftables 层起不来 → 关掉 auto_redirect 重新生
   assert.equal(JSON.parse(lastConfig.content).inbounds[0].auto_redirect, undefined)
   const lastMeta = ctx.writes.filter((w) => w.path === configMetaPath(paths)).pop()
   assert.equal(JSON.parse(lastMeta.content).autoRedirect, false)
+  // 降级后入口只有黑名单,原因写进元数据(规则页「业务入口」照它说明;GitHub #225 那台就是这种情况)
+  const entryMode = JSON.parse(lastMeta.content).firstLayer.entryMode
+  assert.equal(entryMode.mode, 'blacklist')
+  assert.match(entryMode.reason, /纯 tun/)
+  assert.equal(JSON.parse(lastMeta.content).flip?.entryMode, undefined, '热切换那一侧纯 tun 没有 need / entryMode')
   // 起了两次,没有回滚直连
   assert.equal(cmds(ctx).filter((c) => c === '/etc/init.d/openbox restart').length, 2)
   assert.ok(!cmds(ctx).includes('/etc/init.d/openbox stop'))
@@ -501,6 +551,8 @@ test('不是 auto_redirect 那类崩溃、或没开 auto_redirect、或没给 re
   }
   assert.ok(AUTO_REDIRECT_FATAL.test(REDIRECT_FATAL))
   assert.ok(AUTO_REDIRECT_FATAL.test('FATAL[0000] start service: post-start inbound/tun[tun-in]: auto-redirect: setup nftables: flush nftables: conn.Receive: netlink receive: file exists'))
+  // GitHub #137:固件没有 nf_tables 时 sing-tun 的原话不一样,同样要降级
+  assert.ok(AUTO_REDIRECT_FATAL.test('FATAL[0000] start service: post-start inbound/tun[tun-in]: auto-redirect: missing nftables support: netlink receive: invalid argument'))
   assert.ok(!AUTO_REDIRECT_FATAL.test(other))
 })
 
@@ -533,7 +585,7 @@ test('config.meta.json 记下第一层的判定:DNS 转发计划、入口原生�
   assert.ok(!cmds(ctx).some((c) => c.includes('add_list') && c.includes('127.0.0.1#7853')))
 })
 
-test('部署时把走代理站点集的 geosite 解码进转发名单:元数据记实际 domains、条目数和超集说明;解不开就 all 并说明(第三轮 阶段 2)', async () => {
+test('部署时把走代理站点集的 geosite 解码进转发名单:元数据记实际 domains、条目数和超集说明;解不开就 all 并说明（第三轮 阶段 2）', async () => {
   const withRulesets = (json) => {
     const ctx = okCtx({ 'uci -q show dhcp.@dnsmasq[0]': { code: 0, stdout: 'dhcp.cfg=dnsmasq\n' } })
     ctx.files[`${paths.geoDir}/geosite-youtube.srs`] = 'srs'
@@ -581,4 +633,82 @@ test('config.meta.json 的 firstLayer 记 IPv6 分层模式:关 → off,开 → 
   assert.equal(await run({ ipv6: false, ipv6Proxy: 'ipv4' }), 'off')
   assert.equal(await run({ ipv6: true }), 'node')
   assert.equal(await run({ ipv6: true, ipv6Proxy: 'ipv4' }), 'ipv4')
+})
+
+// Debian / Ubuntu(system/platform.mjs 的 systemd):没有 uci 防火墙和 dnsmasq 可接管,回滚只剩停内核;
+// 服务脚本换成 debian/bin/openbox-ctl。硬跑 uci 的话回滚步骤会失败,一次干净的回滚被报成"恢复直连未完成"
+const sdPaths = createPaths('/opt/open-box', { platform: 'systemd' })
+
+test('systemd 平台:rollbackToDirect 只停内核,不碰 uci / dnsmasq', async () => {
+  const ctx = createMockContext()
+  const r = await rollbackToDirect(ctx, sdPaths)
+  assert.equal(r.ok, true)
+  assert.deepEqual(r.actions, ['stop-core'])
+  assert.deepEqual(r.failures, [])
+  const c = cmds(ctx)
+  assert.ok(c.includes('/opt/open-box/debian/bin/openbox-ctl stop'))
+  assert.ok(!c.some((x) => /^uci |^\/etc\/init\.d\//.test(x)), c.join('\n'))
+})
+
+test('systemd 平台:部署不写 uci 防火墙、不接管 dnsmasq,内核用 debian/bin/openbox-ctl 重启', async () => {
+  const ctx = createMockContext({
+    files: { [sdPaths.singbox]: '#!/bin/sh\n', [TUN_DEVICE]: '' },
+    execResults: { '/opt/open-box/debian/bin/openbox-ctl status': { code: 0, stdout: 'running' } },
+  })
+  const r = await deployConfig(ctx, sdPaths, { config, profile })
+  assert.equal(r.ok, true, r.message)
+  assert.equal(r.stage, 'running')
+  const c = cmds(ctx)
+  assert.ok(c.includes('/opt/open-box/debian/bin/openbox-ctl restart'))
+  assert.ok(!c.some((x) => /^uci |^\/etc\/init\.d\//.test(x)), c.join('\n'))
+  assert.ok(ctx.writes.some((w) => w.path === sdPaths.configPath))
+})
+
+test('systemd 平台:入口白名单只认局域网口,内核自己的 openbox-tun 不在 iifname 里(tun 回灌的包不能被打放行位)', async () => {
+  const ctx = createMockContext({
+    files: { [sdPaths.singbox]: '#!/bin/sh\n', [TUN_DEVICE]: '' },
+    execResults: {
+      '/opt/open-box/debian/bin/openbox-ctl status': { code: 0, stdout: 'running' },
+      'ip -4 -o addr': { code: 0, stdout: '2: eth0    inet 192.168.3.23/24 brd 192.168.3.255 scope global eth0\n31: openbox-tun    inet 172.19.0.1/30 brd 172.19.0.3 scope global openbox-tun\n' },
+    },
+  })
+  const r = await deployConfig(ctx, sdPaths, {
+    config,
+    profile: {
+      // 黑名单那份填的 22 不能跟着进白名单:只有选中的那份生效
+      ipv6: false, dns: { mode: 'hijack' }, tun: { autoRedirect: true }, bypassPorts: '22', bypassPortsWhitelist: '443', bypassPortsMode: 'whitelist',
+      clientRoutes: [{ id: 'a', admit: true, match: 'ip', sources: ['192.168.3.50'] }],
+    },
+  })
+  assert.equal(r.ok, true, r.message)
+  const nft = ctx.writes.filter((w) => w.path === sdPaths.entryBypassPath).pop().content
+  assert.match(nft, /iifname \{ "eth0" \} meta l4proto \{ tcp, udp \} th dport != \{ 443 \}/)
+  assert.doesNotMatch(nft, /\b22\b/)
+  assert.match(nft, /iifname \{ "eth0" \} meta nfproto ipv4 ip saddr != \{ 192\.168\.3\.50\/32 \}/)
+  assert.doesNotMatch(nft, /openbox-tun/)
+})
+
+test('systemd 平台:内核起不来时 tun 缺失的提示不再让人 opkg', async () => {
+  const ctx = createMockContext({ files: { [sdPaths.singbox]: '#!/bin/sh\n' } })
+  const r = await deployConfig(ctx, sdPaths, { config, profile })
+  assert.equal(r.ok, false)
+  assert.match(r.message, /modprobe tun/)
+  assert.doesNotMatch(r.message, /opkg/)
+})
+
+test('动态集编不出来:校验失败时先报校验的归因;校验过了才报编译错误,内核不重启', async () => {
+  const boom = async () => { throw new Error('动态集合「进内核 obflip-need-all」编不出来,先按占位处理:exit 1') }
+  // 校验也失败(全部命令失败):用户看到的是校验归因,不是编译错误
+  const bad = createMockContext({ defaultExec: { code: 1, stderr: 'FATAL: unknown method: x' } })
+  const r1 = await deployConfig(bad, paths, { config: { outbounds: [{ type: 'shadowsocks', tag: 'bad', server: 'a', server_port: 1, method: 'x' }] }, profile, writeFlip: boom })
+  assert.equal(r1.stage, 'validate')
+  assert.deepEqual(r1.badTags, ['bad'])
+  // 校验过了:按原样报编译错误,不落盘、不重启
+  const ok = okCtx()
+  const r2 = await deployConfig(ok, paths, { config, profile, writeFlip: boom })
+  assert.equal(r2.ok, false)
+  assert.equal(r2.stage, 'error')
+  assert.match(r2.message, /编不出来/)
+  assert.ok(!ok.writes.some((w) => w.path === paths.configPath))
+  assert.ok(!cmds(ok).includes('/etc/init.d/openbox restart'))
 })

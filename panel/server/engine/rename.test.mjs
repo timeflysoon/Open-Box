@@ -20,7 +20,7 @@ test('matchRegion 覆盖缩写/中文/城市/emoji', () => {
   assert.equal(matchRegion('unknown-place', DEFAULT_REGION_DICT), null)
 })
 
-test('matchRegion 短 ASCII 码需 token 边界,避免子串误配(修复4)', () => {
+test('matchRegion 短 ASCII 码需 token 边界,避免子串误配（修复4）', () => {
   assert.equal(matchRegion('Russia-01', DEFAULT_REGION_DICT), null)
   assert.equal(matchRegion('Sweden', DEFAULT_REGION_DICT), null)
   assert.equal(matchRegion('Ukraine', DEFAULT_REGION_DICT), null)
@@ -32,7 +32,7 @@ test('matchRegion 短 ASCII 码需 token 边界,避免子串误配(修复4)', ()
   assert.equal(matchRegion('香港 IEPL', DEFAULT_REGION_DICT).name, '香港')
 })
 
-test('extractFeatures 返回命中的关键词本身(转大写),按关键词表顺序去重', () => {
+test('extractFeatures 返回命中的关键词本身（转大写）,按关键词表顺序去重', () => {
   // 语义变更:以前 iepl/iplc/专线 会被折叠成统一标签「专线」,现在命中哪个词就显示哪个词
   assert.deepEqual(extractFeatures('US-IEPL-2x', DEFAULT_FEATURE_KEYWORDS), ['IEPL', '2X'])
   assert.deepEqual(extractFeatures('普通节点', DEFAULT_FEATURE_KEYWORDS), [])
@@ -59,7 +59,7 @@ test('用户给的例子:关键词 iplc,ipv6 全命中 → 美国-IPLC-IPV6-01',
   assert.equal(out[0].tag, '美国-IPLC-IPV6-01')
 })
 
-test('旧档案的两层 featureDict 仍能读:扁平化成关键词表(语义随之变成显示关键词本身)', () => {
+test('旧档案的两层 featureDict 仍能读:扁平化成关键词表（语义随之变成显示关键词本身）', () => {
   const out = renameNodes([mk('香港 IEPL 01')], {
     featureDict: [{ label: '专线', keywords: ['iepl', 'iplc'] }],
   })
@@ -87,7 +87,7 @@ test('订阅词典没命中的,按内置的全部国家目录再认一遍:马来
   ])
 })
 
-test('兜底只在用户词典没命中时用;用户词典里有的国家以用户那份为准(名字、顺序)', () => {
+test('兜底只在用户词典没命中时用;用户词典里有的国家以用户那份为准（名字、顺序）', () => {
   const dict = [{ code: 'MY', name: '大马', keywords: ['malaysia'] }]
   const out = renameNodes(['Malaysia 01', 'Thailand 01'].map(mk), { regionDict: dict })
   // 大马是用户词典的名字,排在前;泰国靠兜底,排在用户词典的所有地区之后、其他之前
@@ -111,7 +111,7 @@ test('previewRename 原名→新名', () => {
   assert.deepEqual(pv, [{ originalTag: 'US-01', newTag: '美国-01', regionCode: 'US' }])
 })
 
-test('applyTemplate 元字符 $&/$1 不被 String.replace 误解析(修复7)', () => {
+test('applyTemplate 元字符 $&/$1 不被 String.replace 误解析（修复7）', () => {
   // 原名不再进 feature 位,但这条防护仍然需要:region 名、无法识别标签、特征关键词
   // 都是用户自己填的,任何一个写成 "$&" 都会被 String.replace 当成替换模式吃掉。
   const viaUnknownLabel = renameNodes([mk('火星基地')], { unknownLabel: 'A$&B' })
@@ -138,7 +138,7 @@ test('两个国旗连着写也不会粘成一个词而漏配', () => {
   assert.deepEqual(matchRegion('🇭🇰🇨🇳 01', dict), { code: 'HK', name: '香港' })
 })
 
-test('老词典里残留的国旗关键词仍然有效(改动不破坏已存配置)', () => {
+test('老词典里残留的国旗关键词仍然有效（改动不破坏已存配置）', () => {
   const dict = [{ code: 'HK', name: '香港', keywords: ['🇭🇰'] }]
   assert.deepEqual(matchRegion('🇭🇰 01', dict), { code: 'HK', name: '香港' })
   assert.deepEqual(matchRegion('香港 01', dict), null)
@@ -349,7 +349,7 @@ test('手工改过名的节点同样带国别:国别看的是原名,与改成什
   assert.deepEqual(out.map((n) => [n.tag, n.regionCode]), [['我的节点', 'HK']])
 })
 
-test('enabled=false:保留原始名字、不排序,前缀和手工改名照常,地区仍识别(regionCode / regionName)', () => {
+test('enabled=false:保留原始名字、不排序,前缀和手工改名照常,地区仍识别（regionCode / regionName）', () => {
   const out = renameNodes([mk('US-IEPL 02'), mk('HK-01 香港'), mk('plain-node')], { enabled: false, prefix: '机场', overrides: { 'plain-node': '我的节点' } })
   assert.deepEqual(out.map((n) => n.tag), ['机场 | US-IEPL 02', '机场 | HK-01 香港', '机场 | 我的节点'])
   assert.deepEqual(out.map((n) => n.regionCode), ['US', 'HK', ''])

@@ -42,10 +42,26 @@ export const validateManifest = (manifest, arch, expected = '') => {
   return manifest
 }
 
+// Debian / Ubuntu 上 node/ 是安装脚本换过的 glibc 版(scripts/install.sh 的 openbox-glibc-node 块,留下 node/.flavor
+// 写着 "glibc <版本>"):文件哈希和清单对不上是正常的,版本号一致就算匹配——否则每次升级都白下一遍 musl 运行时、再换一遍
+const runtimeFlavor = (root) => {
+  try { return fs.readFileSync(path.join(root, 'node/.flavor'), 'utf8').trim() } catch { return '' }
+}
+// 只看 .flavor 的话,node/bin/node 丢了、没了执行权限也会判成复用(暂存目录里链接到现有安装,之后再修 Node 就修到了
+// 还没提交的现有安装上)。升级脚本走组件升级之前已经实际跑过一次装着的 Node,这里再把一道(GPT 复核第三项)
+const isExecutableFile = (file) => {
+  try {
+    if (!fs.statSync(file).isFile()) return false
+    fs.accessSync(file, fs.constants.X_OK)
+    return true
+  } catch { return false }
+}
+
 export const componentMatches = (root, kind, component) => {
   try {
     if (kind === 'app') return false
     if (kind !== 'geo') {
+      if (kind === 'runtime' && runtimeFlavor(root) === `glibc ${component.version}`) return isExecutableFile(path.join(root, 'node/bin/node'))
       return Object.entries(component.files).every(([name, hash]) => fileHash(path.join(root, name)) === hash)
     }
     const dir = path.join(root, GEO_DIR)

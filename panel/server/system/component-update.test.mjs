@@ -22,12 +22,18 @@ const fixture = t => {
   write(source, 'meta.json', JSON.stringify({ version: 'v0.2.0', arch: 'x64', singboxVersion: '1.14.0-openbox-tcp2', nodeVersion: '24.18.0' }))
   write(source, 'panel/index.html', 'app-v2')
   write(source, 'panel/server/system/component-update.mjs', fs.readFileSync(helper))
+  // release-components.py 会核对 server/node_modules 里 express / ws / yaml 仍是指向 .pnpm 的符号链接
+  for (const name of ['express', 'ws', 'yaml']) {
+    write(source, `panel/server/node_modules/.pnpm/${name}@0.0.0/node_modules/${name}/package.json`, '{}')
+    fs.symlinkSync(`.pnpm/${name}@0.0.0/node_modules/${name}`, path.join(source, 'panel/server/node_modules', name))
+  }
   write(source, 'node/bin/node', `#!/bin/sh\nexec '${process.execPath}' "$@"\n`)
   fs.chmodSync(path.join(source, 'node/bin/node'), 0o755)
   write(source, 'bin/sing-box', 'kernel-v2')
   write(source, 'bin/sing-box.LICENSE', 'kernel-license')
   write(source, 'bin/sing-box.BUILD-INFO.json', JSON.stringify({ version: '1.14.0-openbox-tcp2', openbox_commit: 'new' }))
   write(source, 'openwrt/init', 'service')
+  write(source, 'debian/bin/openbox-ctl', 'systemd wrapper')
   write(source, 'update.sh', 'update')
   write(source, 'uninstall.sh', 'uninstall')
   const files = {}
@@ -114,3 +120,24 @@ printf '%s' "$UPDATE_COMPONENTS" > "$TMP_DL/swaps"
     assert.equal(fs.readFileSync(path.join(download, 'swaps'), 'utf8').includes('bin'), changed.includes('kernel'))
   })
 }
+
+test('Debian / Ubuntu:node/ 换成 glibc 版后哈希对不上,但 .flavor 写着同版本就算匹配,不再每次升级重下运行时', t => {
+  const { manifest, local } = fixture(t)
+  write(local, 'node/bin/node', '#!/bin/sh\necho glibc\n')
+  let plan = planUpdate(manifest, local, 'x64')
+  assert.equal(plan.find(c => c.kind === 'runtime').action, 'download')
+  write(local, 'node/.flavor', `glibc ${manifest.components.runtime.version}\n`)
+  fs.chmodSync(path.join(local, 'node/bin/node'), 0o755)
+  plan = planUpdate(manifest, local, 'x64')
+  assert.equal(plan.find(c => c.kind === 'runtime').action, 'reuse')
+  // .flavor 还在但 node 本身没了执行权限 / 丢了:不复用(GPT 复核第三项)
+  fs.chmodSync(path.join(local, 'node/bin/node'), 0o644)
+  assert.equal(planUpdate(manifest, local, 'x64').find(c => c.kind === 'runtime').action, 'download')
+  fs.rmSync(path.join(local, 'node/bin/node'))
+  assert.equal(planUpdate(manifest, local, 'x64').find(c => c.kind === 'runtime').action, 'download')
+  write(local, 'node/bin/node', '#!/bin/sh\necho glibc\n')
+  fs.chmodSync(path.join(local, 'node/bin/node'), 0o755)
+  // 版本不一样的 glibc Node 照样要换
+  write(local, 'node/.flavor', 'glibc 22.0.0\n')
+  assert.equal(planUpdate(manifest, local, 'x64').find(c => c.kind === 'runtime').action, 'download')
+})

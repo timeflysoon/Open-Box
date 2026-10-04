@@ -38,7 +38,7 @@ const postJson = (baseUrl, url, body) =>
     body: JSON.stringify(body),
   })
 
-test('面板进程重启后旧 cookie 仍然有效(会话密钥落库),改密后立即失效', async () => {
+test('面板进程重启后旧 cookie 仍然有效（会话密钥落库）,改密后立即失效', async () => {
   // 只清密码相关的键:整表清空会把两个实例启动时读进内存的会话密钥行也删掉,
   // 后面就查不到它了(功能不受影响,但这条断言要验证的正是"它确实落了库")
   first.db.exec("DELETE FROM app_storage WHERE key LIKE 'config/access-%'")

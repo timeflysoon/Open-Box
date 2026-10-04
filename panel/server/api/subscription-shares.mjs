@@ -11,6 +11,14 @@ import { fetchSubscriptionText, subscriptionUrls } from './subscriptions.mjs'
 
 const MAX_NAME = 120
 const tokenFor = () => randomBytes(24).toString('hex')
+// 前端新建分享时先在浏览器生成 token 把链接 / 二维码实时显示出来,保存时一起送上来;只认 40~64 位十六进制、
+// 且没被别的分享占用的,不合法就服务端重新生成
+const TOKEN_RE = /^[0-9a-f]{40,64}$/i
+const acceptToken = (value, existing) => {
+  const token = typeof value === 'string' ? value.trim().toLowerCase() : ''
+  if (!TOKEN_RE.test(token)) return tokenFor()
+  return existing.some((s) => s && s.token === token) ? tokenFor() : token
+}
 const now = () => Date.now()
 const cleanName = (value) => typeof value === 'string' ? value.trim().slice(0, MAX_NAME) : ''
 const normalizeProtocol = (value) => value === 'http' || value === 'https' ? value : ''
@@ -162,8 +170,9 @@ export const registerSubscriptionShareRoutes = (app, { store } = {}) => {
     if (!host) return res.status(400).json({ error: 'host is required' })
     const protocol = normalizeProtocol(req.body?.protocol) || 'https'
     const timestamp = now()
-    const share = { id: tokenFor(), name, host, protocol, enabled: true, token: tokenFor(), subscriptionIds, createdAt: timestamp, updatedAt: timestamp }
-    store.setSubscriptionShares([...store.getSubscriptionShares(), share])
+    const existing = store.getSubscriptionShares()
+    const share = { id: tokenFor(), name, host, protocol, enabled: true, token: acceptToken(req.body?.token, existing), subscriptionIds, createdAt: timestamp, updatedAt: timestamp }
+    store.setSubscriptionShares([...existing, share])
     return res.status(201).json({ share })
   })
 

@@ -6,7 +6,9 @@
 //   · 文本名单 —— Clash 的 DOMAIN-SUFFIX,xxx 那种,或者一行一个域名(engine/rule-list.mjs)
 //   · mihomo 的 .mrs —— 整份 zstd,里面是二进制的域名树 / IP 区间(engine/mrs.mjs)。
 //     内核自己不认这个格式(`sing-box rule-set convert` 只会转 adguard),所以在这里解开。
-// 两条路解析出来的形状一样,后面编译、引用、部署完全共用。
+//   · sing-box 的 .srs —— 内核自己编的二进制(比如 one-geoip 的 one-china.srs,GitHub #217),
+//     交给内核 `rule-set decompile` 解回源格式,再按同一套拆成域名 / IP 两份重编。
+// 三条路解析出来的形状一样,后面编译、引用、部署完全共用。
 //
 // 失败的处理分两种:
 //   · 本地已经有编好的那份 —— 拉不动就用旧的,记一条日志。名单在别人服务器上,不该
@@ -16,7 +18,8 @@
 import { zstdDecompressSync } from 'node:zlib'
 import { collectRuleListUrls } from '../engine/routing-model.mjs'
 import { decodeMrs, looksLikeZstd } from '../engine/mrs.mjs'
-import { parseRuleList, ruleListIsEmpty, ruleListShape, ruleListToSource, ruleListIpTag, splitRuleList } from '../engine/rule-list.mjs'
+import { listTagForUrl, looksLikeSrs, parseRuleList, parseRuleSource, ruleListIsEmpty, ruleListShape, ruleListToSource, ruleListIpTag, splitRuleList } from '../engine/rule-list.mjs'
+import { compileRuleSetAtomic } from './rulesets.mjs'
 
 const FETCH_TIMEOUT_MS = 30000
 // 一份名单撑死几百 KB;给 8MB 挡住"拿到一个几百 MB 的东西把路由器内存吃光"
@@ -46,13 +49,13 @@ const readState = async (ctx, paths) => {
 // 超时和大小上限都要管到响应体读完为止:以前拿到响应头就清掉计时器、再 arrayBuffer() 一次性
 // 读完整个响应才比大小——几百 MB 的东西照样先进内存,一直慢慢吐内容的对端也不受 30 秒约束,
 // 还会一直占着部署队列。现在流式累计,越限立即断开;计时器到读完才清。
-const tooLarge = (bytes) => new Error(`名单太大(超过 ${Math.round(MAX_BYTES / 1024 / 1024)}MB${bytes ? `,已到 ${Math.round(bytes / 1024)}KB` : ''})`)
+const tooLarge = (bytes) => new Error(`名单太大（超过 ${Math.round(MAX_BYTES / 1024 / 1024)}MB${bytes ? `,已到 ${Math.round(bytes / 1024)}KB` : ''})`)
 export const fetchRuleList = async (fetchImpl, url, { timeoutMs = FETCH_TIMEOUT_MS } = {}) => {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
   // 计时器到点时不管 fetch 实现有没有把 signal 接到响应体上,这边都要能停下来
   const timedOut = new Promise((_, reject) => {
-    controller.signal.addEventListener('abort', () => reject(new Error(`下载超时(${Math.round(timeoutMs / 1000)} 秒)`)), { once: true })
+    controller.signal.addEventListener('abort', () => reject(new Error(`下载超时（${Math.round(timeoutMs / 1000)} 秒）`)), { once: true })
   })
   timedOut.catch(() => {})
   try {
@@ -60,7 +63,7 @@ export const fetchRuleList = async (fetchImpl, url, { timeoutMs = FETCH_TIMEOUT_
     try {
       res = await Promise.race([fetchImpl(url, { signal: controller.signal, redirect: 'follow' }), timedOut])
     } catch (err) {
-      if (controller.signal.aborted) throw new Error(`下载超时(${Math.round(timeoutMs / 1000)} 秒)`)
+      if (controller.signal.aborted) throw new Error(`下载超时（${Math.round(timeoutMs / 1000)} 秒）`)
       throw err
     }
     if (!res || !res.ok) throw new Error(`HTTP ${res ? res.status : '无响应'}`)
@@ -73,9 +76,18 @@ export const fetchRuleList = async (fetchImpl, url, { timeoutMs = FETCH_TIMEOUT_
       const reader = res.body.getReader()
       const chunks = []
       let total = 0
+      // 每块不再 Promise.race 一次:race 会在永不结束的 timedOut 上各留一条 reaction,经代理的连接一块只有几十字节时,
+      // 一份 2 MB 名单能攒几万条,活堆冲过几十 MB(1 GB 路由器上就是一次 OOM;本机 50 字节一块、32 MB 堆上限复现)。
+      // 改成只有当前这一次 read 能被超时打断,读完就丢
+      let interrupt = null
+      const timeout = () => new Error(`下载超时（${Math.round(timeoutMs / 1000)} 秒）`)
+      const onAbort = () => interrupt?.(timeout())
+      controller.signal.addEventListener('abort', onAbort, { once: true })
       try {
         for (;;) {
-          const { done, value } = await Promise.race([reader.read(), timedOut])
+          if (controller.signal.aborted) throw timeout()
+          const { done, value } = await new Promise((resolve, reject) => { interrupt = reject; reader.read().then(resolve, reject) })
+          interrupt = null
           if (done) break
           total += value.byteLength
           if (total > MAX_BYTES) throw tooLarge(total)
@@ -86,6 +98,8 @@ export const fetchRuleList = async (fetchImpl, url, { timeoutMs = FETCH_TIMEOUT_
         await reader.cancel().catch(() => {})
         controller.abort()
         throw err
+      } finally {
+        controller.signal.removeEventListener('abort', onAbort)
       }
       return Buffer.concat(chunks, total)
     }
@@ -98,11 +112,16 @@ export const fetchRuleList = async (fetchImpl, url, { timeoutMs = FETCH_TIMEOUT_
   }
 }
 
-// 下回来的东西 → 结构化条件。两种:
+// 下回来的东西 → 结构化条件。三种:
 //   · 文本名单(Clash 规则行 / 一行一个域名),交给 engine/rule-list.mjs
 //   · mihomo 的 .mrs(整份 zstd,里面是二进制),先解压再交给 engine/mrs.mjs
+//   · sing-box 的 .srs(魔数 SRS),交给 decompile(内核 rule-set decompile,见 srsDecompiler)
 // 认的是内容开头的魔数不是网址后缀:网址可能带一堆查询参数,也可能经过代理改名。
-export const parseRuleListBody = (buf) => {
+export const parseRuleListBody = async (buf, { decompile } = {}) => {
+  if (looksLikeSrs(buf)) {
+    if (typeof decompile !== 'function') throw new Error('这是 sing-box 编好的 .srs 规则集,要由内核解开')
+    return parseRuleSource(await decompile(buf))
+  }
   if (!looksLikeZstd(buf)) return parseRuleList(buf.toString('utf8'))
   if (typeof zstdDecompressSync !== 'function') {
     throw new Error('当前 Node 不支持 zstd,解不开 .mrs 规则集')
@@ -111,7 +130,27 @@ export const parseRuleListBody = (buf) => {
   return decodeMrs(payload).parsed
 }
 
-export const loadRuleList = async (fetchImpl, url) => parseRuleListBody(await fetchRuleList(fetchImpl, url))
+const removeIfExists = async (ctx, path) => {
+  if (await ctx.exists(path)) await ctx.remove(path)
+}
+
+// .srs → 源格式:写到临时文件,让内核 decompile 出 JSON,读回来、两份临时文件都删。tag 只是给临时文件起名
+export const srsDecompiler = (ctx, paths, tag = 'remote') => async (buf) => {
+  const srsPath = `${paths.dataDir}/tmp/${tag}.srs`
+  const jsonPath = `${paths.dataDir}/tmp/${tag}.srs.json`
+  await ctx.mkdirp(`${paths.dataDir}/tmp`)
+  await ctx.writeFileBinary(srsPath, buf)
+  try {
+    const r = await ctx.exec(paths.singbox, ['rule-set', 'decompile', '--output', jsonPath, srsPath])
+    if (r.code !== 0) throw new Error(`内核解不开这份 .srs:${(r.stderr || '').trim() || `exit ${r.code}`}`)
+    return JSON.parse(await ctx.readFile(jsonPath))
+  } finally {
+    await removeIfExists(ctx, srsPath)
+    await removeIfExists(ctx, jsonPath)
+  }
+}
+
+export const loadRuleList = async (fetchImpl, url, opts = {}) => parseRuleListBody(await fetchRuleList(fetchImpl, url), opts)
 
 // 一份源格式 → 一份 .srs。写临时源文件、编译、删临时文件。
 const compileSrs = async (ctx, paths, tag, parsed) => {
@@ -119,15 +158,11 @@ const compileSrs = async (ctx, paths, tag, parsed) => {
   const outPath = `${paths.rulesetDir}/${tag}.srs`
   await ctx.writeFile(srcPath, JSON.stringify(ruleListToSource(parsed)))
   try {
-    const r = await ctx.exec(paths.singbox, ['rule-set', 'compile', '--output', outPath, srcPath])
+    const r = await compileRuleSetAtomic(ctx, paths.singbox, srcPath, outPath)
     if (r.code !== 0) throw new Error(`编译规则集失败:${(r.stderr || '').trim() || `exit ${r.code}`}`)
   } finally {
     await ctx.remove(srcPath)
   }
-}
-
-const removeIfExists = async (ctx, path) => {
-  if (await ctx.exists(path)) await ctx.remove(path)
 }
 
 // 解析好的名单 → 域名一份 list-xxx.srs、IP 一份 list-xxx-ip.srs(哪边没有内容就不出那份文件,
@@ -147,9 +182,9 @@ const compileParsed = async (ctx, paths, tag, parsed) => {
   return counts
 }
 
-// 一个链接 → 拉回来、解析、编译
+// 一个链接 → 拉回来、解析(.srs 交给内核解)、编译
 const compileOne = async (ctx, paths, { url, tag }, fetchImpl) =>
-  compileParsed(ctx, paths, tag, await loadRuleList(fetchImpl, url))
+  compileParsed(ctx, paths, tag, await loadRuleList(fetchImpl, url, { decompile: srsDecompiler(ctx, paths, tag) }))
 
 // 老版式的本地文件(域名 IP 混在一份 list-xxx.srs 里)不用重新下:用内核解回源格式,再拆成
 // 两份编译。这样升级后第一次部署就能拿到拆好的文件,不依赖外网(路由器拉 GitHub 未必通);
@@ -166,12 +201,7 @@ const resplitLegacy = async (ctx, paths, tag) => {
   } finally {
     await removeIfExists(ctx, tmp)
   }
-  const parsed = { domain: [], domain_suffix: [], domain_keyword: [], domain_regex: [], ip_cidr: [] }
-  for (const rule of Array.isArray(source?.rules) ? source.rules : []) {
-    // 解回来的字段单个值时是字符串,多个是数组
-    for (const k of Object.keys(parsed)) if (rule && rule[k] != null) parsed[k].push(...[].concat(rule[k]))
-  }
-  return compileParsed(ctx, paths, tag, parsed)
+  return compileParsed(ctx, paths, tag, parseRuleSource(source))
 }
 
 // 部署前、生成配置之前调一次:把档案里引用到的规则集链接补齐。
@@ -211,7 +241,7 @@ export const ensureRuleLists = async (
         log(`[rule-list] ${item.tag} 由老版式重编为域名 / IP 两份`)
         continue
       } catch (error) {
-        log(`[rule-list] ${item.tag} 老版式重编失败(${errText(error)}),改为重新拉取`)
+        log(`[rule-list] ${item.tag} 老版式重编失败（${errText(error)}）,改为重新拉取`)
       }
     }
     try {
@@ -233,15 +263,34 @@ export const ensureRuleLists = async (
           entry = { ...entry, counts: await resplitLegacy(ctx, paths, item.tag), split: SPLIT_VERSION }
           log(`[rule-list] ${item.tag} 由老版式重编为域名 / IP 两份`)
         } catch (e2) {
-          log(`[rule-list] ${item.tag} 老版式重编失败(${errText(e2)})`)
+          log(`[rule-list] ${item.tag} 老版式重编失败（${errText(e2)}）`)
         }
       }
       next[item.tag] = entry
-      log(`[rule-list] ${item.url} 拉取失败(${message}),沿用本地已有的那份`)
+      log(`[rule-list] ${item.url} 拉取失败（${message}）,沿用本地已有的那份`)
     }
   }
   await ctx.writeFile(listStatePath(paths), JSON.stringify(next, null, 2))
   return { ok: true, updated, failed, lists: shapesOf(next) }
+}
+
+// 「立即更新」(#155):名单 24 小时才随部署重拉一次,自己维护名单的人改完想马上生效。这里不看新旧,直接重拉
+// 重编到同一个路径——内核盯着本地 .srs 文件,变了会自己重新加载,不用重启。只有名单的构成变了(原来只有域名、
+// 现在多了 IP,或反过来)才要重启:配置里引用的是哪几份 .srs 在生成配置时就定了。
+// 拉不动 / 编译失败就抛出去,本地那份原样留着。
+export const refreshRuleList = async (ctx, paths, url, { fetchImpl = globalThis.fetch, now = () => Date.now(), log = () => {} } = {}) => {
+  const tag = listTagForUrl(url)
+  const state = await readState(ctx, paths)
+  const prev = state[tag]
+  const before = prev && prev.split === SPLIT_VERSION && prev.counts ? ruleListShape(prev.counts) : null
+  const counts = await compileOne(ctx, paths, { url, tag }, fetchImpl)
+  const after = ruleListShape(counts)
+  state[tag] = { url, at: now(), counts, split: SPLIT_VERSION }
+  await ctx.writeFile(listStatePath(paths), JSON.stringify(state, null, 2))
+  log(`[rule-list] 立即更新 ${url} → ${tag}(${Object.entries(counts).map(([k, v]) => `${k} ${v}`).join(', ')})`)
+  // 之前没编过(还没部署过这条链接)不算构成变化:下次部署自然按新形状引用
+  const shapeChanged = Boolean(before) && (before.domain !== after.domain || before.ip !== after.ip)
+  return { tag, tags: [tag, ruleListIpTag(tag)], counts, total: Object.values(counts).reduce((a, b) => a + b, 0), shapeChanged }
 }
 
 // 状态表 → 形状表(每条名单编成了域名 / IP 哪几份)。老版式(没有 split 标记)的本地文件是

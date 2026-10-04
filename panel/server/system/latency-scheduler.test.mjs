@@ -85,7 +85,9 @@ test('到 interval 才测:成员最近一轮结果还新鲜就不发;到点发�
   const r2 = await s.tick()
   assert.deepEqual(r2.tested, ['香港-自动', '所有-自动'])
   assert.equal(k.calls.filter((u) => u.includes('/group/')).length, 3)
-  assert.ok(k.calls.some((u) => u.includes('/group/%E9%A6%99%E6%B8%AF-%E8%87%AA%E5%8A%A8/delay?url=https%3A%2F%2Fwww.gstatic.com%2Fgenerate_204&timeout=5000')))
+  // timeout 是每个成员自己的超时,跟面板「测速超时」设置走,没设就是 5 秒(内核 tcp5 起按此语义;本地等待另按波数放宽)
+  assert.ok(k.calls.some((u) => u.includes('/group/%E9%A6%99%E6%B8%AF-%E8%87%AA%E5%8A%A8/delay?url=https%3A%2F%2Fwww.gstatic.com%2Fgenerate_204&timeout=5000')), k.calls.filter((u) => u.includes('/group/')).join('\n'))
+  assert.ok(k.calls.some((u) => u.includes('&force=false')))
   assert.deepEqual(history.get()['hk-1'].map((x) => x.delay), [93, 104])
   assert.deepEqual(history.get()['hk-3'].map((x) => x.delay), [0])
   assert.deepEqual(r2.timeouts, [])
@@ -106,7 +108,7 @@ test('到 interval 才测:成员最近一轮结果还新鲜就不发;到点发�
   assert.equal(history.get()['hk-1'].length, 3)
 })
 
-test('内核没在跑(/proxies 拿不到)→ 这个 tick 什么都不做;sync 只读不测', async () => {
+test('内核没在跑（/proxies 拿不到）→ 这个 tick 什么都不做;sync 只读不测', async () => {
   const store = memStore()
   const history = createLatencyHistory({ store })
   const ctx = ctxWithKernel(Date.now() - 10_000)
@@ -120,7 +122,7 @@ test('内核没在跑(/proxies 拿不到)→ 这个 tick 什么都不做;sync �
   assert.ok(!k.calls.some((u) => u.includes('/group/')))
 })
 
-test('组测速请求中途失败(超时 / 断开)→ 不把没测到的成员记成超时;tick 叠着来时后一个直接跳过', async () => {
+test('组测速请求中途失败（超时 / 断开）→ 不把没测到的成员记成超时;tick 叠着来时后一个直接跳过', async () => {
   const store = memStore()
   const history = createLatencyHistory({ store })
   const ctx = ctxWithKernel(T0 - 60_000)
@@ -188,6 +190,34 @@ test('内核测速结果尚未写回 /proxies 时,共享节点也不被后一个
   assert.equal(calls.filter((u) => u.includes('/group/')).length, 1)
 })
 
+test('嵌套组按叶子节点去重:前一个组测过后,后一个组不重复测同一节点', async () => {
+  const cfg = { outbounds: [
+    { type: 'urltest', tag: 'inner', url: 'https://t', interval: '5m', outbounds: ['shared'] },
+    { type: 'urltest', tag: 'outer', url: 'https://t', interval: '5m', outbounds: ['inner'] },
+  ] }
+  const proxies = {
+    shared: { type: 'vless', history: [{ time: iso(T0), delay: 181 }] },
+    inner: { type: 'URLTest', all: ['shared'], now: 'shared', history: [] },
+    outer: { type: 'URLTest', all: ['inner'], now: 'inner', history: [] },
+  }
+  const calls = []
+  const fetchImpl = async (url) => {
+    calls.push(String(url))
+    if (String(url).includes('/proxies')) return { ok: true, status: 200, json: async () => ({ proxies: JSON.parse(JSON.stringify(proxies)) }) }
+    return { ok: true, status: 200, json: async () => ({}) }
+  }
+  const ctx = createMockContext({
+    files: { [paths.configPath]: JSON.stringify(cfg), '/proc/123/stat': '123 (sing-box) S 1 1 1 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 100 0', '/proc/uptime': '1000 0' },
+    execResults: { 'pidof sing-box': { code: 0, stdout: '123\n' } },
+  })
+  const store = memStore()
+  const now = () => T0 + 5 * 60_000 + 30_000
+  const s = createLatencyScheduler({ store, ctx, paths, history: createLatencyHistory({ store, now }), fetchImpl, now, log: () => {} })
+  const result = await s.tick()
+  assert.deepEqual(result.tested, ['inner'])
+  assert.equal(calls.filter((u) => u.includes('/group/')).length, 1)
+})
+
 test('组配置里的测速地址是 http:// 的,发给内核的组测速请求保留 HTTP', async () => {
   const httpConfig = { outbounds: [
     { type: 'urltest', tag: 'CF', url: 'http://cp.cloudflare.com/generate_204', interval: '5m', outbounds: ['cf-1'] },
@@ -208,7 +238,92 @@ test('组配置里的测速地址是 http:// 的,发给内核的组测速请求�
   await s.tick()
   const groupCalls = calls.filter((u) => u.includes('/group/'))
   assert.equal(groupCalls.length, 2)
-  assert.ok(groupCalls.some((u) => u.includes('/group/CF/delay?url=http%3A%2F%2Fcp.cloudflare.com%2Fgenerate_204&')), groupCalls.join('\n'))
-  assert.ok(groupCalls.some((u) => u.includes('url=http%3A%2F%2Fwww.gstatic.com%2Fgenerate_204&')), groupCalls.join('\n'))
+  assert.ok(groupCalls.some((u) => u.includes('/group/CF/delay?url=http%3A%2F%2Fcp.cloudflare.com%2Fgenerate_204&') && u.includes('&force=false')), groupCalls.join('\n'))
+  assert.ok(groupCalls.some((u) => u.includes('url=http%3A%2F%2Fwww.gstatic.com%2Fgenerate_204&') && u.includes('&force=false')), groupCalls.join('\n'))
   assert.ok(groupCalls.every((u) => u.includes('url=http%3A%2F%2F')))
+})
+
+test('成员超时跟面板「测速超时」设置走:表里 config/speedtest-timeout 是 8000 就传 8000;不合法回落 5000', async () => {
+  const k = kernel()
+  const store = memStore()
+  store.setRaw('config/speedtest-timeout', '8000')
+  const history = createLatencyHistory({ store, now: k.now })
+  const ctx = ctxWithKernel(T0 - 60_000)
+  const s = createLatencyScheduler({ store, ctx, paths, history, fetchImpl: k.fetchImpl, now: k.now, log: () => {} })
+  k.setClock(T0 + 60_000)
+  await s.tick()
+  assert.ok(k.calls.some((u) => u.includes('/group/') && u.includes('&timeout=8000&')), k.calls.filter((u) => u.includes('/group/')).join('\n'))
+  store.setRaw('config/speedtest-timeout', 'abc')
+  k.setClock(T0 + 6 * 60_000)
+  await s.tick()
+  assert.ok(k.calls.some((u) => u.includes('&timeout=5000&')))
+})
+
+// 内核 1.14.1-openbox-tcp14 的组测速:回应带 X-Openbox-Group-Check: complete,正文是这一轮通过的成员(组正在测时
+// 加入那一轮等它测完,不再回空)。这里按脚本回名单,历史怎么变由 history 参数定
+const tcp14Group = (k, { passed, history = {} }) => async (url, init) => {
+  const u = String(url)
+  if (u.includes('/group/')) {
+    for (const [m, h] of Object.entries(history)) k.proxies[m].history = h
+    return { ok: true, status: 200, headers: { get: (name) => (name.toLowerCase() === 'x-openbox-group-check' ? 'complete' : null) }, json: async () => passed }
+  }
+  return k.fetchImpl(url, init)
+}
+const coordinatorSpy = () => {
+  const observed = []
+  return {
+    observed,
+    register: () => {}, unregisterOwner: () => {}, keyOf: (tag, url) => `${tag}\0${url}`, latest: () => null,
+    intervalFor: (key, fallback) => fallback, observe: (tag, url, r) => observed.push([tag, r.ok]),
+  }
+}
+
+test('内核 tcp14:名单里没有的成员就是这轮没测通(正在用的节点内核先留着旧记录等 10 秒复查,历史上看不出来)——记超时、按失败交给共享时间线', async () => {
+  const k = kernel()
+  const store = memStore()
+  const history = createLatencyHistory({ store, now: k.now })
+  const spy = coordinatorSpy()
+  const ctx = ctxWithKernel(T0 - 60_000)
+  // hk-1 这轮失败:内核回的名单里没有它,历史保持旧的那条(复查还没落定)
+  const fetchImpl = tcp14Group(k, { passed: { 'hk-2': 104 }, history: { 'hk-2': [{ time: iso(T0 + 5 * 60_000 + 1000), delay: 104 }] } })
+  const s = createLatencyScheduler({ store, ctx, paths, history, fetchImpl, now: k.now, probeCoordinator: spy, log: () => {} })
+  k.setClock(T0 + 5 * 60_000 + 1000)
+  const r = await s.tick()
+  assert.ok(r.timeouts.includes('hk-1'), JSON.stringify(r))
+  const hk1 = history.get()['hk-1']
+  assert.equal(hk1[hk1.length - 1].delay, 0, '这轮最后一笔是超时')
+  assert.ok(spy.observed.some(([tag, ok]) => tag === 'hk-1' && ok === false), '按失败交给共享时间线')
+  assert.ok(spy.observed.some(([tag, ok]) => tag === 'hk-2' && ok === true), '真测通的照常算通过')
+})
+
+test('内核 tcp14:组正在测时这次请求加入那一轮——名单里有的成员算通过,哪怕它的记录早于这轮开始,不记假超时', async () => {
+  const k = kernel()
+  const store = memStore()
+  const history = createLatencyHistory({ store, now: k.now })
+  const spy = coordinatorSpy()
+  const ctx = ctxWithKernel(T0 - 60_000)
+  // 加入的那一轮在我们发请求之前就开始了:hk-1 / hk-2 的结果时间比这轮开始早 2 秒,但都在名单里
+  const joinedAt = T0 + 5 * 60_000 - 1000
+  const fetchImpl = tcp14Group(k, {
+    passed: { 'hk-1': 2000, 'hk-2': 110 },
+    history: { 'hk-1': [{ time: iso(joinedAt), delay: 2000 }], 'hk-2': [{ time: iso(joinedAt), delay: 110 }] },
+  })
+  const s = createLatencyScheduler({ store, ctx, paths, history, fetchImpl, now: k.now, probeCoordinator: spy, log: () => {} })
+  k.setClock(T0 + 5 * 60_000 + 1000)
+  const r = await s.tick()
+  assert.ok(!r.timeouts.includes('hk-1') && !r.timeouts.includes('hk-2'), JSON.stringify(r))
+  assert.ok(!(history.get()['hk-1'] || []).some((x) => x.delay === 0), '没有假超时')
+  assert.ok(spy.observed.some(([tag, ok]) => tag === 'hk-1' && ok === true))
+  assert.ok(!spy.observed.some(([tag, ok]) => (tag === 'hk-1' || tag === 'hk-2') && ok === false), '名单里的成员不向故障转移报失败')
+})
+
+test('老内核(没有 X-Openbox-Group-Check):照旧按历史判——有记录的算通过,没记录的才是超时', async () => {
+  const k = kernel()
+  const store = memStore()
+  const history = createLatencyHistory({ store, now: k.now })
+  const ctx = ctxWithKernel(T0 - 60_000)
+  const s = createLatencyScheduler({ store, ctx, paths, history, fetchImpl: k.fetchImpl, now: k.now, log: () => {} })
+  k.setClock(T0 + 60_000)
+  const r = await s.tick()
+  assert.deepEqual(r.timeouts, ['hk-3'])
 })

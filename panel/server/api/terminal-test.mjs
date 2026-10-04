@@ -6,11 +6,16 @@ import { fetchSelections } from './deploy-runner.mjs'
 import { configMetaPath } from '../system/deploy.mjs'
 import { flushDnsCache } from '../system/dns-cache.mjs'
 import { openKernelLogTap, traceDnsQuery } from '../system/dns-trace.mjs'
+import { detectChallenge } from '../system/http-challenge.mjs'
 import { DNS_REWRITE_TAG } from '../engine/dns-rewrite.mjs'
+import { isProxyResolverTag } from '../engine/dns.mjs'
 import { dnsForwardFilePath } from '../system/dns-takeover.mjs'
 import { parseIpAddresses } from '../system/local-subnets.mjs'
 import { builtinTags } from '../engine/user-groups.mjs'
+import { connectionOwner } from '../engine/rule-owner.mjs'
+import { stripNoDomainGuardText } from '../engine/routing-model.mjs'
 import * as lanProbe from '../system/lan-probe.mjs'
+import { normalizeProbeMethod } from '../system/probe-method.mjs'
 
 // 「模拟 LAN 终端」的真实路由测试:面板在路由器上建一个虚拟终端(system/lan-probe.mjs),让它像
 // 一台普通 LAN 设备一样问 LAN 的 DNS、从 LAN 入口进入路由器,由实际入口规则决定旁路还是进内核。
@@ -79,7 +84,8 @@ export const kernelDnsFromTap = async (tap, { target, config, lease, lan, fetchI
     ruleText: rec.ruleText,
     action: rec.action,
     server,
-    viaProxy: Boolean(server && server.detour),
+    // 代理侧解析器按 tag 认:目标分流让它的上游走直连时没有 detour(engine/dns.mjs 的 isProxyResolverTag)
+    viaProxy: Boolean(server && isProxyResolverTag(server.tag)),
     rewrite: Boolean(server && server.tag === DNS_REWRITE_TAG),
     outbound: dialed,
     chain,
@@ -103,7 +109,8 @@ const exclusive = (fn) => {
   return p
 }
 
-export const runTerminalTest = async ({ store, ctx, paths, fetchImpl = globalThis.fetch, probe = lanProbe, spawnImpl, nodeBin, logTap = openKernelLogTap }, { target, port: bodyPort }) => {
+export const runTerminalTest = async ({ store, ctx, paths, fetchImpl = globalThis.fetch, probe = lanProbe, spawnImpl, nodeBin, logTap = openKernelLogTap }, { target, port: bodyPort, method: requestedMethod }) => {
+  const method = normalizeProbeMethod(requestedMethod)
   const started = Date.now()
   const out = { target, mode: 'lan' }
   const cap = await probe.probeCapability(ctx)
@@ -128,13 +135,13 @@ export const runTerminalTest = async ({ store, ctx, paths, fetchImpl = globalThi
   } catch (err) {
     return { ...out, setupError: errorMessage(err) }
   }
-  out.source = { kind: 'virtual', name: lease.hostname, ip: lease.ip, mac: lease.mac, via: 'dhcp', dns: lease.dns, gateway: lease.gateway, lanDevice: lease.lanDevice, reused: Boolean(lease.reused), dhcpMs: lease.dhcpMs }
+  out.source = { kind: 'virtual', name: lease.hostname, ip: lease.ip, mac: lease.mac, via: 'dhcp', dns: lease.dns, gateway: lease.gateway, override: lease.override || null, lanDevice: lease.lanDevice, reused: Boolean(lease.reused), dhcpMs: lease.dhcpMs }
 
   const port = Number.isInteger(bodyPort) && bodyPort >= 1 && bodyPort <= 65535 ? bodyPort : isIp(target) ? 80 : 443
-  const secure = port !== 80
+  const secure = method === 'TLS' || (method !== 'TCP' && port !== 80)
   const profile = store.getProfile ? store.getProfile() : null
   const resolve6 = Boolean(profile && profile.ipv6)
-  out.exit = { url: targetUrl(target, port, secure), port }
+  out.exit = { url: ['TCP', 'TLS'].includes(method) ? `${method.toLowerCase()}://${net.isIPv6(target) ? `[${target}]` : target}:${port}` : targetUrl(target, port, secure), port, method }
   const secret = store.getClashSecret ? store.getClashSecret() : ''
   const tags = builtinTags(store.getGroups ? store.getGroups() : [])
 
@@ -155,7 +162,11 @@ export const runTerminalTest = async ({ store, ctx, paths, fetchImpl = globalThi
   const kernelRecord = (hit) => {
     const chains = Array.isArray(hit.chains) ? hit.chains.slice().reverse() : []
     const leaf = chains[chains.length - 1]
-    return { seen: true, id: hit.id || '', inbound: hit.metadata.type || '', rule: hit.rule || '', rulePayload: hit.rulePayload || '', chains, destinationIP: hit.metadata.destinationIP || '', host: hit.metadata.host || '', viaProxy: Boolean(leaf) && leaf !== tags.direct && leaf !== tags.block }
+    // 归属(站点集 / 前置自定义 / 内置规则):链路根是站点集就是它,否则拿规则原文对回正在跑的配置(engine/rule-owner.mjs)
+    const owner = connectionOwner({ chains, rule: hit.rule || '', routeRules: config && config.route ? config.route.rules : [], routing: profile ? profile.routing : undefined, builtin: tags })
+    // 站点集按 IP 判的那一份带「连接没有域名」的前提:原文里那段正则去掉,改成 noDomain 标记(界面写一句说明)
+    const { rule, noDomain } = stripNoDomainGuardText(hit.rule)
+    return { seen: true, id: hit.id || '', inbound: hit.metadata.type || '', rule, ...(noDomain ? { noDomain } : {}), rulePayload: hit.rulePayload || '', chains, destinationIP: hit.metadata.destinationIP || '', host: hit.metadata.host || '', viaProxy: Boolean(leaf) && leaf !== tags.direct && leaf !== tags.block, ...(owner ? { owner } : {}) }
   }
   // 连接建起来(或者建不起来)之后,趁它还在,把系统侧证据一次收齐
   const gather = async ({ localPort }) => {
@@ -256,7 +267,7 @@ export const runTerminalTest = async ({ store, ctx, paths, fetchImpl = globalThi
       tap = null
     }
   }
-  const opts = { target, port, secure, dnsServers: lease.dns, resolve6, timeoutMs: 10000, holdMs: 25000 }
+  const opts = { target, port, secure, method, dnsServers: lease.dns, resolve6, timeoutMs: 10000, holdMs: 25000 }
   const result = await probe.runProbeChild({
     spawnImpl, nodeBin, opts, timeoutMs: 30000,
     onEvent: (ev, control) => {
@@ -275,6 +286,11 @@ export const runTerminalTest = async ({ store, ctx, paths, fetchImpl = globalThi
         out.exit.ok = true
         out.exit.status = ev.status
         out.exit.ms = ev.ms
+        if (ev.headers && typeof ev.headers === 'object') {
+          out.exit.headers = ev.headers
+          const challenge = detectChallenge(ev.status, ev.headers)
+          if (challenge) out.exit.challenge = challenge
+        }
         settled = true
         maybeClose()
       } else if (ev.event === 'error') {
@@ -328,8 +344,11 @@ export const registerTerminalTestRoutes = (app, deps) => {
     const target = String((req.body || {}).target || '').trim().toLowerCase()
     if (!isValidTarget(target)) return res.status(400).json({ message: 'target must be a domain or IP' })
     const bodyPort = Number((req.body || {}).port)
+    let method
+    try { method = normalizeProbeMethod(req.body?.method) }
+    catch (err) { return res.status(400).json({ message: errorMessage(err) }) }
     try {
-      res.json(await exclusive(() => runTerminalTest(deps, { target, port: bodyPort })))
+      res.json(await exclusive(() => runTerminalTest(deps, { target, port: bodyPort, method })))
     } catch (err) {
       res.status(500).json({ message: errorMessage(err) })
     }

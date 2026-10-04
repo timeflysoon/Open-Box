@@ -1,4 +1,4 @@
-import { normalizeRealityShortId, normalizeUtlsFingerprint, normalizeVlessFlow } from './node-fields.mjs'
+import { normalizeHopInterval, normalizeHopPorts, normalizeRealityShortId, normalizeUtlsFingerprint, normalizeVlessFlow } from './node-fields.mjs'
 // sing-box 1.13 各传输层的字段互不相同:ws 有 path/headers/early data,http 是 host 列表 +
 // path,grpc 只有 service_name,httpupgrade 是单个 host + path。分享链接 / Clash 的字段
 // 原样照搬(比如 grpc 带 path、http 带 headers.Host)会被内核以 unknown field 拒收,
@@ -133,6 +133,13 @@ const EMITTERS = {
   hysteria2: (n) => {
     const o = withTls({ type: 'hysteria2', ...base(n), password: n.fields.password }, n.fields, QUIC)
     if (n.fields.obfs) o.obfs = n.fields.obfs
+    // 端口跳跃(GitHub #171):解析时已经规整过;导入的 sing-box 出站自带的字段在这里再过一遍,写坏的整个不带
+    const serverPorts = normalizeHopPorts(n.fields.server_ports)
+    if (serverPorts.length) {
+      o.server_ports = serverPorts
+      const hopInterval = normalizeHopInterval(n.fields.hop_interval)
+      if (hopInterval) o.hop_interval = hopInterval
+    }
     // sing-box 1.14 起 hysteria2 默认模仿 Chrome 的 QUIC 握手指纹;Chrome 不声明 Ed25519,服务端用 Ed25519 证书的
     // 握手会失败,官方给的开关是 disable_chrome_parrot。订阅里没有这个信息,节点自带这个字段(手写配置 / 导入的
     // sing-box 出站)时原样带过去,其余节点按内核默认
@@ -148,6 +155,13 @@ const EMITTERS = {
     if (n.fields.password) o.password = String(n.fields.password)
     return o
   },
+  // http 代理出站(住宅代理商的 http:// / https:// 账号):账号密码,https:// 的带 TLS
+  http: (n) => {
+    const o = { type: 'http', ...base(n) }
+    if (n.fields.username) o.username = String(n.fields.username)
+    if (n.fields.password) o.password = String(n.fields.password)
+    return withTls(o, n.fields)
+  },
   tuic: (n) => {
     const o = { type: 'tuic', ...base(n), uuid: n.fields.uuid, password: n.fields.password }
     if (n.fields.congestion_control) o.congestion_control = n.fields.congestion_control
@@ -159,5 +173,9 @@ export const emitOutbound = (node) => {
   if (node.type === 'wireguard') throw new Error('wireguard must be emitted as an endpoint (use emitEndpoint)')
   const emitter = EMITTERS[node.type]
   if (!emitter) throw new Error(`no outbound emitter for type: ${node.type}`)
-  return emitter(node)
+  const out = emitter(node)
+  // 链式代理(engine/chain-proxy.mjs):经上游那条线路去连这个节点。带 detour 的出站把服务器域名原样交给上游,
+  // 由上游那头解析,本地不解析——节点本身被墙、地址是动态域名都不要紧
+  if (typeof node.detour === 'string' && node.detour) out.detour = node.detour
+  return out
 }

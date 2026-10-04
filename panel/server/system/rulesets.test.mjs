@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { ensureRulesets, rulesetKind, rulesetPath } from './rulesets.mjs'
+import { compileRuleSetAtomic, ensureRulesets, rulesetKind, rulesetPath } from './rulesets.mjs'
 import { createMockContext } from './context.mjs'
 import { createPaths } from './paths.mjs'
 
@@ -54,4 +54,25 @@ test('缺少随包文件时拒绝使用旧缓存，错误标签也不能静默�
     assert.equal((await ensureRulesets(ctx, configWith([tag]))).ok, false)
   }
   assert.equal(ctx.writes.length, 0)
+})
+
+// #382:内核对本地规则集边监视边重载,直接 compile --output 到正在用的文件会被读到半截。先编到 .new,成功才原子换上
+test('compileRuleSetAtomic:先编到 .new、成功才换上并删临时文件;编不过目标文件原样不动', async () => {
+  const out = `${paths.rulesetDir}/obflip-byp-geoip-cn.srs`
+  const ctx = createMockContext({ files: { [out]: 'old', '/tmp/src.json': '{}' } })
+  const r = await compileRuleSetAtomic(ctx, paths.singbox, '/tmp/src.json', out)
+  assert.equal(r.code, 0)
+  assert.deepEqual(ctx.calls.map((c) => c.args), [['rule-set', 'compile', '--output', `${out}.new`, '/tmp/src.json']])
+  assert.equal(ctx.files[out], 'compiled:/tmp/src.json')
+  assert.ok(ctx.writes.some((w) => w.path === out && w.copiedFrom === `${out}.new`))
+  assert.equal(`${out}.new` in ctx.files, false)
+
+  const bad = createMockContext({
+    files: { [out]: 'old', '/tmp/src.json': '{}' },
+    execResults: { [`${paths.singbox} rule-set compile --output ${out}.new /tmp/src.json`]: { code: 1, stderr: 'bad cidr' } },
+  })
+  const failed = await compileRuleSetAtomic(bad, paths.singbox, '/tmp/src.json', out)
+  assert.equal(failed.code, 1)
+  assert.equal(bad.files[out], 'old')
+  assert.equal(`${out}.new` in bad.files, false)
 })

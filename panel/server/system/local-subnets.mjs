@@ -6,6 +6,9 @@
 // 就再也进不了内核,「防火墙劫持」模式的分流解析就废了。接口网段内的目标本来就有直连路由,
 // 挖出来不影响"私网不进 TUN"的目的(它们在后面的 local_address_set 那条上 return)。
 
+import { TUN_INTERFACE_NAME } from '../engine/tun-options.mjs'
+import { PROBE_VETH_HOST, PROBE_VETH_NS } from './lan-probe.mjs'
+
 const V4_BITS = 32n
 const V6_BITS = 128n
 
@@ -195,7 +198,26 @@ export const parseInterfaceDump = (text) => {
   return map
 }
 export const classifyLogical = (name) => (/^lan/i.test(name) ? 'lan' : /^w(w)?an/i.test(name) ? 'wan' : null)
-export const readLocalAddresses = async (ctx) => {
+// Debian / Ubuntu 没有 netifd,设备名(eth0 / enp3s0 / ens18)看不出角色,按地址猜:私网地址的口就是局域网口
+// ——旁路由只有一个口时它同时也是出口,照样算局域网口,局域网终端的包就是从它进来的;公网地址的口是 WAN。
+// 只对按名字认不出来的(other)用,br-lan / pppoe- 这类名字照旧;虚拟口(见下)不猜
+const isPrivateV4 = (ip) => /^10\./.test(ip) || /^172\.(1[6-9]|2\d|3[01])\./.test(ip) || /^192\.168\./.test(ip)
+const isUlaV6 = (ip) => /^f[cd][0-9a-f]{2}:/i.test(ip)
+export const classifyByAddress = (address) => {
+  if (/^\d+\.\d+\.\d+\.\d+$/.test(address)) return isPrivateV4(address) ? 'lan' : 'wan'
+  return isUlaV6(address) ? 'lan' : 'wan'
+}
+// 本机的虚拟口不是局域网终端进来的口,Debian / Ubuntu 上不按地址猜、一律 other(和 OpenWrt 一样,那边它们本来就认不成 lan)。
+// 内核自己的 tun(172.19.0.1 / fdfe:dcba:9876::1 都是私网)要是猜成局域网口,部署时入口白名单(system/entry-bypass.mjs 的
+// lanIfaces)会给内核回灌进 tun 的包打放行位,ct mark 跟着连接走,sing-tun 见到它就把这条连接后面的包都当入口放行。
+// 别的软件建的也算:容器 / 虚拟机网桥和 veth(Docker 的 docker0 与自定义网络 br-<12 位十六进制>、libvirt、LXC / LXD / Incus、
+// Podman / CNI)、VPN 隧道(tun / tap、WireGuard、Tailscale、ZeroTier)——它们后面的容器、虚拟机、VPN 对端和本机自己的流量
+// 一样照常进内核,不归白名单管。br0、vmbr0(PVE)这类用户自建的网桥不在里面,照旧按地址猜
+const OTHER_VIRTUAL_IFACE = /^(docker|br-[0-9a-f]{12}$|veth|virbr|lxcbr|lxdbr|incusbr|podman|cni|tun|tap|wg|tailscale|zt)/
+export const isVirtualIface = (iface) =>
+  iface === TUN_INTERFACE_NAME || iface === PROBE_VETH_HOST || iface === PROBE_VETH_NS || OTHER_VIRTUAL_IFACE.test(iface)
+// platform:'systemd'(Debian / Ubuntu)时不问 ubus,other 的口按地址猜(见上),虚拟口除外;默认 OpenWrt 行为不变
+export const readLocalAddresses = async (ctx, { platform = 'openwrt' } = {}) => {
   const out = []
   for (const family of ['-4', '-6']) {
     try {
@@ -206,6 +228,7 @@ export const readLocalAddresses = async (ctx) => {
     }
   }
   if (!out.length) return out
+  if (platform === 'systemd') return out.map((a) => (a.kind === 'other' && !isVirtualIface(a.iface) ? { ...a, kind: classifyByAddress(a.address) } : a))
   let logical = new Map()
   try {
     const r = await ctx.exec('ubus', ['call', 'network.interface', 'dump'], { timeoutMs: 5000 })

@@ -75,7 +75,7 @@ test('sing-box JSON:anytls outbound 不再被当成不支持的类型跳过', ()
   assert.equal(nodes[0].type, 'anytls')
 })
 
-test('整段 base64 的 anytls 分享链接订阅能被识别(不再是 unknown)', () => {
+test('整段 base64 的 anytls 分享链接订阅能被识别（不再是 unknown）', () => {
   const { nodes, format } = parseSubscription(Buffer.from(SHARELINK + '\n', 'utf8').toString('base64'))
   assert.equal(format, 'sharelink')
   assert.equal(nodes.length, 1)

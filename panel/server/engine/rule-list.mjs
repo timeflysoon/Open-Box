@@ -114,6 +114,30 @@ export const parseRuleList = (text) => {
 
 export const ruleListIsEmpty = (parsed) => Object.values(parsed).every((list) => !list.length)
 
+// sing-box 编好的二进制规则集(.srs,比如 one-geoip 发布的 one-china.srs):开头魔数 "SRS" + 一字节版本。
+// 认内容不认后缀(和 .mrs 一样)。JS 这边不自己解它的域名树 / IP 集合,交给内核 `rule-set decompile`
+export const looksLikeSrs = (buf) => Boolean(buf) && buf.length >= 4 && buf[0] === 0x53 && buf[1] === 0x52 && buf[2] === 0x53
+
+// 内核解回来的源格式({ version, rules: [...] })→ 五个字段。解回来的字段单个值是字符串、多个是数组;
+// 只收和「匹配什么目标」有关的那几种,port / network / 逻辑规则这类跳过
+export const parseRuleSource = (source) => {
+  const out = { domain: [], domain_suffix: [], domain_keyword: [], domain_regex: [], ip_cidr: [] }
+  const seen = new Set()
+  for (const rule of Array.isArray(source?.rules) ? source.rules : []) {
+    if (!rule || typeof rule !== 'object') continue
+    for (const k of Object.keys(out)) {
+      if (rule[k] == null) continue
+      for (const v of [].concat(rule[k])) {
+        const value = String(v).trim()
+        if (!value || seen.has(`${k} ${value}`)) continue
+        seen.add(`${k} ${value}`)
+        out[k].push(value)
+      }
+    }
+  }
+  return out
+}
+
 // sing-box 的规则集源格式(rule-set compile 的输入)。一条 headless rule 里各字段是「或」,
 // 正好对应「这份名单里的任意一条命中即算命中」。
 export const ruleListToSource = (parsed) => {

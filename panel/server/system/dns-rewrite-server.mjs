@@ -25,6 +25,7 @@ import net from 'node:net'
 import { DNS_REWRITE_FIXED_TTL, DNS_REWRITE_PORT, matchRewrite, normalizeDnsRewrite, normalizeDomain } from '../engine/dns-rewrite.mjs'
 import { DNS_INBOUND_PORT } from '../engine/config.mjs'
 import { ipv6ProxyMode } from '../engine/dns.mjs'
+import { isResolverServer } from './resolve-hosts.mjs'
 
 export const QTYPE = Object.freeze({ A: 1, CNAME: 5, AAAA: 28, OPT: 41 })
 export const RCODE = Object.freeze({ NOERROR: 0, FORMERR: 1, SERVFAIL: 2, NXDOMAIN: 3, NOTIMP: 4, REFUSED: 5 })
@@ -192,7 +193,7 @@ export const answerQuery = async (query, { rules, ipv6 = true, resolveKernel, re
     // 不能再交回内核——它会按旧规则再送回来
     if (!(want4 || want6) || !resolveFallback) return { rcode: RCODE.NOERROR, answers: [], matched: null }
     const r = await resolveFallback(qname, query.qtype)
-    log(`[dns-rewrite] ${qname} 没有命中任何规则(规则改了内核还没重启?),按直连上游解析:rcode ${r.rcode}`)
+    log(`[dns-rewrite] ${qname} 没有命中任何规则（规则改了内核还没重启?）,按直连上游解析:rcode ${r.rcode}`)
     return { rcode: r.rcode, answers: r.records.map((x) => ({ name: qname, type: query.qtype, ttl: x.ttl, data: x.address })), matched: null }
   }
   const answers = []
@@ -256,9 +257,8 @@ export const createDnsRewriteServer = ({
   const resolveFallback = async (name, qtype) => {
     let servers = []
     try { servers = (await fallbackServers()) || [] } catch { servers = [] }
-    const profile = store.getProfile ? store.getProfile() : {}
-    const direct = profile && profile.dns && typeof profile.dns.direct === 'string' ? profile.dns.direct : ''
-    const list = [...servers, direct].filter((s) => typeof s === 'string' && net.isIP(s) !== 0)
+    // fallbackServers 给的就是直连 DNS(上游 DNS 展开成系统的上游 DNS),见 index.mjs
+    const list = servers.filter(isResolverServer)
     if (!list.length) return { rcode: RCODE.SERVFAIL, records: [], error: 'no-upstream' }
     const key = list.join(',')
     if (!fallbackResolve || fallbackKey !== key) { fallbackResolve = makeResolver(list); fallbackKey = key }
@@ -350,7 +350,7 @@ export const createDnsRewriteServer = ({
       // port 为 0 时先让 UDP 挑一个端口,TCP 再绑同一个(端口只是给测试用;正式用固定的 7854)
       const udpPort = await startUdp(port)
       await startTcp(udpPort)
-      log(`[dns-rewrite] 监听 ${host}:${udpPort}(UDP + TCP)`)
+      log(`[dns-rewrite] 监听 ${host}:${udpPort}（UDP + TCP）`)
     } catch (err) {
       log(`[dns-rewrite] 监听 ${host}:${port} 失败:${err.message}`)
       stop()

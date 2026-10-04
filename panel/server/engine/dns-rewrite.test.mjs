@@ -57,7 +57,7 @@ test('matchRewrite:精确优先,泛域名只匹配子域、按标签边界、后
   assert.equal(matchRewrite(rules, 'ARTICLE.ok1248.cn.').id, 'e', '大小写 / 末尾点不影响')
 })
 
-test('生成:内核规则精确进 domain、泛域名进 domain_suffix(带前导点);转发名单泛域名写根域;停用的不进', () => {
+test('生成:内核规则精确进 domain、泛域名进 domain_suffix（带前导点）;转发名单泛域名写根域;停用的不进', () => {
   const rules = rulesOf([
     { source: 'services.googleapis.cn', domain: 'services.googleapis.com' },
     { source: '*.ok1248.cn', addresses: ['192.168.3.1'] },

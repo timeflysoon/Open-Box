@@ -7,7 +7,7 @@ import { createPaths } from './paths.mjs'
 
 const paths = createPaths('/opt/open-box')
 
-test('regexForwardSuffixes(第四轮 T1):只接受能证明覆盖原匹配集合的转换——分支逐一转、锚定结尾、字面尾巴、标签边界;证明不了回 null', () => {
+test('regexForwardSuffixes（第四轮 T1）:只接受能证明覆盖原匹配集合的转换——分支逐一转、锚定结尾、字面尾巴、标签边界;证明不了回 null', () => {
   // 复审的两个漏转发用例:分支两边都要;`.*example\.com$` 也匹配 notexample.com,dnsmasq 按标签盖不住 → 不转
   assert.deepEqual(regexForwardSuffixes('^foo\\.com$|^bar\\.net$'), ['foo.com', 'bar.net'])
   assert.equal(regexForwardSuffixes('^.*example\\.com$'), null)
@@ -97,7 +97,7 @@ test('expandDnsForward:把计划里的规则集解码成域名并入名单;有�
 
 test('forwardConfText:一行一条 server=/域名/127.0.0.1#7853,去重排序,*. 写法照搬', () => {
   const text = forwardConfText(['youtube.com', '*.ggpht.com', 'youtube.com'])
-  assert.equal(text, '# Open-Box:走代理的域名交给内核解析(127.0.0.1#7853),其余由路由器原有上游解析。由 Open-Box 生成,勿手改\nserver=/*.ggpht.com/127.0.0.1#7853\nserver=/youtube.com/127.0.0.1#7853\n')
+  assert.equal(text, '# Open-Box:走代理的域名交给内核解析（127.0.0.1#7853）,其余由路由器原有上游解析。由 Open-Box 生成,勿手改\nserver=/*.ggpht.com/127.0.0.1#7853\nserver=/youtube.com/127.0.0.1#7853\n')
 })
 
 test('U1:正则尾巴展开有预算——到了标签边界就停不再枚举前面的分组;不带边界的组合超预算立即终止并按"超过预算"降级;一份规则集的正则条目累计也有上限', async () => {

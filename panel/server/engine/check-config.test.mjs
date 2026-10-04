@@ -5,20 +5,23 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { buildConfig } from './config.mjs'
+import { buildConfig, buildConfigDetailed } from './config.mjs'
 import { parseSubscription } from './subscription.mjs'
 import { renameNodes } from './rename.mjs'
 import { groupNodesByRegion } from './groups.mjs'
 import { buildRoute } from './routing.mjs'
+import { builtinTags } from './user-groups.mjs'
+import { FLIP_PLACEHOLDER_SRS_BASE64, flipFlagContent, isFlipBypassTag, isFlipNeedTag, isFlipTag } from './flip.mjs'
+import { isNodeDirectTag, nodeDirectSources } from './direct-hosts.mjs'
 
 const enginedir = path.dirname(fileURLToPath(import.meta.url))
 const sbBin = path.resolve(enginedir, '../../.tools/sing-box')
 const hasBin = fs.existsSync(sbBin)
-// 本机没放二进制就跳过(开发机常态);CI 上不许跳——发布流水线里这一步名叫"用钦定版本的
-// sing-box 校验生成的配置",全跳过还是绿的,拦不住配置和内核版本不兼容的发布。工作流
-// 在跑这个测试之前先把钦定版本下到 panel/.tools/sing-box(见 .github/workflows/release.yml)。
+// 本机没放二进制就跳过(开发机常态);设了 CI 就不许跳——全跳过还是绿的,拦不住配置和内核版本不兼容的发布。
+// 发版是在本机打包(scripts/build-release.sh,发布前验收见 scripts/release-verify/README.md),panel/.tools/sing-box
+// 放和发布包同一套补丁的内核。以前的 GitHub Actions 工作流(.github/workflows/release.yml)从来没在 GitHub 上跑过,已删
 const inCI = process.env.CI === 'true' || process.env.GITHUB_ACTIONS === 'true'
-const missingBin = `sing-box 二进制缺失(panel/.tools/sing-box);运行 pnpm run check:config 前先放置二进制`
+const missingBin = `sing-box 二进制缺失（panel/.tools/sing-box）;运行 pnpm run check:config 前先放置二进制`
 const skipIfNoBin = hasBin || inCI ? false : missingBin
 const requireBin = () => { if (!hasBin) assert.fail(`${missingBin}——CI 上不允许跳过这项校验`) }
 
@@ -29,7 +32,32 @@ const compileSrs = (dir, tag) => {
   execFileSync(sbBin, ['rule-set', 'compile', '--output', out, src])
 }
 
-test('生成的配置通过 sing-box check(全协议 + wireguard + DNS 分流 + 广告)', { skip: skipIfNoBin }, () => {
+// 热切换的开关 / 旁路动态集(engine/flip.mjs):内核 check 时每个本地规则集文件都必须在。生成器默认把它们放在
+// 规则集目录的同级 flip/ 下——测试里规则集目录是临时目录,同级就是系统临时目录,所以这里把路径改进临时目录再造文件:
+// 开关一个 ON 一个 OFF 交替写(两种内容都让内核认一遍),旁路动态集和入口「进内核」名单(obflip-need-*,开着
+// auto_redirect 时才有)放内嵌的占位 .srs——以前 need 集合被当成开关写成 JSON,内核读 .srs 直接 FATAL
+// 订阅和节点站点直连的两份规则集(engine/direct-hosts.mjs,source 格式):同样得在。域名那份写上地址、IP 那份留空(两种都让内核认一遍)
+const writeNodeDirect = (entry) => {
+  const sources = nodeDirectSources({ domains: ['node.example.com'], cidrs: [] })
+  fs.mkdirSync(path.dirname(entry.path), { recursive: true })
+  fs.writeFileSync(entry.path, JSON.stringify(sources[entry.tag]))
+}
+const prepareFlip = (config, dir) => {
+  let on = true
+  for (const entry of (config.route && config.route.rule_set) || []) {
+    if (isNodeDirectTag(entry.tag)) {
+      writeNodeDirect(entry)
+      continue
+    }
+    if (!isFlipTag(entry.tag)) continue
+    entry.path = path.join(dir, 'flip', path.basename(entry.path))
+    fs.mkdirSync(path.dirname(entry.path), { recursive: true })
+    if (isFlipBypassTag(entry.tag) || isFlipNeedTag(entry.tag)) fs.writeFileSync(entry.path, Buffer.from(FLIP_PLACEHOLDER_SRS_BASE64, 'base64'))
+    else { fs.writeFileSync(entry.path, flipFlagContent(on)); on = !on }
+  }
+}
+
+test('生成的配置通过 sing-box check（全协议 + wireguard + DNS 分流 + 上游 TCP）', { skip: skipIfNoBin }, () => {
   requireBin()
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'openbox-check-'))
   try {
@@ -49,16 +77,20 @@ test('生成的配置通过 sing-box check(全协议 + wireguard + DNS 分流 + 
     const { groups } = groupNodesByRegion(renamed)
     const profile = {
       ipv6: true,
-      dns: { split: true, direct: '223.5.5.5', proxy: '1.1.1.1' },
+      // 两侧都选 TCP:内核得认 type=tcp 的 server 对象
+      dns: { split: true, direct: '223.5.5.5', directProtocol: 'tcp', proxy: '1.1.1.1', proxyProtocol: 'tcp' },
       routing: { proxyTag: 'PROXY', categories: [{ ruleset: 'geosite-geolocation-!cn', target: groups[0]?.name || 'PROXY' }], directRulesets: ['geosite-cn', 'geoip-cn'], adBlock: true, adRuleset: 'geosite-category-ads-all', fallback: 'PROXY' },
       rulesetDir: dir,
       clashApiSecret: 'testsecret',
     }
-    const config = buildConfig({ nodes: renamed, regionGroups: groups, profile })
+    const config = buildConfig({ nodes: renamed, regionGroups: groups, profile, rulesetDir: dir })
+    assert.deepEqual(config.dns.servers.find((x) => x.tag === 'dns-direct'), { type: 'tcp', tag: 'dns-direct', server: '223.5.5.5' })
+    assert.equal(config.dns.servers.find((x) => x.tag === 'dns-proxy').type, 'tcp')
     // 为每个被引用的 rule_set tag 造 .srs fixture
     const { rulesetTags } = buildRoute(profile.routing, dir)
     for (const tag of rulesetTags) compileSrs(dir, tag)
     const cfgPath = path.join(dir, 'config.json')
+    prepareFlip(config, dir)
     fs.writeFileSync(cfgPath, JSON.stringify(config))
     // 应通过
     execFileSync(sbBin, ['check', '-c', cfgPath])   // 非 0 会抛错 → 测试失败
@@ -67,7 +99,75 @@ test('生成的配置通过 sing-box check(全协议 + wireguard + DNS 分流 + 
   }
 })
 
-test('坏节点(缺 method)导致 check 失败', { skip: skipIfNoBin }, () => {
+test('热切换模式(档案关了「直连和代理切换重启内核」)生成的配置通过 sing-box check:成对的 logical 规则、开关规则集、旁路动态集', { skip: skipIfNoBin }, async () => {
+  requireBin()
+  const { flipFlagContent, flipPlaceholderSource, isFlipBypassTag, isFlipTag } = await import('./flip.mjs')
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'openbox-check-flip-'))
+  const flipDir = path.join(dir, 'flip')
+  fs.mkdirSync(flipDir)
+  try {
+    const { nodes } = parseSubscription('ss://YWVzLTI1Ni1nY206c2VjcmV0cHc=@hk.example.com:8388#HK-01')
+    const renamed = renameNodes(nodes)
+    const userGroups = [{ id: 'g', name: '香港-自动', type: 'urltest', mode: 'dynamic', keywords: [] }]
+    const profile = {
+      ipv6: true, ipv6Proxy: 'ipv4', rejectQuic: true,
+      dns: { split: true, mode: 'hijack', direct: '223.5.5.5', proxy: '1.1.1.1', proxyProtocol: 'tcp' },
+      // 本机(macOS)的内核二进制不认 auto_redirect(Linux 才有),这里关着:校验的是成对规则和开关规则集。
+      // 带 nft 重定向的旁路动态集在 Linux 容器端到端和开发路由器上校验
+      tun: { autoRedirect: false },
+      clientRoutes: [{ id: 'c1', enabled: true, sources: ['192.168.1.10'], outbound: '国内' }],
+      routing: { fallbackDefault: 'direct', custom: { rules: [{ type: 'ipCidr', value: '10.8.0.0/16', outbound: '香港-自动' }, { type: 'geoip', value: 'telegram', outbound: 'block' }] }, policies: [
+        { id: 'g', name: 'Google', default: '香港-自动', rulesets: ['geosite-google', 'geoip-google'], domainSuffix: ['gstatic.com'] },
+        { id: 'cn', name: '国内', default: 'direct', rulesets: ['geoip-cn', 'geosite-cn'] },
+        { id: 'ip', name: '纯IP', default: 'direct', ipCidr: ['203.0.113.0/24'] },
+      ] },
+      clashApiSecret: 'testsecret',
+    }
+    const config = buildConfig({ nodes: renamed, userGroups, profile, rulesetDir: dir, flipDir, localSubnets: ['192.168.1.0/24'] })
+    assert.ok(config.dns.rules.some((r) => r.type === 'logical'), '确实生成了成对规则')
+    assert.ok(config.route.rules.some((r) => r.type === 'logical'))
+    // 站点集按 IP 判的那一份带「连接没有域名」的前提(取反的 domain_regex),连同挂开关的 v6 / QUIC 拒绝,都要让真内核认一遍
+    const guarded = config.route.rules.filter((r) => r.type === 'logical' && r.rules.some((x) => x.invert === true && Array.isArray(x.domain_regex)))
+    assert.ok(guarded.some((r) => r.outbound === 'Google') && guarded.some((r) => r.outbound === '纯IP'), '确实生成了带前提的 IP 规则')
+    assert.ok(guarded.some((r) => r.outbound === '香港-自动'), '前置自定义分流的 IP 行也带前提')
+    assert.ok(guarded.some((r) => r.action === 'reject'), '带前提的拒绝规则也在')
+    // 造文件:普通规则集编个占位 .srs;开关写 source JSON(一个 ON 一个 OFF 都试);旁路动态集编占位
+    fs.writeFileSync(path.join(dir, 'ph.json'), flipPlaceholderSource())
+    execFileSync(sbBin, ['rule-set', 'compile', '--output', path.join(dir, 'ph.srs'), path.join(dir, 'ph.json')])
+    let on = true
+    for (const entry of config.route.rule_set) {
+      if (isFlipBypassTag(entry.tag)) fs.copyFileSync(path.join(dir, 'ph.srs'), entry.path)
+      else if (isFlipTag(entry.tag)) { fs.writeFileSync(entry.path, flipFlagContent(on)); on = !on }
+      else if (isNodeDirectTag(entry.tag)) writeNodeDirect(entry)
+      else compileSrs(dir, entry.tag)
+    }
+    const cfgPath = path.join(dir, 'config.json')
+    prepareFlip(config, dir)
+    fs.writeFileSync(cfgPath, JSON.stringify(config))
+    execFileSync(sbBin, ['check', '-c', cfgPath])
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('热切换旁路的占位 .srs:内嵌在代码里的字节,和真内核现编出来的一模一样', { skip: skipIfNoBin }, async () => {
+  requireBin()
+  const { FLIP_PLACEHOLDER_SRS_BASE64, FLIP_BYPASS_PLACEHOLDER, flipPlaceholderSource } = await import('./flip.mjs')
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'openbox-check-ph-'))
+  try {
+    fs.writeFileSync(path.join(dir, 'ph.json'), flipPlaceholderSource())
+    execFileSync(sbBin, ['rule-set', 'compile', '--output', path.join(dir, 'ph.srs'), path.join(dir, 'ph.json')])
+    assert.equal(fs.readFileSync(path.join(dir, 'ph.srs')).toString('base64'), FLIP_PLACEHOLDER_SRS_BASE64)
+    // 反过来:内嵌的字节内核解得开,解出来就是那两个占位地址
+    fs.writeFileSync(path.join(dir, 'embedded.srs'), Buffer.from(FLIP_PLACEHOLDER_SRS_BASE64, 'base64'))
+    execFileSync(sbBin, ['rule-set', 'decompile', '--output', path.join(dir, 'back.json'), path.join(dir, 'embedded.srs')])
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(dir, 'back.json'), 'utf8')).rules, [{ ip_cidr: FLIP_BYPASS_PLACEHOLDER }])
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('坏节点（缺 method）导致 check 失败', { skip: skipIfNoBin }, () => {
   requireBin()
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'openbox-checkbad-'))
   try {
@@ -77,6 +177,7 @@ test('坏节点(缺 method)导致 check 失败', { skip: skipIfNoBin }, () => {
       outbounds: [{ type: 'direct', tag: 'direct' }, { type: 'shadowsocks', tag: 'bad', server: 'a.com', server_port: 8388 }],
     }
     const cfgPath = path.join(dir, 'bad.json')
+    prepareFlip(config, dir)
     fs.writeFileSync(cfgPath, JSON.stringify(config))
     assert.throws(() => execFileSync(sbBin, ['check', '-c', cfgPath], { stdio: 'pipe' }))
   } finally {
@@ -84,7 +185,7 @@ test('坏节点(缺 method)导致 check 失败', { skip: skipIfNoBin }, () => {
   }
 })
 
-test('生成的配置通过 sing-box check(sing-box JSON 订阅 → wireguard endpoint)', { skip: skipIfNoBin }, () => {
+test('生成的配置通过 sing-box check（sing-box JSON 订阅 → wireguard endpoint）', { skip: skipIfNoBin }, () => {
   requireBin()
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'openbox-checkwg-'))
   try {
@@ -118,7 +219,7 @@ test('生成的配置通过 sing-box check(sing-box JSON 订阅 → wireguard en
       rulesetDir: dir,
       clashApiSecret: 'testsecret',
     }
-    const config = buildConfig({ nodes: renamed, regionGroups: groups, profile })
+    const config = buildConfig({ nodes: renamed, regionGroups: groups, profile, rulesetDir: dir })
     // 证明 wireguard 路径真的被走通了,而不是被静默丢弃
     assert.ok(Array.isArray(config.endpoints) && config.endpoints.length === 1)
     assert.equal(config.endpoints[0].type, 'wireguard')
@@ -126,6 +227,7 @@ test('生成的配置通过 sing-box check(sing-box JSON 订阅 → wireguard en
     const { rulesetTags } = buildRoute(profile.routing, dir)
     for (const tag of rulesetTags) compileSrs(dir, tag)
     const cfgPath = path.join(dir, 'config.json')
+    prepareFlip(config, dir)
     fs.writeFileSync(cfgPath, JSON.stringify(config))
     // 应通过(非 0 会抛错 → 测试失败,不做 try/catch 吞掉)
     execFileSync(sbBin, ['check', '-c', cfgPath])
@@ -134,7 +236,7 @@ test('生成的配置通过 sing-box check(sing-box JSON 订阅 → wireguard en
   }
 })
 
-test('生成的配置通过 sing-box check(dns.mode=dnsmasq;仅 dns-in 入站被劫持,防 hijack 回环回归)', { skip: skipIfNoBin }, () => {
+test('生成的配置通过 sing-box check（dns.mode=dnsmasq;仅 dns-in 入站被劫持,防 hijack 回环回归）', { skip: skipIfNoBin }, () => {
   requireBin()
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'openbox-checkdnsmasq-'))
   try {
@@ -154,14 +256,14 @@ test('生成的配置通过 sing-box check(dns.mode=dnsmasq;仅 dns-in 入站被
       rulesetDir: dir,
       clashApiSecret: 'testsecret',
     }
-    const config = buildConfig({ nodes: renamed, regionGroups: groups, profile })
+    const config = buildConfig({ nodes: renamed, regionGroups: groups, profile, rulesetDir: dir })
     // 结构性不变量断言:即便 sing-box check 通过,也要能单独捕捉 Critical 修复的回归。
     // 1) 存在仅限 dns-in 入站的 hijack-dns 规则
     const hijack = config.route.rules.find((r) => r.action === 'hijack-dns')
     assert.ok(hijack, '应存在 hijack-dns 规则')
     assert.ok(Array.isArray(hijack.inbound) && hijack.inbound.includes('dns-in'), 'hijack-dns 规则应限定 inbound: [dns-in]')
     // 2) 不存在全局 protocol:'dns' 劫持规则(这正是导致 tun→dns-in 转发查询自环的根因)
-    assert.ok(!config.route.rules.some((r) => r.protocol === 'dns'), '不应存在 protocol:dns 的全局劫持规则(回环回归)')
+    assert.ok(!config.route.rules.some((r) => r.protocol === 'dns'), '不应存在 protocol:dns 的全局劫持规则（回环回归）')
     // 3) 存在监听 127.0.0.1:7853 的 direct 入站,供 dnsmasq 上游转发查询
     const dnsIn = config.inbounds.find((i) => i.type === 'direct' && i.tag === 'dns-in')
     assert.ok(dnsIn, '应存在 tag=dns-in 的 direct 入站')
@@ -171,6 +273,7 @@ test('生成的配置通过 sing-box check(dns.mode=dnsmasq;仅 dns-in 入站被
     const { rulesetTags } = buildRoute(profile.routing, dir)
     for (const tag of rulesetTags) compileSrs(dir, tag)
     const cfgPath = path.join(dir, 'config.json')
+    prepareFlip(config, dir)
     fs.writeFileSync(cfgPath, JSON.stringify(config))
     // 应通过(非 0 会抛错 → 测试失败,不做 try/catch 吞掉)
     execFileSync(sbBin, ['check', '-c', cfgPath])
@@ -179,7 +282,72 @@ test('生成的配置通过 sing-box check(dns.mode=dnsmasq;仅 dns-in 入站被
   }
 })
 
-test('一个节点都没命中的用户组也能过 sing-box check(挂 direct 占位)', { skip: skipIfNoBin }, () => {
+test('节点服务器 / 终端分流「直连」「不进内核」的配置通过 sing-box check:首包预判的 bypass(取反的规则集 / 网段 / 端口)、按终端答的直连解析器、本地主机名交回 dnsmasq', { skip: skipIfNoBin }, () => {
+  requireBin()
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'openbox-checkterminal-'))
+  try {
+    const sub = 'ss://YWVzLTI1Ni1nY206c2VjcmV0cHc=@us.example.com:8388#US-01'
+    const renamed = renameNodes(parseSubscription(sub).nodes)
+    const { groups } = groupNodesByRegion(renamed)
+    const proxy = groups[0].name
+    const profile = {
+      ipv6: false,
+      tun: { autoRedirect: true },
+      dns: { split: true, mode: 'dnsmasq', direct: '223.5.5.5', proxy: '1.1.1.1', fakeIpForProxy: true },
+      routing: {
+        proxyTag: 'PROXY',
+        policies: [{ id: 'g', name: '谷歌', default: proxy, rulesets: ['geosite-google', 'geoip-google'] }],
+        custom: { rules: [
+          { type: 'ipCidr', value: '10.77.0.0/16', outbound: proxy },
+          { type: 'geoip', value: 'telegram', outbound: proxy },
+          { type: 'port', value: '51820', outbound: proxy },
+          { type: 'domainSuffix', value: 'x.test', outbound: proxy },
+        ] },
+        fallbackDefault: 'direct',
+      },
+      // 界面里「直连」存的是内置直连出站的真实名字(和选择器里的一样)
+      clientRoutes: [
+        { id: 'a', sources: ['192.168.3.18'], outbound: builtinTags([]).direct },
+        { id: 'b', match: 'mac', macs: ['00:15:5d:03:0a:12'], outbound: builtinTags([]).direct },
+        { id: 'c', match: 'mac', macs: ['aa:bb:cc:00:11:22'], bypass: true },
+        // 「只让这些终端进内核」按 IP:名单外终端的查询转到直连 DNS 入站
+        { id: 'd', match: 'ip', sources: ['10.99.0.8'], admit: true },
+      ],
+      rulesetDir: dir,
+      clashApiSecret: 'testsecret',
+    }
+    // directHostCidrs:部署时节点域名解析出的地址,「订阅和节点站点直连」的首包预判也要过 check。配置里引用 IP 那份规则集
+    // (地址变了只换文件,engine/direct-hosts.mjs),地址在交给部署写文件的 directHosts 里
+    const { config, directHosts } = buildConfigDetailed({ nodes: renamed, regionGroups: groups, profile, rulesetDir: dir, directHostCidrs: ['203.0.113.7/32'] })
+    assert.ok(directHosts.cidrs.includes('203.0.113.7/32'))
+    const [nodesRule, ipRule, macRule, sniff] = config.route.rules
+    assert.equal(nodesRule.action, 'bypass')
+    assert.deepEqual(nodesRule.rules[0], { rule_set: ['obnode-direct-ip'] })
+    assert.equal(ipRule.action, 'bypass')
+    assert.equal(ipRule.outbound, undefined, '不带出口:只在首包预判里生效')
+    assert.deepEqual(ipRule.rules[0], { source_ip_cidr: ['192.168.3.18/32'] })
+    assert.deepEqual(macRule.rules[0], { source_mac_address: ['00:15:5d:03:0a:12'] })
+    assert.deepEqual(sniff, { action: 'sniff' })
+    assert.ok(config.dns.servers.some((x) => x.tag === 'dns-terminal-direct'))
+    assert.ok(config.inbounds.some((i) => i.tag === 'dns-in-direct' && i.listen_port === 7855))
+    assert.ok(config.dns.rules.some((r) => r.inbound && r.inbound[0] === 'dns-in-direct' && r.server === 'dns-terminal-direct'))
+    assert.ok(config.dns.servers.some((x) => x.tag === 'dns-local'))
+    const { rulesetTags } = buildRoute(profile.routing, dir)
+    for (const tag of rulesetTags) compileSrs(dir, tag)
+    const cfgPath = path.join(dir, 'config.json')
+    prepareFlip(config, dir)
+    // 规则是按开着 auto_redirect 生成的;auto_redirect 只有 Linux 能初始化(mac 版内核 check 时报 invalid argument),
+    // 写给 check 的这份去掉它——要校验的是路由 / DNS 规则本身
+    const tun = config.inbounds.find((i) => i.type === 'tun')
+    if (process.platform !== 'linux' && tun) delete tun.auto_redirect
+    fs.writeFileSync(cfgPath, JSON.stringify(config))
+    execFileSync(sbBin, ['check', '-c', cfgPath])
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('一个节点都没命中的用户组也能过 sing-box check（挂 direct 占位）', { skip: skipIfNoBin }, () => {
   requireBin()
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'openbox-check-empty-'))
   try {
@@ -189,6 +357,7 @@ test('一个节点都没命中的用户组也能过 sing-box check(挂 direct �
     compileSrs(dir, 'geosite-cn')
     compileSrs(dir, 'geoip-cn')
     const config = buildConfig({
+      rulesetDir: dir,
       nodes: renamed,
       regionGroups: groups,
       profile: {
@@ -210,13 +379,14 @@ test('一个节点都没命中的用户组也能过 sing-box check(挂 direct �
 
     const ie = config.outbounds.find((o) => o.tag === '爱尔兰-自动')
     assert.ok(ie, '空组必须仍然出现在配置里')
-    assert.deepEqual(ie.outbounds, ['直连'], '空组挂直连占位(内置直连默认叫「直连」)')
+    assert.deepEqual(ie.outbounds, ['直连'], '空组挂直连占位（内置直连默认叫「直连」）')
     const sel = config.outbounds.find((o) => o.tag === '爱尔兰站点')
     assert.equal(sel.default, '爱尔兰-自动', '策略的默认选中项就是那个空组')
     const rule = config.route.rules.find((r) => r.outbound === '爱尔兰站点')
     assert.ok(rule, '策略规则要在')
 
     const file = path.join(dir, 'config.json')
+    prepareFlip(config, dir)
     fs.writeFileSync(file, JSON.stringify(config, null, 2))
     execFileSync(sbBin, ['check', '-c', file], { stdio: 'pipe' })
   } finally {
@@ -246,7 +416,8 @@ for (const fallbackDefault of ['direct', 'proxy']) {
       assert.ok(groups.some((g) => g.name === '其他地区'), '认不出国别的节点该落到「其他地区」组')
       const profile = {
         ipv6: false,
-        dns: { split: true, mode: 'dnsmasq', direct: '223.5.5.5', proxy: '1.1.1.1' },
+        // 直连 DNS 是上游 DNS:直连侧用读到的系统上游
+        dns: { split: true, mode: 'dnsmasq', direct: 'wan', proxy: '1.1.1.1' },
         routing: {
           proxyTag: 'PROXY',
           fallbackDefault,
@@ -273,6 +444,7 @@ for (const fallbackDefault of ['direct', 'proxy']) {
         rulesetDir: dir,
       }
       const config = buildConfig({
+        rulesetDir: dir,
         nodes: renamed,
         regionGroups: groups,
         userGroups: [{ id: 'all', name: '所有-自动', type: 'urltest', mode: 'dynamic', keywords: [] }],
@@ -290,11 +462,12 @@ for (const fallbackDefault of ['direct', 'proxy']) {
       // 成员只剩用户自己建的节点组:按国家自动分的组和 PROXY 聚合已退役
       assert.deepEqual(sel.outbounds, ['直连', '所有-自动', '拒绝'])
       assert.ok(config.outbounds.some((o) => o.type === 'block'), '有策略选了拒绝,block 出站必须在')
-      // dnsmasq 模式下直连侧不能是 local(会绕回 dnsmasq),要用读到的系统上游
+      // dnsmasq 模式下直连侧不能是 local(会绕回 dnsmasq),上游 DNS 要用读到的系统上游
       // 不带 detour:显式 detour:'direct' 会在启动时被内核拒绝(check 查不出来,真机死循环过)
       assert.deepEqual(config.dns.servers[0], { type: 'udp', tag: 'dns-direct', server: '192.168.1.1' })
 
       const file = path.join(dir, 'config.json')
+      prepareFlip(config, dir)
       fs.writeFileSync(file, JSON.stringify(config, null, 2))
       execFileSync(sbBin, ['check', '-c', file], { stdio: 'pipe' })
     } finally {
@@ -306,7 +479,7 @@ for (const fallbackDefault of ['direct', 'proxy']) {
 // hijack / off 两种 DNS 劫持方式也要过 sing-box check:直连侧用 WAN 上游 + (hijack)本地主机名交 local;
 // (off)不劫持、不写 auto_redirect
 for (const mode of ['hijack', 'off']) {
-  test(`生成的配置通过 sing-box check(dns.mode=${mode})`, { skip: skipIfNoBin }, () => {
+  test(`生成的配置通过 sing-box check（dns.mode=${mode}）`, { skip: skipIfNoBin }, () => {
   requireBin()
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), `openbox-check-${mode}-`))
     try {
@@ -325,8 +498,9 @@ for (const mode of ['hijack', 'off']) {
         rulesetDir: dir,
         clashApiSecret: 'testsecret',
       }
-      const config = buildConfig({ nodes: renamed, regionGroups: groups, profile, systemDns: ['211.139.29.150', '2409:806c:2000::1'] })
-      assert.deepEqual(config.dns.servers[0], { type: 'udp', tag: 'dns-direct', server: '211.139.29.150' })
+      const config = buildConfig({ nodes: renamed, regionGroups: groups, profile, rulesetDir: dir, systemDns: ['211.139.29.150', '2409:806c:2000::1'] })
+      // 直连 DNS 填了 IP 就用它,不看系统的上游 DNS
+      assert.deepEqual(config.dns.servers[0], { type: 'udp', tag: 'dns-direct', server: '223.5.5.5' })
       if (mode === 'hijack') {
         assert.ok(config.route.rules.some((r) => r.protocol === 'dns' && r.action === 'hijack-dns'))
         assert.ok(config.dns.servers.some((s) => s.tag === 'dns-local' && s.type === 'local'))
@@ -344,6 +518,7 @@ for (const mode of ['hijack', 'off']) {
       const { rulesetTags } = buildRoute(profile.routing, dir)
       for (const tag of rulesetTags) compileSrs(dir, tag)
       const cfgPath = path.join(dir, 'config.json')
+      prepareFlip(config, dir)
       fs.writeFileSync(cfgPath, JSON.stringify(config))
       execFileSync(sbBin, ['check', '-c', cfgPath])
     } finally {
@@ -351,3 +526,59 @@ for (const mode of ['hijack', 'off']) {
     }
   })
 }
+
+test('代理 DNS 配了备用上游(并发竞速)生成的配置通过 sing-box check:evaluate + respond race 真内核认', { skip: skipIfNoBin }, async () => {
+  requireBin()
+  const { flipFlagContent, flipPlaceholderSource, isFlipBypassTag, isFlipTag } = await import('./flip.mjs')
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'openbox-check-race-'))
+  const flipDir = path.join(dir, 'flip')
+  fs.mkdirSync(flipDir)
+  try {
+    const { nodes } = parseSubscription('ss://YWVzLTI1Ni1nY206c2VjcmV0cHc=@hk.example.com:8388#HK-01')
+    const renamed = renameNodes(nodes)
+    const userGroups = [{ id: 'g', name: '香港-自动', type: 'urltest', mode: 'dynamic', keywords: [] }]
+    const profile = {
+      ipv6: true, rejectQuic: true,
+      dns: {
+        split: true, mode: 'hijack', direct: '223.5.5.5',
+        proxy: '1.1.1.1', proxyProtocol: 'tcp',
+        // 主上游 + 两个备用:三家同时问,谁先回 NOERROR 用谁的(GitHub #151)
+        proxyExtras: [{ server: '8.8.8.8', protocol: 'tcp' }, { server: '9.9.9.9', protocol: 'udp', port: 53 }],
+      },
+      tun: { autoRedirect: false },
+      clientRoutes: [{ id: 'c1', enabled: true, sources: ['192.168.1.10'], outbound: '香港-自动' }],
+      routing: { fallbackDefault: '香港-自动', custom: { enabled: true, rules: [{ type: 'domainSuffix', value: 'example.com', outbound: '香港-自动' }] }, policies: [
+        { id: 'g', name: 'Google', default: '香港-自动', rulesets: ['geosite-google'], domainSuffix: ['gstatic.com'] },
+        { id: 'cn', name: '国内', default: 'direct', rulesets: ['geoip-cn', 'geosite-cn'] },
+      ] },
+      clashApiSecret: 'testsecret',
+    }
+    const config = buildConfig({ nodes: renamed, userGroups, profile, rulesetDir: dir, flipDir, localSubnets: ['192.168.1.0/24'] })
+    // 三条走代理的路径都要竞速:站点集(成对规则)、前置自定义分流 / 终端分流(普通规则)、兜底
+    const evaluates = config.dns.rules.filter((r) => r.action === 'evaluate' || (r.type === 'logical' && r.action === 'evaluate'))
+    const responds = config.dns.rules.filter((r) => r.action === 'respond' && r.race === true)
+    assert.ok(evaluates.length >= 6, `并发发起的规则太少:${evaluates.length}`)
+    assert.ok(responds.length >= 6, `竞速应答规则太少:${responds.length}`)
+    // 每台解析器都要有自己的服务器条目(主 + 两个备用)
+    const proxyServers = config.dns.servers.filter((x) => String(x.tag).startsWith('dns-proxy'))
+    assert.ok(proxyServers.some((x) => x.server === '8.8.8.8') && proxyServers.some((x) => x.server === '9.9.9.9'), '备用上游要各自开一台解析器')
+    // 兜底也要竞速,而且最后仍留一条普通规则兜住(几家都没给 NOERROR 时行为和单上游一样)
+    assert.ok(config.dns.rules.some((r) => Array.isArray(r.rule_set) && r.server === 'dns-proxy'), '兜底要留普通规则')
+
+    fs.writeFileSync(path.join(dir, 'ph.json'), flipPlaceholderSource())
+    execFileSync(sbBin, ['rule-set', 'compile', '--output', path.join(dir, 'ph.srs'), path.join(dir, 'ph.json')])
+    let on = true
+    for (const entry of config.route.rule_set) {
+      if (isFlipBypassTag(entry.tag)) fs.copyFileSync(path.join(dir, 'ph.srs'), entry.path)
+      else if (isFlipTag(entry.tag)) { fs.writeFileSync(entry.path, flipFlagContent(on)); on = !on }
+      else if (isNodeDirectTag(entry.tag)) writeNodeDirect(entry)
+      else compileSrs(dir, entry.tag)
+    }
+    const cfgPath = path.join(dir, 'config.json')
+    prepareFlip(config, dir)
+    fs.writeFileSync(cfgPath, JSON.stringify(config))
+    execFileSync(sbBin, ['check', '-c', cfgPath])
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})

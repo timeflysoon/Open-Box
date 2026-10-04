@@ -1,6 +1,14 @@
 import YAML from 'yaml'
-import { clashSsPlugin, normalizeRealityShortId, normalizeUtlsFingerprint, normalizeVlessFlow } from './node-fields.mjs'
+import { clashSsPlugin, normalizeHopInterval, normalizeHopPorts, normalizeRealityShortId, normalizeUtlsFingerprint, normalizeVlessFlow } from './node-fields.mjs'
 import { createNode } from './node-model.mjs'
+
+// hysteria2 的端口跳跃字段:范围合法才带,间隔合法才带
+const hopFields = (ports, interval) => {
+  const server_ports = normalizeHopPorts(ports)
+  if (!server_ports.length) return {}
+  const hop_interval = normalizeHopInterval(interval)
+  return { server_ports, ...(hop_interval ? { hop_interval } : {}) }
+}
 
 const toArray = (v) => (Array.isArray(v) ? v : v == null ? [] : [v])
 
@@ -104,6 +112,8 @@ const MAPPERS = {
       // client-fingerprint 会被整个丢掉。
       tls: buildClashTls({ ...p, tls: true }) || { enabled: true },
       ...(p.obfs ? { obfs: { type: p.obfs, ...(p['obfs-password'] ? { password: p['obfs-password'] } : {}) } } : {}),
+      // 端口跳跃:ports + hop-interval(engine/node-fields.mjs)
+      ...hopFields(p.ports, p['hop-interval']),
     },
   }),
   tuic: (p) => ({
@@ -126,6 +136,15 @@ const MAPPERS = {
   }),
   // Clash 的 socks5。sing-box 的 socks 出站没有 TLS 可配,带 tls: true 的条目照搬过去
   // 只会连不上,这里直接抛出去记成 skipped,让用户知道这条没被收进来。
+  // Clash 的 http 代理(username / password,tls: true 就是 https 代理)
+  http: (p) => ({
+    type: 'http',
+    fields: {
+      ...(p.username ? { username: String(p.username) } : {}),
+      ...(p.password ? { password: String(p.password) } : {}),
+      ...(p.tls === true ? { tls: { enabled: true, server_name: String(p.sni || p.server || '') } } : {}),
+    },
+  }),
   socks5: (p) => {
     if (p.tls === true) throw new Error('socks5 over tls unsupported')
     return {
@@ -176,10 +195,17 @@ export const parseClashProxies = (yamlText) => {
     }
     try {
       const { type, fields } = mapper(normalizeProxy(p))
-      nodes.push(createNode({ tag: p.name, type, server: p.server, server_port: p.port, fields, source: 'clash' }))
+      // 只写了 ports 没写 port 的 hysteria2 条目:拿跳跃范围的第一个端口当展示用的端口(内核有 server_ports 时不看它)
+      const port = p.port ?? (fields.server_ports ? Number(fields.server_ports[0].split(':')[0]) : p.port)
+      nodes.push(createNode({ tag: p.name, type, server: p.server, server_port: port, fields, source: 'clash' }))
     } catch (err) {
-      // 跳过要说清为什么:不支持的插件(shadow-tls 这类)/ 字段不合法,界面照原因显示
-      const code = err && err.code === 'unsupported-plugin' ? 'unsupported-plugin' : 'invalid'
+      // 跳过要说清为什么:节点名称始终保留原文,这里只报告协议字段本身的问题。
+      // 不支持的传输层单独标记,避免界面把它误解成节点名称不合法。
+      const code = err && err.code === 'unsupported-plugin'
+        ? 'unsupported-plugin'
+        : err && /^unsupported transport:/.test(String(err.message || ''))
+          ? 'unsupported-transport'
+          : 'invalid'
       skipped.push({ name: p.name, type: p.type, reason: code, detail: (err && (err.detail || err.message)) || '' })
     }
   }

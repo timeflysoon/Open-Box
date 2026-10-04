@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import express from 'express'
-import { applyBackup, buildBackup, BACKUP_FORMAT, registerBackupRoutes } from './backup.mjs'
+import { applyBackup, buildBackup, BACKUP_FORMAT, registerBackupBodyParser, registerBackupRoutes } from './backup.mjs'
+import { registerSubscriptionRoutes } from './subscriptions.mjs'
 import { createStore } from '../store/openbox-store.mjs'
 
 const memStore = () => {
@@ -40,8 +41,9 @@ test('buildBackup:带档案和节点组,订阅 / 节点可选;不带密码、cla
   assert.equal(slim.subscriptions, undefined)
   assert.equal(slim.nodes, undefined)
   assert.equal(slim.profile.dns.mode, 'hijack')
-  assert.deepEqual(full.includes, { subscriptions: true, clientRoutes: true, servers: true })
-  assert.deepEqual(slim.includes, { subscriptions: false, clientRoutes: true, servers: true })
+  assert.deepEqual(full.includes, { subscriptions: true, chainProxies: true, clientRoutes: true, servers: true })
+  // 没单独说链式代理时沿用以前的规矩:跟着订阅走
+  assert.deepEqual(slim.includes, { subscriptions: false, chainProxies: false, clientRoutes: true, servers: true })
 })
 
 test('终端分流 / 共享网络可选:不勾就从档案里去掉;导入这种文件不动现有的终端分流 / 共享网络', () => {
@@ -54,7 +56,7 @@ test('终端分流 / 共享网络可选:不勾就从档案里去掉;导入这种
   const partial = buildBackup(src, { clientRoutes: false, servers: false })
   assert.equal(partial.profile.clientRoutes, undefined)
   assert.equal(partial.profile.servers, undefined)
-  assert.deepEqual(partial.includes, { subscriptions: true, clientRoutes: false, servers: false })
+  assert.deepEqual(partial.includes, { subscriptions: true, chainProxies: true, clientRoutes: false, servers: false })
   // 导出时删的是拷贝,库里的没动
   assert.equal(src.getProfile().clientRoutes.length, 1)
 
@@ -67,7 +69,7 @@ test('终端分流 / 共享网络可选:不勾就从档案里去掉;导入这种
   assert.equal(dst.getProfile().dns.mode, 'hijack', '档案其他部分照样覆盖')
 })
 
-test('applyBackup:导进一个空库,档案 / 组 / 订阅 / 节点都在;rulesetDir 不导入;挂在不存在订阅上的节点丢掉', () => {
+test('applyBackup:导进一个空库,档案 / 组 / 订阅 / 节点都在;老文件里的 rulesetDir 不落库;挂在不存在订阅上的节点丢掉', () => {
   const src = memStore()
   seed(src)
   const file = JSON.parse(JSON.stringify(buildBackup(src)))
@@ -83,26 +85,26 @@ test('applyBackup:导进一个空库,档案 / 组 / 订阅 / 节点都在;rulese
   assert.equal(dst.getProfile().dns.mode, 'hijack')
   assert.equal(dst.getProfile().traffic.keepMonths, 12)
   assert.equal(dst.getProfile().routing.policies[0].name, 'AI')
-  assert.equal(dst.getProfile().rulesetDir, '/opt/open-box/data/rulesets', '本机路径不跟着文件走')
+  assert.equal(dst.getProfile().rulesetDir, undefined, '本机路径是退役字段,不跟着文件走')
   assert.ok(dst.getGroups().some((g) => g.name === '香港-自动'))
   assert.deepEqual(dst.getSubscriptions().map((s) => s.id), ['s1', 's2'])
   assert.deepEqual(dst.getNodes().map((n) => n.tag), ['HK-01', 'US-01'], '没 tag 的、挂在不存在订阅上的都丢掉')
 })
 
-test('applyBackup 追加模式:现有订阅留着,文件里的加到后面;同一条订阅(id 相同)以文件里的为准、节点跟着换;档案照样覆盖', () => {
+test('applyBackup 追加模式:现有订阅留着,文件里的加到后面;同一条订阅（id 相同）以文件里的为准、节点跟着换;档案照样覆盖', () => {
   const store = memStore()
   seed(store)
   const file = JSON.parse(JSON.stringify(buildBackup(store)))
   // 文件里 s1 改了名、节点换了一批;s2 没变;另外多一条新订阅 s3
   file.profile.dns.mode = 'off'
-  file.subscriptions[0].name = '机场(新)'
+  file.subscriptions[0].name = '机场（新）'
   file.nodes = [{ tag: 'HK-02', type: 'shadowsocks', subscriptionId: 's1' }, { tag: 'US-01', type: 'tuic', subscriptionId: 's2' }, { tag: 'JP-01', type: 'vless', subscriptionId: 's3' }]
   file.subscriptions.push({ id: 's3', name: '第三家' })
   const r = applyBackup(store, file, { subscriptionsMode: 'append' })
   assert.equal(r.error, undefined)
   assert.equal(r.imported.subscriptionsMode, 'append')
   assert.equal(store.getProfile().dns.mode, 'off', '档案不分模式,一律覆盖')
-  assert.deepEqual(store.getSubscriptions().map((s) => `${s.id}:${s.name}`), ['s1:机场(新)', 's2:手动', 's3:第三家'])
+  assert.deepEqual(store.getSubscriptions().map((s) => `${s.id}:${s.name}`), ['s1:机场（新）', 's2:手动', 's3:第三家'])
   assert.deepEqual(store.getNodes().map((n) => n.tag).sort(), ['HK-02', 'JP-01', 'US-01'], 's1 的旧节点 HK-01 换成了 HK-02,没有重复')
   assert.match(applyBackup(store, file, { subscriptionsMode: 'merge' }).error || '', /replace \/ append/)
 })
@@ -222,4 +224,182 @@ test('面板设置和背景图:导出只带 config/ 且不是密码的键;导入
   assert.equal(r2.imported.backgroundImage, false)
   assert.equal(background, 'keep')
   assert.equal(kv.get('config/language'), 'en')
+})
+
+test('applyBackup:老版本导出的文件（地区层 / 广告拦截 / rulesetDir / DoH 上游）导入后档案里只剩现行字段', () => {
+  const dst = memStore()
+  const r = applyBackup(dst, {
+    format: 'open-box-backup',
+    version: 1,
+    profile: {
+      region: 'CN',
+      rulesetDir: '/opt/open-box/data/rulesets',
+      dns: { split: true, mode: 'dnsmasq', direct: '223.5.5.5', proxy: 'https://1.1.1.1/dns-query' },
+      routing: {
+        proxyTag: 'PROXY',
+        regions: [{ id: 'cn', name: '中国大陆', catchAll: 'proxy', rules: [{ type: 'geosite', value: 'cn', action: 'direct' }] }],
+        regionMode: 'CN',
+        outboundOptions: { direct: true, reject: true, groups: true },
+        policies: [{ id: 'ai', name: 'AI', rulesets: ['geosite-openai'] }],
+        adBlock: false,
+        adRuleset: 'geosite-category-ads-all',
+        categories: [],
+        directRulesets: ['geosite-cn', 'geoip-cn'],
+        fallback: 'PROXY',
+      },
+    },
+    groups: [],
+  })
+  assert.equal(r.error, undefined)
+  const p = dst.getProfile()
+  assert.equal(p.region, undefined)
+  assert.equal(p.rulesetDir, undefined)
+  assert.equal(p.dns.proxy, '1.1.1.1')
+  for (const key of ['proxyTag', 'regions', 'regionMode', 'outboundOptions', 'adBlock', 'adRuleset', 'categories', 'directRulesets', 'fallback']) {
+    assert.equal(key in p.routing, false, key)
+  }
+  assert.deepEqual(p.routing.policies.map((x) => x.name), ['AI', '中国大陆·直连'])
+  assert.equal(p.routing.fallbackDefault, 'proxy')
+  // 再导出就没有这些字段了
+  const again = buildBackup(dst)
+  assert.equal('rulesetDir' in again.profile, false)
+  assert.equal('regions' in again.profile.routing, false)
+})
+
+// id 只认 ASCII(界面上是随机生成的),名字随便起
+let chainSeq = 0
+const CHAIN = (name, upstream = '香港-自动') => ({ id: `chain-${++chainSeq}`, enabled: true, name, link: 'socks5://user:pw@203.0.113.9:1080', upstream })
+
+test('链式代理有自己的勾:和订阅互不牵连;不勾就不进文件,导入这种文件不动现有的链式代理;导入结果里报条数', () => {
+  const src = memStore()
+  seed(src)
+  src.setProfile({ chainProxies: [CHAIN('英国-住宅')] })
+  // 只要链式代理、不要订阅
+  const chainOnly = buildBackup(src, { subscriptions: false, chainProxies: true })
+  assert.equal(chainOnly.subscriptions, undefined)
+  assert.equal(chainOnly.profile.chainProxies.length, 1)
+  assert.equal(chainOnly.profile.chainProxies[0].link, 'socks5://user:pw@203.0.113.9:1080')
+  assert.deepEqual(chainOnly.includes, { subscriptions: false, chainProxies: true, clientRoutes: true, servers: true })
+  // 要订阅、不要链式代理
+  const noChain = buildBackup(src, { chainProxies: false })
+  assert.equal(noChain.subscriptions.length, 2)
+  assert.equal(noChain.profile.chainProxies, undefined)
+  assert.equal(src.getProfile().chainProxies.length, 1, '导出时删的是拷贝,库里的没动')
+
+  // 导入不带链式代理的文件:这台上原有的留着
+  const dst = memStore()
+  seed(dst)
+  dst.setProfile({ chainProxies: [CHAIN('本机-住宅')] })
+  const kept = applyBackup(dst, JSON.parse(JSON.stringify(noChain)))
+  assert.equal(kept.error, undefined)
+  assert.equal(kept.imported.chainProxies, undefined, '文件里没有链式代理就不报这一项')
+  assert.deepEqual(dst.getProfile().chainProxies.map((c) => c.name), ['本机-住宅'])
+  // 导入带链式代理的文件:整份换成文件里的,摘要(类型 / 地址 / 端口)由库重算
+  const replaced = applyBackup(dst, JSON.parse(JSON.stringify(chainOnly)))
+  assert.equal(replaced.imported.chainProxies, 1)
+  assert.deepEqual(dst.getProfile().chainProxies.map((c) => c.name), ['英国-住宅'])
+  assert.deepEqual(dst.getProfile().chainProxies[0].node, { type: 'socks', server: '203.0.113.9', port: 1080 })
+})
+
+test('导入时按「导入之后」的样子核对链式代理重名:和节点 / 节点组 / 站点集撞了就整个不导,什么都不写', () => {
+  // 这台上有链式代理「香港-备用」,文件(不带链式代理)里的节点组也叫这个名字
+  const dst = memStore()
+  seed(dst)
+  dst.setProfile({ chainProxies: [CHAIN('香港-备用')] })
+  const file = buildBackup((() => { const s = memStore(); seed(s); s.setGroups([{ name: '香港-自动', type: 'urltest', members: [] }, { name: '香港-备用', type: 'selector', members: [] }]); return s })(), { chainProxies: false })
+  const before = JSON.stringify([dst.getProfile(), dst.getGroups(), dst.getNodes()])
+  const r = applyBackup(dst, JSON.parse(JSON.stringify(file)))
+  assert.match(r.error, /链式代理「香港-备用」和导入后的节点、节点组或站点集重名/)
+  assert.equal(JSON.stringify([dst.getProfile(), dst.getGroups(), dst.getNodes()]), before)
+
+  // 文件里的链式代理和这台上现有的节点重名(文件不带订阅):同样拒绝
+  const src2 = memStore()
+  seed(src2)
+  src2.setProfile({ chainProxies: [CHAIN('HK-01')] })
+  const r2 = applyBackup(dst, JSON.parse(JSON.stringify(buildBackup(src2, { subscriptions: false, chainProxies: true }))))
+  assert.match(r2.error, /链式代理「HK-01」/)
+
+  // 追加订阅:文件里的节点和这台上的链式代理重名
+  const dst3 = memStore()
+  seed(dst3)
+  dst3.setProfile({ chainProxies: [CHAIN('JP-01')] })
+  const src3 = memStore()
+  seed(src3)
+  src3.setSubscriptions([{ id: 's9', name: '另一家', url: 'https://y/sub' }])
+  src3.setNodes([{ tag: 'JP-01', type: 'shadowsocks', server: '3.3.3.3', subscriptionId: 's9' }])
+  const r3 = applyBackup(dst3, JSON.parse(JSON.stringify(buildBackup(src3, { chainProxies: false }))), { subscriptionsMode: 'append' })
+  assert.match(r3.error, /链式代理「JP-01」/)
+
+  // 不撞的正常导入
+  const ok = applyBackup(dst3, JSON.parse(JSON.stringify(buildBackup(src2, { subscriptions: false, chainProxies: false }))))
+  assert.equal(ok.error, undefined)
+})
+
+test('接口:chainProxies=0 不带链式代理;老前端不带这个参数时跟着 subscriptions 走', async () => {
+  const store = memStore()
+  seed(store)
+  store.setProfile({ chainProxies: [CHAIN('英国-住宅')] })
+  const app = express()
+  registerBackupRoutes(app, { store })
+  const server = app.listen(0)
+  await new Promise((r) => server.once('listening', r))
+  try {
+    const get = (q) => fetch(`http://127.0.0.1:${server.address().port}/api/openbox/backup${q}`).then((r) => r.json())
+    assert.equal((await get('?subscriptions=1&chainProxies=0')).profile.chainProxies, undefined)
+    assert.equal((await get('?subscriptions=0&chainProxies=1')).profile.chainProxies.length, 1)
+    assert.equal((await get('?subscriptions=0')).profile.chainProxies, undefined)
+    assert.equal((await get('')).profile.chainProxies.length, 1)
+  } finally {
+    await new Promise((r) => server.close(r))
+  }
+})
+
+test('「切换重启内核」开关已经去掉:导出的档案里没有这个键;老版本导出的备份带着它(两个老键都算)照样能导,不落库;值不是布尔的坏文件整个不导', () => {
+  const src = memStore()
+  seed(src)
+  src.setProfile({ rejectQuic: true })
+  const file = JSON.parse(JSON.stringify(buildBackup(src)))
+  assert.equal('restartOnFlip' in file.profile, false)
+  assert.equal('restartOnClassFlip' in file.profile, false)
+  // v0.1.208 / v0.1.209 导出的(restartOnFlip)、v0.1.207 导出的(restartOnClassFlip):开关存的是什么都一样
+  for (const legacy of [{ restartOnFlip: true }, { restartOnFlip: false }, { restartOnClassFlip: true }]) {
+    const old = JSON.parse(JSON.stringify(file))
+    Object.assign(old.profile, legacy)
+    const dst = memStore()
+    assert.equal(applyBackup(dst, old).error, undefined)
+    assert.equal('restartOnFlip' in dst.getProfile(), false)
+    assert.equal('restartOnClassFlip' in dst.getProfile(), false)
+    assert.equal(dst.getProfile().rejectQuic, true, '别的设置照常导入')
+  }
+  const bad = JSON.parse(JSON.stringify(file))
+  bad.profile.restartOnFlip = 'no'
+  assert.match(applyBackup(memStore(), bad).error, /restartOnFlip must be a boolean/)
+  // 导出的文件里不带任何热切换的运行态(开关文件、部署元数据都是机器上的东西)
+  assert.ok(!JSON.stringify(file).includes('obflip'))
+})
+
+test('HTTP:备份超过 10 MB 也能导入——排在前面的订阅路由(10 MB 解析器)不能先把它拦成 413(#303)', async () => {
+  const store = memStore()
+  seed(store)
+  const full = buildBackup(store, { subscriptions: true })
+  // 撑到 11 MB 左右:一大把节点,每个带一段长备注
+  const pad = 'x'.repeat(2000)
+  full.nodes = Array.from({ length: 5600 }, (_, i) => ({ tag: `N-${i}`, type: 'ss', server: '1.2.3.4', server_port: 1000 + (i % 50000), subscriptionId: 's1', note: pad }))
+  const body = JSON.stringify(full)
+  assert.ok(body.length > 10 * 1024 * 1024, `测试数据要超过 10 MB,现在 ${body.length}`)
+  // 和 index.mjs 一样的注册顺序:先挂备份的解析器,再挂订阅路由,最后挂备份路由
+  const dst = memStore()
+  const app = express()
+  registerBackupBodyParser(app)
+  registerSubscriptionRoutes(app, { store: dst })
+  registerBackupRoutes(app, { store: dst })
+  const server = app.listen(0)
+  await new Promise((r) => server.once('listening', r))
+  try {
+    const res = await fetch(`http://127.0.0.1:${server.address().port}/api/openbox/backup/import`, { method: 'POST', headers: { 'content-type': 'application/json' }, body })
+    assert.equal(res.status, 200, await res.clone().text().then((t) => t.slice(0, 200)))
+    assert.equal(dst.getNodes().length, 5600)
+  } finally {
+    await new Promise((r) => server.close(r))
+  }
 })

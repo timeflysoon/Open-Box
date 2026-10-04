@@ -8,7 +8,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { spawn } from 'node:child_process'
+import { spawn, execFileSync } from 'node:child_process'
 import { once } from 'node:events'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { createMockContext } from './context.mjs'
@@ -19,9 +19,15 @@ import { createLatencyScheduler } from './latency-scheduler.mjs'
 
 const binary = process.env.OPENBOX_TEST_SINGBOX || fileURLToPath(new URL('../../.tools/sing-box', import.meta.url))
 const inCI = process.env.CI === 'true' || process.env.GITHUB_ACTIONS === 'true'
+// 这组用例只对打了 http-latency 补丁的内核(1.14.0-openbox-tcp2 起)成立:上游 1.14.0 会把 http 测速地址
+// 丢掉换成 gstatic、也不认 force / interval 参数,跑起来全是 503。没有补丁内核就跳过,不假失败
+const kernelPatched = (() => {
+  if (!fs.existsSync(binary)) return false
+  try { return /openbox-tcp([2-9]|\d{2,})/.test(execFileSync(binary, ['version'], { encoding: 'utf8', timeout: 5000 })) } catch { return false }
+})()
 const listen = async (server) => { server.listen(0, '127.0.0.1'); await once(server, 'listening'); return server.address().port }
-const until = async (fn) => {
-  const deadline = Date.now() + 8000
+const until = async (fn, ms = 8000) => {
+  const deadline = Date.now() + ms
   while (Date.now() < deadline) { if (await fn()) return; await sleep(30) }
   assert.fail('Timed out waiting for the core')
 }
@@ -60,8 +66,9 @@ const makeNode = async (t, destination, latency) => {
 }
 
 test('真实 Clash API：HTTP 指定地址、手动选择、自动优选、故障切换及恢复', {
-  skip: !fs.existsSync(binary) && !inCI ? 'Set OPENBOX_TEST_SINGBOX to the newly built bundled core' : false,
-  timeout: 45_000,
+  skip: !kernelPatched && !inCI ? 'Set OPENBOX_TEST_SINGBOX to a core built with scripts/singbox-tcp-dns-hotfix (1.14.0-openbox-tcp2+)' : false,
+  // 内核 1.14.1-openbox-tcp14 起正在用的节点不通要 10 秒后复查才换,自动优选、故障转移两段各多等十几秒
+  timeout: 120_000,
 }, async (t) => {
   assert.ok(fs.existsSync(binary), 'CI must install the bundled core before testing')
   const requests = []
@@ -75,6 +82,12 @@ test('真实 Clash API：HTTP 指定地址、手动选择、自动优选、故�
   const url = `http://${destination}/probe-204?source=openbox`
   const nodes = await Promise.all([15, 65, 110].map((delay) => makeNode(t, destination, delay)))
   const tags = ['node-a', 'node-b', 'node-c']
+  // 「拥挤组」:12 个 1.2 秒才应答的成员(内核一次只测 10 个,第二波在 1.2 秒后才开始)+ 1 个 1.8 秒的:
+  // 成员超时给 1.5 秒时,12 个都该通(tcp3 会在请求 1.5 秒到期时把第二波砍掉),1.8 秒那个该自己超时失败
+  // (tcp4 写死 15 秒时它反而会通)。见 protocol/group/urltest.go 补丁里的说明
+  const crowd = await Promise.all(Array.from({ length: 12 }, () => makeNode(t, destination, 1200)))
+  const tooSlow = await makeNode(t, destination, 1800)
+  const crowdTags = crowd.map((_, i) => `crowd-${i + 1}`)
   const reserved = net.createServer()
   const apiPort = await listen(reserved)
   await new Promise((resolve) => reserved.close(resolve))
@@ -93,6 +106,9 @@ test('真实 Clash API：HTTP 指定地址、手动选择、自动优选、故�
       { type: 'selector', tag: 'manual', outbounds: tags },
       { type: 'urltest', tag: '__fo:test:A', outbounds: tags.slice(0, 2), url, interval: '1h', idle_timeout: '2h', tolerance: 0 },
       { type: 'selector', tag: 'failover', outbounds: ['__fo:test:A', 'node-c', 'reject'], default: '__fo:test:A' },
+      ...crowd.map((node, i) => ({ type: 'http', tag: crowdTags[i], server: '127.0.0.1', server_port: node.port })),
+      { type: 'http', tag: 'node-tooslow', server: '127.0.0.1', server_port: tooSlow.port },
+      { type: 'urltest', tag: 'crowded', outbounds: [...crowdTags, 'node-tooslow'], url, interval: '1h', idle_timeout: '2h', tolerance: 0 },
     ],
   }
   fs.writeFileSync(paths.configPath, JSON.stringify(config))
@@ -145,8 +161,12 @@ test('真实 Clash API：HTTP 指定地址、手动选择、自动优选、故�
 
   await t.test('自动优选与定时调度：当前节点失败，切到可用节点并返回新延迟', async () => {
     nodes[0].mode = 'down'
+    const failedAt = Date.now()
     assert.equal((await delay('node-a')).status, 503)
-    await until(async () => (await proxy('auto')).now === 'node-b')
+    // 内核 1.14.1-openbox-tcp14 起:正在用的节点不通,先不换(记录留着),10 秒后单独复查一次,仍不通才换
+    assert.equal((await proxy('auto')).now, 'node-a', 'no switch on the first failure')
+    await until(async () => (await proxy('auto')).now === 'node-b', 20_000)
+    assert.ok(Date.now() - failedAt >= 9000, `switched after ${Date.now() - failedAt}ms, before the 10 s recheck`)
     const result = await delay('auto')
     assert.equal(result.status, 200)
     assert.ok(result.body.delay > 0)
@@ -157,11 +177,15 @@ test('真实 Clash API：HTTP 指定地址、手动选择、自动优选、故�
       history: { recordFromProxies() {}, recordSamples(items) { samples.push(...items) } },
     })
     const tick = await scheduler.tick()
-    assert.deepEqual(tick.tested, ['auto'])
+    // 配置里还有下面那个用来复现拥挤场景的 crowded 组,调度器也会测它;这里只关心 auto
+    assert.ok(tick.tested.includes('auto'), JSON.stringify(tick.tested))
     assert.ok(samples.some((s) => s.name === 'node-a' && s.delay === 0))
     assert.equal((await proxy('auto')).now, 'node-b')
   })
 
+  // 以前这条被跳过(tcp3 起就不通过):管理器用假时钟每轮 +5 秒,内核的探测缓存(Probe,按 interval 复用结果)却按真实时间算,
+  // 几百毫秒前的结果都还算新鲜,节点断了也照样复用上一轮的「通过」。现在内核这边的缓存间隔给 200 毫秒、每轮之前真等
+  // 250 毫秒,内核每轮都真测;管理器的轮次、失败轮数、回切等待仍按假时钟推进(审查第三项)
   await t.test('故障转移：组内换节点、阈值后换备用、全部失败拒绝、主用恢复后回切', async () => {
     nodes[0].mode = 'up'
     const mapping = {
@@ -170,7 +194,7 @@ test('真实 Clash API：HTTP 指定地址、手动选择、自动优选、故�
         { id: 'A', index: 0, members: tags.slice(0, 2), valid: tags.slice(0, 2), mode: 'urltest', ref: '__fo:test:A', subTag: '__fo:test:A' },
         { id: 'B', index: 1, members: ['node-c'], valid: ['node-c'], mode: 'single', ref: 'node-c', subTag: null },
       ],
-      settings: { testUrl: url, intervalMs: 5000, timeoutMs: 1000, failureThreshold: 2, restorePrimary: true, recoveryHoldMs: 6000 },
+      settings: { testUrl: url, intervalMs: 200, timeoutMs: 1000, failureThreshold: 2, restorePrimary: true, recoveryHoldMs: 6000 },
     }
     let clock = Date.now()
     const memory = new Map()
@@ -181,12 +205,16 @@ test('真实 Clash API：HTTP 指定地址、手动选择、自动优选、故�
       fetchImpl: (target, init) => fetch(base + new URL(target).pathname + new URL(target).search, init),
     })
     t.after(() => manager.stop())
-    const round = async () => { clock += 5001; return manager.tick() }
+    // 管理器按 interval 下限 5 秒排下一轮(假时钟);真实时间等过内核的 200 毫秒缓存间隔,每轮都是新探测
+    const round = async () => { clock += 5001; await sleep(250); return manager.tick() }
     await round()
     assert.equal((await proxy('failover')).now, '__fo:test:A')
     nodes[0].mode = 'down'
     await round()
-    assert.equal((await proxy('__fo:test:A')).now, 'node-b')
+    // 页签里正在用的 node-a 不通:内核先不换,10 秒(真实时间)后复查仍不通才换到 node-b;这期间页签还有能用的节点,
+    // 故障转移不动
+    assert.equal((await proxy('failover')).now, '__fo:test:A')
+    await until(async () => (await proxy('__fo:test:A')).now === 'node-b', 20_000)
     assert.equal((await proxy('failover')).now, '__fo:test:A')
     nodes[1].mode = 'down'
     await round()
@@ -194,6 +222,9 @@ test('真实 Clash API：HTTP 指定地址、手动选择、自动优选、故�
     await round()
     assert.equal((await proxy('failover')).now, 'node-c')
     assert.ok((await delay('failover')).body.delay > 0)
+    // node-b 是页签里正在用的节点,内核等 10 秒(真实时间)复查仍不通才删它的记录;管理器这里用的是假时钟,
+    // 等内核复查落定再往下走,不然后面 node-a 恢复时页签可能又按 node-b 的旧记录选回它
+    await until(async () => (await proxy('node-b')).history.length === 0, 20_000)
     nodes[2].mode = 'down'
     await round(); await round()
     assert.equal((await proxy('failover')).now, 'reject')
@@ -208,4 +239,54 @@ test('真实 Clash API：HTTP 指定地址、手动选择、自动优选、故�
     assert.equal((await proxy('__fo:test:A')).now, 'node-a')
     assert.ok((await delay('failover')).body.delay > 0)
   })
+
+  await t.test('组测速:timeout 是每个成员自己的超时——超过它的成员失败,排在第二波的成员不被请求到期砍掉', async () => {
+    // 内核启动时自己会把 crowded 测一遍(成员各自 15 秒上限,1.8 秒那个也通),等它选出结果再发我们的强制一轮
+    await until(async () => Boolean((await proxy('crowded')).now))
+    assert.ok((await proxy('node-tooslow')).history.length, '启动自测按 15 秒上限,1.8 秒的成员应有结果')
+    const started = Date.now()
+    const result = await api(`/group/crowded/delay?url=${encodeURIComponent(url)}&timeout=1500&force=true`)
+    const elapsed = Date.now() - started
+    assert.equal(result.status, 200, JSON.stringify(result))
+    // 12 个 1.2 秒的成员分两波(10 + 2),第二波 1.2 秒后才开始,整次至少 2.3 秒——请求没有在 1.5 秒被砍断
+    assert.ok(elapsed >= 2300, `两波成员应都测完,实际 ${elapsed}ms 就回了`)
+    assert.deepEqual(Object.keys(result.body).sort(), [...crowdTags].sort(), JSON.stringify(result.body))
+    for (const tag of crowdTags) assert.ok((await proxy(tag)).history.length, `${tag} 应有结果`)
+    // 1.8 秒的成员超过了 1.5 秒的成员超时:失败、历史被删
+    assert.deepEqual((await proxy('node-tooslow')).history, [], '超过成员超时的成员应失败并丢掉历史')
+    assert.ok(crowdTags.includes((await proxy('crowded')).now), (await proxy('crowded')).now)
+  })
+
+  // 放在最后:这一轮 1.5 秒的成员超时会让 1.8 秒的慢成员失败、丢掉历史,别影响前面那条
+  await t.test('组测速:组正在测时再发一次,等那一轮测完拿到完整名单和 X-Openbox-Group-Check(不是空结果)', async () => {
+    await until(async () => Boolean((await proxy('crowded')).now))
+    const q = `url=${encodeURIComponent(url)}&timeout=1500`
+    const first = api(`/group/crowded/delay?${q}&force=true`)
+    await sleep(300)
+    const res = await fetch(`${base}/group/crowded/delay?${q}&force=false`, { signal: AbortSignal.timeout(60_000) })
+    const joined = await res.json()
+    const own = await first
+    assert.equal(res.status, 200)
+    assert.equal(res.headers.get('x-openbox-group-check'), 'complete')
+    assert.ok(Object.keys(joined).length > 0, '加入正在进行的那一轮,不能回空')
+    assert.deepEqual(Object.keys(joined).sort(), Object.keys(own.body).sort(), '和那一轮的名单一致')
+  })
+
+
+  await t.test('测速排队:后台组测速占着名额时,critical 复查一个还在后台队里的成员——把它提到最前立刻测,不等整组', async () => {
+    const q = `url=${encodeURIComponent(url)}&timeout=5000`
+    const bgStarted = Date.now()
+    const bg = api(`/group/crowded/delay?${q}&force=true&priority=background`)
+    // 后台最多占 3 个名额(留一个给手动 / 复查),12 个 1.2 秒的成员要排好几波
+    await until(async () => { const p = (await api('/openbox/probes')).body; return p.running >= 3 && p.background >= 1 })
+    const last = crowdTags[crowdTags.length - 1]
+    const started = Date.now()
+    const r = await api(`/proxies/${encodeURIComponent(last)}/delay?${q}&force=true&priority=critical`)
+    const waited = Date.now() - started
+    assert.equal(r.status, 200, JSON.stringify(r.body))
+    assert.ok(waited < 3000, `critical 复查等了 ${waited}ms(应当提到最前、测一次约 1.2 秒)`)
+    await bg
+    assert.ok(Date.now() - bgStarted > waited + 2000, '整组还在测的时候复查就已经回来了')
+  })
+
 })

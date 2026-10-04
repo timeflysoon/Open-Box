@@ -115,7 +115,7 @@ test('getProxyTarget 无 header 时缺省本机 9095 + store 中的 secret', () 
   assert.ok(result.secret.length > 0)
 })
 
-test('getProxyTarget 带 header 时以传入为准(本地调试逃生舱)', () => {
+test('getProxyTarget 带 header 时以传入为准（本地调试逃生舱）', () => {
   const fakeReq = {
     header: (name) => {
       if (name === 'x-zashboard-target-base') return 'http://10.0.0.5:9999'

@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process'
 import fs from 'node:fs/promises'
+import { childEnv } from './timezone.mjs'
 
 const writeAtomic = async (path, data, encoding) => {
   const tmp = `${path}.tmp-${process.pid}`
@@ -16,9 +17,16 @@ const writeAtomic = async (path, data, encoding) => {
 export const createRealContext = () => ({
   // timeoutMs 可选:默认 30 秒适合部署/服务控制这类命令,但节点测速需要更短的上限,
   // 否则一批连不通的节点会把整轮拖成几分钟。
-  async exec(cmd, args = [], { timeoutMs = 30_000 } = {}) {
+  async exec(cmd, args = [], { timeoutMs = 30_000, env } = {}) {
+    // sing-box 的工具子命令(rule-set compile / decompile / match、check、generate)都是短命进程,Go 默认 GOGC=100
+    // 会让堆长到活数据的两倍才回收:编译 9 万多条的过滤名单峰值 140 MB。压到 25 峰值约 110 MB、慢一成,在 1 GB
+    // 的路由器上值得。常驻的 sing-box run 由 init 脚本起,不经这里,不受影响
+    const tool = /(^|\/)sing-box$/.test(String(cmd)) && args[0] !== 'run'
+    const options = { timeout: timeoutMs }
+    // 子进程不带面板给自己设的 TZ(system/timezone.mjs 的 childEnv),照旧按系统的时区设置
+    options.env = childEnv({ ...(tool ? { GOGC: '25' } : {}), ...(env || {}) })
     return new Promise((resolve) => {
-      execFile(cmd, args, { timeout: timeoutMs }, (error, stdout, stderr) => {
+      execFile(cmd, args, options, (error, stdout, stderr) => {
         resolve({
           code: error && typeof error.code === 'number' ? error.code : error ? 1 : 0,
           stdout: String(stdout || ''),
@@ -36,6 +44,8 @@ export const createRealContext = () => ({
   // 规则集 .srs 是二进制,不能走上面那个 utf8 的写入——utf8 编码会把非法字节替换成
   // U+FFFD,写出来的文件 sing-box 一读就报错,而且错法很隐蔽(文件在、大小也差不多)。
   async writeFileBinary(path, data) { await writeAtomic(path, data) },
+  // 原样拷一份二进制文件(热切换的旁路动态集 =「满」时就是 geoip 集合的拷贝,system/flip-files.mjs),同样先写临时文件再 rename
+  async copyFile(from, to) { await writeAtomic(to, await fs.readFile(from)) },
   async exists(path) { try { await fs.access(path); return true } catch { return false } },
   async mkdirp(path) { await fs.mkdir(path, { recursive: true }) },
   async remove(path) { await fs.rm(path, { force: true, recursive: true }) },

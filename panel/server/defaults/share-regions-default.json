@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "groups": [
+    {
+      "id": "cn",
+      "name": { "zh-CN": "中国大陆", "zh-TW": "中國大陸", "en": "Mainland China" },
+      "regions": ["CN"],
+      "rules": [
+        { "type": "geosite", "value": "cn", "action": "direct" },
+        { "type": "geoip", "value": "cn", "action": "direct" },
+        { "type": "domainSuffix", "value": "cn", "action": "direct" },
+        { "type": "domainSuffix", "value": "hk", "action": "direct" }
+      ],
+      "catchAll": "proxy",
+      "dns": { "directResolver": "" }
+    },
+    {
+      "id": "hkmo",
+      "name": { "zh-CN": "港澳", "zh-TW": "港澳", "en": "Hong Kong & Macao" },
+      "regions": ["HK", "MO"],
+      "rules": [
+        { "type": "geosite", "value": "category-ai-!cn", "action": "proxy" }
+      ],
+      "catchAll": "direct",
+      "dns": { "directResolver": "" }
+    },
+    {
+      "id": "other",
+      "name": { "zh-CN": "其他地区", "zh-TW": "其他地區", "en": "Elsewhere" },
+      "regions": [],
+      "default": true,
+      "rules": [
+        { "type": "geosite", "value": "cn", "action": "proxy" },
+        { "type": "geoip", "value": "cn", "action": "proxy" }
+      ],
+      "catchAll": "direct",
+      "dns": { "directResolver": "" }
+    }
+  ]
+}

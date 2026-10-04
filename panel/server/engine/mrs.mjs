@@ -251,7 +251,7 @@ const readIpCidrSet = (r) => {
 // 传进来的必须是 zstd 解压之后的字节(解压放在 system 层,那边才碰得到 node:zlib)。
 export const decodeMrs = (payload) => {
   const buf = payload instanceof Uint8Array ? payload : new Uint8Array(payload)
-  if (!looksLikeMrs(buf)) throw new Error('不是 .mrs 文件(魔数不对)')
+  if (!looksLikeMrs(buf)) throw new Error('不是 .mrs 文件（魔数不对）')
   const r = new Reader(buf)
   r.bytes(4)
   const behavior = r.u8()

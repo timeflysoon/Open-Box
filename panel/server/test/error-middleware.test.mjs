@@ -34,7 +34,7 @@ after(async () => {
 
 let authCookie = ''
 
-test('setup: 设密并拿到 cookie(后续用例需要通过守卫才能打到 body-parser)', async () => {
+test('setup: 设密并拿到 cookie（后续用例需要通过守卫才能打到 body-parser）', async () => {
   const res = await fetch(`${baseUrl}/api/auth/setup`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -53,7 +53,7 @@ const assertNoStackTrace = (text) => {
   assert.ok(!/at\s.*:\d+:\d+/.test(text), `响应不应包含调用栈,实际: ${text.slice(0, 200)}`)
 }
 
-test('PUT /api/storage 畸形 JSON → 400 JSON(而不是被降级成 500),不含堆栈', async () => {
+test('PUT /api/storage 畸形 JSON → 400 JSON（而不是被降级成 500）,不含堆栈', async () => {
   const res = await fetch(`${baseUrl}/api/storage`, {
     method: 'PUT',
     headers: { 'content-type': 'application/json', cookie: authCookie },
@@ -69,7 +69,7 @@ test('PUT /api/storage 畸形 JSON → 400 JSON(而不是被降级成 500),不�
   assert.ok(body.error)
 })
 
-test('PUT /api/storage 超出 body 上限(25mb)→ 413 JSON(而不是被降级成 500),不含堆栈', async () => {
+test('PUT /api/storage 超出 body 上限（25mb）→ 413 JSON（而不是被降级成 500）,不含堆栈', async () => {
   const oversized = 'a'.repeat(26 * 1024 * 1024)
   const res = await fetch(`${baseUrl}/api/storage`, {
     method: 'PUT',
@@ -86,7 +86,7 @@ test('PUT /api/storage 超出 body 上限(25mb)→ 413 JSON(而不是被降级�
   assert.ok(body.error)
 })
 
-test('POST /api/auth/setup(2kb 限额)超限 body → 413 JSON,不含堆栈(验证限额按路由前缀各自生效)', async () => {
+test('POST /api/auth/setup（2kb 限额）超限 body → 413 JSON,不含堆栈（验证限额按路由前缀各自生效）', async () => {
   const oversized = 'a'.repeat(4 * 1024)
   const res = await fetch(`${baseUrl}/api/auth/setup`, {
     method: 'POST',

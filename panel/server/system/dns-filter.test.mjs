@@ -1,4 +1,8 @@
 import test from 'node:test'
+import { memAvailableMb, MIN_AVAILABLE_MB } from './dns-filter.mjs'
+import { createMockContext } from './context.mjs'
+import { createStore } from '../store/openbox-store.mjs'
+import { createPaths } from './paths.mjs'
 import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
 import os from 'node:os'
@@ -77,3 +81,92 @@ test('native 1.14 DNS filters, exceptions, AAAA, regex, rewrite priority and obs
   assert.equal(rows.filter(r => r.result === 'allowed').length, 6, JSON.stringify(logs))
   assert.equal(rows.find(r => r.domain === 'ads.test').list, 'Test list')
 })
+
+// 用户 2026-09-30:没必要重启内核的都不重启。名单更新只换文件:集合名字固定,运行中的内核自己重新加载新内容
+test('名单更新不重启内核:集合名字固定,内容没变不重编,变了原子换文件、运行中的内核自己加载;编不过的不动正在用的那份', { skip: !available, timeout: 30000 }, async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'openbox-dns-filter-hot-'))
+  t.after(() => fs.rm(dir, { recursive: true, force: true }))
+  const profile = { dns: { filter: { enabled: true, allowDomains: [], lists: [{ id: 'hot', name: 'Hot list', enabled: true, url: 'https://example.com/hot.txt' }] } } }
+  const raw = new Map()
+  const store = { getProfile: () => profile, getRaw: (k) => raw.get(k), setRaw: (k, v) => raw.set(k, v) }
+  const real = createRealContext()
+  let compiles = 0
+  const ctx = { ...real, exec: (cmd, args, opts) => { if (args[1] === 'compile') compiles += 1; return real.exec(cmd, args, opts) } }
+  const paths = { dataDir: dir, singbox: binary }
+  let body = '||old.test^'
+  const fetchImpl = async () => new Response(body)
+  const first = await prepareDnsFilter({ store, ctx, paths, fetchImpl })
+  const tags = first.sets.map((s) => s.tag)
+  assert.deepEqual(tags, ['dns-filter-hot-block'])
+  assert.equal(compiles, 1)
+  await prepareDnsFilter({ store, ctx, paths, force: true, fetchImpl })
+  assert.equal(compiles, 1, '内容没变不重编')
+
+  const filtering = buildFilterConfig(profile, first)
+  const upstream = dgram.createSocket('udp4')
+  upstream.bind(0, '127.0.0.1'); await once(upstream, 'listening')
+  t.after(() => upstream.close())
+  upstream.on('message', (msg, peer) => {
+    const query = parseQuery(msg)
+    upstream.send(buildResponse(query, { answers: [{ name: query.qname, type: query.qtype, ttl: 1, data: '192.0.2.1' }] }), peer.port, peer.address)
+  })
+  const port = await freePort(), api = await freePort()
+  const config = { log: { level: 'warn' }, dns: { servers: [{ tag: 'up', type: 'udp', server: '127.0.0.1', server_port: upstream.address().port }], rules: filtering.rules, final: 'up', disable_cache: true }, inbounds: [{ type: 'direct', tag: 'dns-in', listen: '127.0.0.1', listen_port: port }], route: { rules: [{ inbound: ['dns-in'], action: 'hijack-dns' }], rule_set: filtering.sets }, experimental: { clash_api: { external_controller: `127.0.0.1:${api}` } } }
+  const file = path.join(dir, 'config.json')
+  await fs.writeFile(file, JSON.stringify(config))
+  const core = spawn(binary, ['run', '-c', file], { stdio: ['ignore', 'pipe', 'pipe'] })
+  let output = ''; core.stderr.on('data', (d) => { output += d })
+  t.after(async () => { if (core.exitCode === null) { core.kill(); await once(core, 'exit') } })
+  for (let i = 0; i < 60; i++) {
+    if (core.exitCode !== null) throw new Error(output)
+    try { await fetch(`http://127.0.0.1:${api}/version`); break } catch { await new Promise(r => setTimeout(r, 50)) }
+  }
+  const resolver = new Resolver({ timeout: 1000, tries: 1 }); resolver.setServers([`127.0.0.1:${port}`])
+  await assert.rejects(resolver.resolve4('old.test'), { code: 'ENOTFOUND' })
+  assert.deepEqual(await resolver.resolve4('new.test'), ['192.0.2.1'])
+
+  body = '||new.test^'
+  const second = await prepareDnsFilter({ store, ctx, paths, force: true, fetchImpl })
+  assert.deepEqual(second.sets.map((s) => s.tag), tags, '名字不变,配置不用变')
+  assert.equal(compiles, 2)
+  assert.deepEqual((await fs.readdir(path.join(dir, 'dns-filter'))).filter((n) => n.includes('.new.')), [], '临时文件收拾干净')
+  let reloaded = false
+  for (let i = 0; i < 40 && !reloaded; i++) {
+    await new Promise(r => setTimeout(r, 100))
+    try { await resolver.resolve4('new.test') } catch (error) { reloaded = error.code === 'ENOTFOUND' }
+  }
+  assert.ok(reloaded, `运行中的内核应自己加载新名单:${output}`)
+  assert.deepEqual(await resolver.resolve4('old.test'), ['192.0.2.1'])
+  assert.equal(core.exitCode, null, '内核一直在跑')
+
+  const srs = path.join(dir, 'dns-filter', 'dns-filter-hot-block.srs')
+  const before = await fs.readFile(srs)
+  body = '/(invalid/'
+  await prepareDnsFilter({ store, ctx, paths, force: true, fetchImpl })
+  assert.match(JSON.parse(raw.get('openbox/dns-filter-lists')).hot.error, /正则无效/)
+  assert.deepEqual(await fs.readFile(srs), before, '编不过的不顶掉正在用的那份')
+
+  // 老版本的产物(按内容起名、没有 hashes):部署时(不带 force)用本地缓存的名单重编成固定名字,不联网
+  const legacy = JSON.parse(raw.get('openbox/dns-filter-runtime'))
+  delete legacy.hashes
+  legacy.sets = legacy.sets.map((set) => ({ ...set, tag: `${set.tag}-0123456789abcdef` }))
+  raw.set('openbox/dns-filter-runtime', JSON.stringify(legacy))
+  const migrated = await prepareDnsFilter({ store, ctx, paths, fetchImpl: async () => { throw new Error('部署时不该联网') } })
+  assert.deepEqual(migrated.sets.map((set) => set.tag), tags)
+  assert.ok(migrated.hashes && migrated.hashes['dns-filter-hot-block'])
+})
+
+test('内存不够时不更新名单:可用内存低于门槛直接报人话,不起内核编译;读不到 /proc/meminfo 就不判', async () => {
+  const low = createMockContext({ files: { '/proc/meminfo': 'MemTotal:       997888 kB\nMemFree:         38248 kB\nMemAvailable:   120000 kB\n' } })
+  assert.equal(Math.round(await memAvailableMb(low)), 117)
+  assert.equal(await memAvailableMb(createMockContext({})), null)
+  const m = new Map()
+  const store = createStore({ get: (k) => (m.has(k) ? m.get(k) : null), set: (k, v) => m.set(k, v), del: (k) => m.delete(k) })
+  store.setProfile({ dns: { filter: { enabled: true, lists: [{ id: 'l1', name: '名单一', url: 'https://example.com/list.txt', enabled: true }], allowDomains: [] } } })
+  await assert.rejects(
+    () => prepareDnsFilter({ store, ctx: low, paths: createPaths('/opt/open-box'), force: true, fetchImpl: async () => { throw new Error('不该去下载') } }),
+    (err) => /可用内存只有 117 MB/.test(err.message) && new RegExp(String(MIN_AVAILABLE_MB)).test(err.message),
+  )
+  assert.equal(low.calls.length, 0, '没起任何进程')
+})
+

@@ -12,9 +12,11 @@ import net from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
 import { assertPublicUrl } from '../api/net-guard.mjs'
+import { parseSubscriptionUserinfo } from '../engine/subscription-userinfo.mjs'
+import { childEnv } from './timezone.mjs'
 
 const runCurl = (args, timeoutMs) => new Promise((resolve) => {
-  execFile('curl', args, { timeout: timeoutMs, maxBuffer: 1024 * 1024, windowsHide: true }, (err, stdout, stderr) => {
+  execFile('curl', args, { timeout: timeoutMs, maxBuffer: 1024 * 1024, windowsHide: true, env: childEnv() }, (err, stdout, stderr) => {
     resolve({ err, stdout: String(stdout || ''), stderr: String(stderr || '') })
   })
 })
@@ -60,7 +62,7 @@ export const curlFetchText = async (initialUrl, {
       if (err && err.code === 'ENOENT') return { available: false }
       const status = Number(stdout.trim().slice(-3)) || 0
       if (err) {
-        const why = err.killed || err.signal ? `curl 被终止(${err.signal || 'timeout'})` : `curl 退出码 ${err.code}`
+        const why = err.killed || err.signal ? `curl 被终止（${err.signal || 'timeout'}）` : `curl 退出码 ${err.code}`
         const detail = stderr.trim().split('\n').filter(Boolean).pop() || err.message
         return { status: 0, httpStatus: status, error: `${why}:${detail}` }
       }
@@ -74,7 +76,12 @@ export const curlFetchText = async (initialUrl, {
       if (!status) return { status: 0, error: stderr.trim() || (err && err.message) || 'curl failed' }
       let text = ''
       try { text = await readFile(bodyPath, 'utf8') } catch { /* 没有正文就是空串 */ }
-      return { status, text }
+      let usage = null
+      try {
+        const m = /^subscription-userinfo:\s*(.+?)\s*$/im.exec(await readFile(headPath, 'utf8'))
+        if (m) usage = parseSubscriptionUserinfo(m[1])
+      } catch { /* 没有头文件就没有 */ }
+      return { status, text, usage }
     } finally {
       await rm(dir, { recursive: true, force: true }).catch(() => {})
     }

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import express from 'express'
-import { registerPenetrationRoutes, matchRuleSet , matchLocalConditions } from './penetration.mjs'
+import { registerPenetrationRoutes, matchRuleSet , matchLocalConditions, preMatchVerdict, deployedDirectHostCidrs, readDeployedDirectHostCidrs } from './penetration.mjs'
 import { createStore } from '../store/openbox-store.mjs'
 import { createMockContext } from '../system/context.mjs'
 import { createPaths } from '../system/paths.mjs'
@@ -35,10 +35,12 @@ const NODES = [
 
 // 起一个绑定临时端口的最小 express app,注册待测路由;close() 必须在 finally 里调用,
 // 防止测试遗留监听中的 server(参照 deploy.test.mjs 的写法)。
-const startApp = async ({ ctx, store, fetchImpl } = {}) => {
+// resolveTarget:域名目标先向内核 DNS 解析成 IP 那一步。测试里不真去问内核,默认给一个不落在任何集合里的
+// 公网地址;要测"解析不到 / 解析到 geoip 集合里的地址"就显式传
+const startApp = async ({ ctx, store, fetchImpl, resolveTarget } = {}) => {
   const realStore = store || memStore()
   const app = express()
-  registerPenetrationRoutes(app, { store: realStore, ctx, paths, fetchImpl })
+  registerPenetrationRoutes(app, { store: realStore, ctx, paths, fetchImpl, resolveTarget: resolveTarget || (async () => ({ addresses: ['203.0.113.10'] })) })
   const server = app.listen(0)
   await new Promise((resolve, reject) => {
     server.once('listening', resolve)
@@ -70,7 +72,7 @@ const post = async (baseUrl, target, extra = {}) => {
 // "正常跑起来了"的用例都用 withSingbox() 把二进制 + .srs 的存在性搭好,这样才能实际走到
 // exec 这一步,而不是在前置存在性检查就被拦成 could-not-check。
 
-test('matchRuleSet: stdout 含 "match rules."(stderr 为空)→ hit:true', async () => {
+test('matchRuleSet: stdout 含 "match rules."（stderr 为空）→ hit:true', async () => {
   const ctx = createMockContext({
     files: withSingbox('/data/a.srs'),
     execResults: {
@@ -83,7 +85,7 @@ test('matchRuleSet: stdout 含 "match rules."(stderr 为空)→ hit:true', async
   assert.deepEqual(result, { hit: true })
 })
 
-test('matchRuleSet: stderr 含 "match rules."(stdout 为空)→ hit:true(sing-box 1.13.14 实测:match 结果实际写在 stderr)', async () => {
+test('matchRuleSet: stderr 含 "match rules."（stdout 为空）→ hit:true（sing-box 1.13.14 实测:match 结果实际写在 stderr）', async () => {
   const ctx = createMockContext({
     files: withSingbox('/data/a.srs'),
     execResults: {
@@ -96,7 +98,7 @@ test('matchRuleSet: stderr 含 "match rules."(stdout 为空)→ hit:true(sing-bo
   assert.deepEqual(result, { hit: true })
 })
 
-test('matchRuleSet: stdout 命中 + 退出码非 0 → hit:true(防回归:退出码依然被忽略)', async () => {
+test('matchRuleSet: stdout 命中 + 退出码非 0 → hit:true（防回归:退出码依然被忽略）', async () => {
   const ctx = createMockContext({
     files: withSingbox('/data/a.srs'),
     execResults: {
@@ -109,7 +111,7 @@ test('matchRuleSet: stdout 命中 + 退出码非 0 → hit:true(防回归:退出
   assert.deepEqual(result, { hit: true })
 })
 
-test('matchRuleSet: stderr 命中 + 退出码非 0 → hit:true(防回归:退出码依然被忽略,即便命中信息在 stderr)', async () => {
+test('matchRuleSet: stderr 命中 + 退出码非 0 → hit:true（防回归:退出码依然被忽略,即便命中信息在 stderr）', async () => {
   const ctx = createMockContext({
     files: withSingbox('/data/a.srs'),
     execResults: {
@@ -122,7 +124,7 @@ test('matchRuleSet: stderr 命中 + 退出码非 0 → hit:true(防回归:退出
   assert.deepEqual(result, { hit: true })
 })
 
-test('matchRuleSet: stdout 和 stderr 均为空 + 退出码 0 → hit:false, 无 error(防回归:真正跑完的"不命中"不能被误判成 could-not-check)', async () => {
+test('matchRuleSet: stdout 和 stderr 均为空 + 退出码 0 → hit:false, 无 error（防回归:真正跑完的"不命中"不能被误判成 could-not-check）', async () => {
   const ctx = createMockContext({
     files: withSingbox('/data/a.srs'),
     execResults: {
@@ -153,7 +155,7 @@ test('matchRuleSet: stdout/stderr 均不匹配 /^match rules\\./m 的其它内�
 // 输出(context-real.mjs 里 execFile spawn 失败时的真实折叠形态:{code:1,stdout:'',stderr:''})。
 // 三种都必须报 error,而不是安静地读成"确认不命中"。
 
-test('matchRuleSet: sing-box 二进制不存在 → hit:false + error,且不执行 exec(不存在的命令没法 exec)', async () => {
+test('matchRuleSet: sing-box 二进制不存在 → hit:false + error,且不执行 exec（不存在的命令没法 exec）', async () => {
   const ctx = createMockContext({
     files: { '/data/a.srs': 'srs' }, // 只有 .srs,没有二进制
     defaultExec: { code: 1, stdout: '', stderr: '' }, // 万一真的 exec 了,也不能被读成命中
@@ -177,7 +179,7 @@ test('matchRuleSet: .srs 文件不存在 → hit:false + error,且不执行 exec
   assert.equal(ctx.calls.length, 0, '.srs 都不存在,不应该还去 exec')
 })
 
-test('matchRuleSet: 退出码非 0 + stdout/stderr 均为空 → hit:false + error(could-not-check,不是"确认不命中")', async () => {
+test('matchRuleSet: 退出码非 0 + stdout/stderr 均为空 → hit:false + error（could-not-check,不是"确认不命中"）', async () => {
   // 这正是 context-real.mjs 在 execFile 本身失败(比如命令路径存在但不可执行、或系统层面
   // 的 spawn 错误)时折叠出来的形态——和"跑完了、就是没找到匹配"在字节上完全一样,
   // 只能靠"非 0 退出码 + 全空输出"这个信号加上前置存在性检查来分辨。
@@ -214,7 +216,7 @@ test('POST /api/openbox/penetration 缺 target → 400,不 exec', async () => {
 // target 最终会作为参数传给 `sing-box rule-set match`(execFile,无 shell),以 "-" 开头的
 // 值会被当作 flag。必须在做任何 exec 之前拒绝。
 
-test('POST /api/openbox/penetration target 以 "-" 开头("--help") → 400,不 exec', async () => {
+test('POST /api/openbox/penetration target 以 "-" 开头（"--help"） → 400,不 exec', async () => {
   const ctx = createMockContext({})
   const { baseUrl, close } = await startApp({ ctx })
   try {
@@ -227,7 +229,7 @@ test('POST /api/openbox/penetration target 以 "-" 开头("--help") → 400,不 
   }
 })
 
-test('POST /api/openbox/penetration target 以 "-" 开头("-x") → 400,不 exec', async () => {
+test('POST /api/openbox/penetration target 以 "-" 开头（"-x"） → 400,不 exec', async () => {
   const ctx = createMockContext({})
   const { baseUrl, close } = await startApp({ ctx })
   try {
@@ -240,7 +242,7 @@ test('POST /api/openbox/penetration target 以 "-" 开头("-x") → 400,不 exec
   }
 })
 
-test('POST /api/openbox/penetration 合法域名/IPv4/IPv6 target 仍然通过(不被参数校验误拦)', async () => {
+test('POST /api/openbox/penetration 合法域名/IPv4/IPv6 target 仍然通过（不被参数校验误拦）', async () => {
   // 走默认 profile(directRulesets: ['geosite-cn','geoip-cn']),所以要把这两个 .srs 的
   // 存在性也搭好,否则会在 could-not-check 那条路径上被拦下来,而不是这个用例真正想测的
   // 参数校验路径。
@@ -264,7 +266,7 @@ test('POST /api/openbox/penetration 合法域名/IPv4/IPv6 target 仍然通过(�
   }
 })
 
-test('按序首个命中生效:前一条 rule_set 命中时,后一条同样会命中的规则不会被求值(shadow)', async () => {
+test('按序首个命中生效:前一条 rule_set 命中时,后一条同样会命中的规则不会被求值（shadow）', async () => {
   const store = memStore()
   store.setProfile({
     directForNodes: false,
@@ -376,7 +378,7 @@ test('私有/回环 IP:ip_is_private 规则命中 outbound=direct,不触发任�
   }
 })
 
-test('公网 IP 不命中 ip_is_private,继续走后续规则(落到 final)', async () => {
+test('公网 IP 不命中 ip_is_private,继续走后续规则（落到 final）', async () => {
   const store = memStore()
   store.setProfile({
     routing: {
@@ -512,42 +514,6 @@ test('clash_api 返回非 2xx 时同样降级为 chainError', async () => {
   }
 })
 
-test('ad-block reject 规则命中:matched.action=reject,无 outbound,不下钻', async () => {
-  const store = memStore()
-  store.setProfile({
-    directForNodes: false,
-    routing: {
-      proxyTag: 'PROXY',
-      categories: [],
-      directRulesets: [],
-      adBlock: true,
-      adRuleset: 'geosite-ads',
-      fallback: 'PROXY',
-    },
-  })
-  const target = 'ads.example.com'
-  const keyAds = `${paths.singbox} rule-set match -f binary /opt/open-box/panel/server/resources/geodata/geosite-ads.srs ${target}`
-  const ctx = createMockContext({
-    files: withSingbox('/opt/open-box/panel/server/resources/geodata/geosite-ads.srs'),
-    execResults: { [keyAds]: { code: 0, stdout: 'match rules.[0]: domain_suffix=geosite-ads\n' } },
-  })
-  let fetchCalls = 0
-  const fetchImpl = async () => { fetchCalls += 1; return { ok: true, status: 200, json: async () => ({}) } }
-
-  const { baseUrl, close } = await startApp({ ctx, store, fetchImpl })
-  try {
-    const { res, body } = await post(baseUrl, target)
-    assert.equal(res.status, 200)
-    assert.equal(body.matched.action, 'reject')
-    assert.equal(body.matched.outbound, undefined)
-    assert.equal(body.finalOutbound, null)
-    assert.deepEqual(body.chain, [])
-    assert.equal(fetchCalls, 0)
-  } finally {
-    await close()
-  }
-})
-
 // ---- POST /api/openbox/penetration:matchError(P4b 终审 Important 1)----
 // 端到端验证:.srs 缺失 / sing-box 异常退出且无输出这两种"没能真正检查"的情形,必须让整个
 // 响应带上 matchError,并且 matched 停在 null——不能悄悄落到 route.final 冒充"确认没命中"。
@@ -656,7 +622,7 @@ test('POST /penetration:could-not-check 命中后立刻停止求值——后面�
   }
 })
 
-test('POST /penetration:更早的确定命中(ip_is_private)优先于后面失效的 rule_set——不应该出现 matchError', async () => {
+test('POST /penetration:更早的确定命中（ip_is_private）优先于后面失效的 rule_set——不应该出现 matchError', async () => {
   const store = memStore()
   store.setProfile({
     directForNodes: false,
@@ -741,7 +707,7 @@ test('POST /penetration:策略的域名条件本地就能判定,不去 exec 内�
   }
 })
 
-test('命中规则集时带回具体命中的条目(内核解码后逐条比);规则集和手写条件在内核里是紧邻的两条,命中哪条就列哪条的', async () => {
+test('命中规则集时带回具体命中的条目（内核解码后逐条比）;规则集和手写条件在内核里是紧邻的两条,命中哪条就列哪条的', async () => {
   const srs = `${paths.geoDir}/geosite-google.srs`
   const ctx = createMockContext({
     files: {
@@ -782,7 +748,7 @@ test('命中规则集时带回具体命中的条目(内核解码后逐条比);�
   }
 })
 
-test('订阅和节点站点直连(默认开):目标是某个节点的服务器域名 → 直连,排在站点集之前', async () => {
+test('订阅和节点站点直连（默认开）:目标是某个节点的服务器域名 → 直连,排在站点集之前', async () => {
   const store = memStore()
   store.setNodes(NODES)
   store.setProfile({ routing: { fallbackDefault: 'proxy', policies: [{ id: 'hk', name: 'HK', rulesets: ['geosite-hk'] }] } })
@@ -820,6 +786,7 @@ test('命中前置自定义分流:回传条目名 ownerName,出站仍是它自�
     assert.ok(body.matched, JSON.stringify(body))
     assert.deepEqual(body.matched.rule.domain_suffix, ['wan.family'])
     assert.equal(body.matched.ownerName, '前置自定义')
+    assert.deepEqual(body.owner, { kind: 'custom', name: '前置自定义' })
     // 出站是这一行自己选的出口(内置直连的当前名字)
     assert.equal(body.finalOutbound, '直连')
   } finally {
@@ -906,7 +873,7 @@ test('R5a:前置自定义分流写了 IPv6 网段,查 v6 地址要命中它,不�
   }
 })
 
-test('R5b:终端分流的来源条件——没给来源 IP 时把那条记成前提(按不在该来源的终端)继续推算,不中断;给了就按来源判', async () => {
+test('R5b:终端分流的来源条件——没给来源 IP 时把那条记成前提（按不在该来源的终端）继续推算,不中断;给了就按来源判', async () => {
   const store = r5Store({ clientRoutes: [{ id: 'tv', enabled: true, name: 'TV', sources: ['192.168.3.9'], outbound: '香港-自动' }] })
   const { baseUrl, close } = await startApp({ ctx: createMockContext({}), store, fetchImpl: clashNow({ '香港-自动': 'HK-1', '其他': '直连' }) })
   try {
@@ -936,7 +903,7 @@ test('R5b:终端分流的来源条件——没给来源 IP 时把那条记成前
   }
 })
 
-test('R5b2:前提的去向和推算结果是同一个出口时标 sameOutcome=true(终端分流让某设备全直连,查的目标本来就直连)', async () => {
+test('R5b2:前提的去向和推算结果是同一个出口时标 sameOutcome=true（终端分流让某设备全直连,查的目标本来就直连）', async () => {
   const store = r5Store({ routing: { policies: [], fallbackDefault: 'direct' }, clientRoutes: [{ id: 'dev', enabled: true, name: 'Dev', sources: ['192.168.3.35'], outbound: '直连' }] })
   const { baseUrl, close } = await startApp({ ctx: createMockContext({}), store, fetchImpl: noClash })
   try {
@@ -986,7 +953,27 @@ test('R5c:目标 + 端口是"与"的关系——查 172.19.0.2:443 不能命中�
   }
 })
 
-test('evaluateRuleGroups:ip_version 是"与"组——IP 目标按自己的地址族判;域名目标要看终端用 A 还是 AAAA(ipVersion),没给就判不了', async () => {
+test('evaluateRuleGroups:source_mac_address(终端分流按 MAC)——有 MAC 按 MAC 判,没有就判不了', async () => {
+  const { evaluateRuleGroups } = await import('./penetration.mjs')
+  const rule = { source_mac_address: ['AA:BB:CC:00:00:09'], outbound: 'HK' }
+  assert.deepEqual(evaluateRuleGroups(rule, { destMatch: null, sourceIp: '10.0.0.9', sourceMac: 'aa:bb:cc:00:00:09' }), { result: 'hit' })
+  assert.deepEqual(evaluateRuleGroups(rule, { destMatch: null, sourceIp: '10.0.0.8', sourceMac: 'aa:bb:cc:00:00:08' }), { result: 'miss' })
+  assert.deepEqual(evaluateRuleGroups(rule, { destMatch: null, sourceIp: '10.0.0.7' }), { result: 'undetermined', needs: ['sourceMac'] })
+})
+
+test('macForIp:先查 DHCP 租约,查不到看邻居表,都没有是空串', async () => {
+  const { macForIp } = await import('./traffic.mjs')
+  const ctx = createMockContext({
+    files: { '/tmp/dhcp.leases': '1789999999 aa:bb:cc:00:00:09 10.0.0.9 tv *\n' },
+    execResults: { 'ip neigh show 10.0.0.20': { stdout: '10.0.0.20 dev br-lan lladdr AA:BB:CC:00:00:20 REACHABLE\n' } },
+  })
+  const p = { dhcpLeases: '/tmp/dhcp.leases' }
+  assert.equal(await macForIp(ctx, p, '10.0.0.9'), 'aa:bb:cc:00:00:09')
+  assert.equal(await macForIp(ctx, p, '10.0.0.20'), 'aa:bb:cc:00:00:20')
+  assert.equal(await macForIp(ctx, p, '10.0.0.30'), '')
+})
+
+test('evaluateRuleGroups:ip_version 是"与"组——IP 目标按自己的地址族判;域名目标要看终端用 A 还是 AAAA（ipVersion）,没给就判不了', async () => {
   const { evaluateRuleGroups } = await import('./penetration.mjs')
   const rule = { rule_set: ['geosite-google'], ip_version: 6, action: 'reject' }
   assert.deepEqual(evaluateRuleGroups(rule, { destMatch: true, ipVersion: 6 }), { result: 'hit' })
@@ -994,3 +981,236 @@ test('evaluateRuleGroups:ip_version 是"与"组——IP 目标按自己的地址
   assert.deepEqual(evaluateRuleGroups(rule, { destMatch: true }), { result: 'undetermined', needs: ['ipVersion'] })
   assert.deepEqual(evaluateRuleGroups(rule, { destMatch: false, ipVersion: 6 }), { result: 'miss' })
 })
+
+// ---- 有域名的访问只按域名判(用户 2026-09-26):域名没有域名规则命中,解析到 Cloudflare 的地址,也不看「国外」里的
+// geoip-cloudflare,落到兜底。以前内核和推算都按 IP 把它判给「国外」:DNS 问的是直连、连接走的是节点 ----
+const CF_SRS = '/opt/open-box/panel/server/resources/geodata/geoip-cf.srs'
+const cfProfile = () => ({
+  directForNodes: false,
+  routing: { proxyTag: 'PROXY', fallbackDefault: 'direct', policies: [{ id: 'abroad', name: '国外', rulesets: ['geoip-cf'], default: 'NodeA' }] },
+})
+
+test('POST /penetration:域名没有域名规则命中、解析出的 IP 落在站点集的 geoip 集合 → 不看站点集的 IP 条件,走兜底;直接查那个 IP 才按 IP 命中', async () => {
+  const store = memStore()
+  store.setProfile(cfProfile())
+  const target = 'a.example.com'
+  const ctx = createMockContext({
+    files: withSingbox(CF_SRS),
+    execResults: {
+      [`${paths.singbox} rule-set match -f binary ${CF_SRS} ${target}`]: { code: 0, stdout: '' },
+      [`${paths.singbox} rule-set match -f binary ${CF_SRS} 104.21.9.27`]: { code: 0, stderr: 'match rules.[0]: ip_cidr=<binary>\n' },
+      [`${paths.singbox} rule-set match -f binary ${CF_SRS} 172.67.141.46`]: { code: 0, stderr: 'match rules.[0]: ip_cidr=<binary>\n' },
+    },
+  })
+  const fetchImpl = async () => ({ ok: true, status: 200, json: async () => ({ name: 'NodeA' }) })
+  const resolveTarget = async () => ({ addresses: ['104.21.9.27', '172.67.141.46'] })
+  const { baseUrl, close } = await startApp({ ctx, store, fetchImpl, resolveTarget })
+  try {
+    const { res, body } = await post(baseUrl, target)
+    assert.equal(res.status, 200)
+    assert.equal(body.matched, null, '有域名的访问只按域名判,站点集的 geoip 不参与')
+    assert.equal(body.finalOutbound, '其他')
+    assert.deepEqual(body.owner, { kind: 'policy', name: '其他' }, '没命中就是兜底站点集')
+    assert.deepEqual(body.resolved, { addresses: ['104.21.9.27', '172.67.141.46'] }, '解析结果照样回给前端(DNS 那一步显示)')
+    assert.equal(body.assumed, undefined, '站点集的 IP 条件对域名不参与,不记前提')
+    assert.deepEqual(cmds(ctx).filter((c) => c.includes('rule-set match')), [], '不拿域名、也不拿解析出的地址去比 geoip 集合')
+    // 终端直接按 IP 连(没有域名):照常按 IP 命中「国外」
+    const ip = await post(baseUrl, '104.21.9.27')
+    assert.equal(ip.body.matched.outbound, '国外')
+    assert.deepEqual(ip.body.owner, { kind: 'policy', name: '国外' }, '归属是站点集,出口链路据此去掉开头的站点集')
+    assert.equal(ip.body.finalOutbound, '国外')
+    assert.equal(ip.body.matched.viaIp, undefined, '目标本身就是 IP,不是"解析出的 IP"')
+  } finally {
+    await close()
+  }
+})
+
+test('POST /penetration:IP 只管 IP——前置自定义分流的 IP 段行对域名也不参与(解析出的地址落在里面也走兜底);直接查 IP 才命中它', async () => {
+  const store = memStore()
+  // 出口得是配置里真有的出站(指向不存在节点的行会被丢掉),这里用拒绝;兜底是直连,两者一眼分得开
+  store.setProfile({ directForNodes: false, routing: { proxyTag: 'PROXY', fallbackDefault: 'direct', custom: { rules: [{ type: 'ipCidr', value: '104.21.0.0/16', outbound: 'block' }] }, policies: [] } })
+  const ctx = createMockContext({ files: withSingbox(), defaultExec: { code: 0, stdout: '' } })
+  const fetchImpl = async () => ({ ok: true, status: 200, json: async () => ({ name: 'DIRECT' }) })
+  const resolveTarget = async () => ({ addresses: ['104.21.17.131'] })
+  const { baseUrl, close } = await startApp({ ctx, store, fetchImpl, resolveTarget })
+  try {
+    const d = await post(baseUrl, 'brainhost.ai')
+    assert.equal(d.body.matched, null)
+    assert.equal(d.body.finalOutbound, '其他')
+    const ip = await post(baseUrl, '104.21.17.131')
+    assert.ok(ip.body.matched, JSON.stringify(ip.body))
+    assert.deepEqual(ip.body.matched.rule.ip_cidr, ['104.21.0.0/16'])
+    assert.equal(ip.body.owner.kind, 'custom')
+  } finally {
+    await close()
+  }
+})
+
+test('POST /penetration:域名解析不到 → 站点集的 IP 条件对域名本来就不参与,不记前提,结论是兜底', async () => {
+  const store = memStore()
+  store.setProfile(cfProfile())
+  const target = 'a.example.com'
+  const ctx = createMockContext({ files: withSingbox(CF_SRS), defaultExec: { code: 0, stdout: '' } })
+  const fetchImpl = async () => ({ ok: true, status: 200, json: async () => ({ name: 'DIRECT' }) })
+  const resolveTarget = async () => ({ addresses: [], error: '内核 DNS 127.0.0.1:7853 没有解析出地址（ETIMEOUT）' })
+  const { baseUrl, close } = await startApp({ ctx, store, fetchImpl, resolveTarget })
+  try {
+    const { res, body } = await post(baseUrl, target)
+    assert.equal(res.status, 200)
+    assert.equal(body.matched, null)
+    assert.equal(body.finalOutbound, '其他')
+    assert.equal(body.assumed, undefined)
+    assert.deepEqual(body.owner, { kind: 'policy', name: '其他' }, '没命中就是兜底站点集')
+    assert.match(body.resolved.error, /没有解析出地址/)
+    assert.deepEqual(cmds(ctx).filter((c) => c.includes('rule-set match') && !c.endsWith(` ${target}`)), [], '没有 IP 就不拿 IP 去比')
+  } finally {
+    await close()
+  }
+})
+
+test('POST /penetration:只有域名条目的规则集(geosite)不因为解析不到而记成前提', async () => {
+  const store = memStore()
+  store.setProfile({ directForNodes: false, routing: { proxyTag: 'PROXY', fallbackDefault: 'direct', policies: [{ id: 'g', name: '策略G', rulesets: ['geosite-g'], default: 'NodeA' }] } })
+  const target = 'a.example.com'
+  const G_SRS = '/opt/open-box/panel/server/resources/geodata/geosite-g.srs'
+  const files = withSingbox(G_SRS)
+  // loadEntries 走 rule-set decompile 后读这个文件:只有域名条目
+  files[`${paths.dataDir}/tmp/geosite-g.json`] = JSON.stringify({ version: 3, rules: [{ domain_suffix: ['g.example.org'] }] })
+  const ctx = createMockContext({ files, defaultExec: { code: 0, stdout: '' } })
+  const fetchImpl = async () => ({ ok: true, status: 200, json: async () => ({ name: 'DIRECT' }) })
+  const resolveTarget = async () => ({ addresses: [], error: 'timeout' })
+  const { baseUrl, close } = await startApp({ ctx, store, fetchImpl, resolveTarget })
+  try {
+    const { body } = await post(baseUrl, target)
+    assert.equal(body.matched, null)
+    assert.equal(body.finalOutbound, '其他')
+    assert.equal(body.assumed, undefined, 'geosite 没有 IP 条目,解析不到也判得了:确认不命中')
+  } finally {
+    await close()
+  }
+})
+
+test('POST /penetration:内核返回 FakeIP 占位地址 → 连接按域名判,按 IP 的规则集确认不命中、不记前提,resolved.fakeIp 为真', async () => {
+  const store = memStore()
+  store.setProfile(cfProfile())
+  const target = 'a.example.com'
+  const ctx = createMockContext({ files: withSingbox(CF_SRS), defaultExec: { code: 0, stdout: '' } })
+  const fetchImpl = async () => ({ ok: true, status: 200, json: async () => ({ name: 'DIRECT' }) })
+  const resolveTarget = async () => ({ addresses: ['198.19.0.5'], fakeIp: true })
+  const { baseUrl, close } = await startApp({ ctx, store, fetchImpl, resolveTarget })
+  try {
+    const { body } = await post(baseUrl, target)
+    assert.equal(body.matched, null)
+    assert.equal(body.resolved.fakeIp, true)
+    // 占位地址连接进内核后按域名判,按 IP 的规则集不参与:确认不命中,不记前提
+    assert.equal(body.assumed, undefined)
+    assert.ok(!cmds(ctx).some((c) => c.endsWith(' 198.19.0.5')), '占位地址不拿去比')
+  } finally {
+    await close()
+  }
+})
+
+test('POST /penetration:规则集按域名 / 按 IP 都走进程内索引——每个集合解码一次,不再起 rule-set match 进程', async () => {
+  const store = memStore()
+  store.setProfile({ directForNodes: false, routing: { proxyTag: 'PROXY', fallbackDefault: 'direct', policies: [{ id: 'abroad', name: '国外', rulesets: ['geosite-gfw2', 'geoip-cf2'], default: 'NodeA' }] } })
+  const GFW = '/opt/open-box/panel/server/resources/geodata/geosite-gfw2.srs'
+  const CF2 = '/opt/open-box/panel/server/resources/geodata/geoip-cf2.srs'
+  const files = withSingbox(GFW, CF2)
+  // 内核 decompile 写出来的 JSON(mock 的 exec 不真写文件,先放好;读完会被删,之后靠进程内缓存)
+  files[`${paths.dataDir}/tmp/geosite-gfw2.index.json`] = JSON.stringify({ version: 2, rules: [{ domain_suffix: ['dw.example', 'blocked.example'] }] })
+  files[`${paths.dataDir}/tmp/geoip-cf2.index.json`] = JSON.stringify({ version: 2, rules: [{ ip_cidr: ['104.16.0.0/13', '172.64.0.0/13'] }] })
+  const ctx = createMockContext({ files, defaultExec: { code: 0, stdout: '' } })
+  const fetchImpl = async () => ({ ok: true, status: 200, json: async () => ({ name: 'NodeA' }) })
+  const resolveTarget = async () => ({ addresses: ['172.67.141.46'] })
+  const { baseUrl, close } = await startApp({ ctx, store, fetchImpl, resolveTarget })
+  const spawned = (from = 0) => cmds(ctx).slice(from).filter((c) => c.includes('rule-set match'))
+  try {
+    // 域名不在域名集合里、解析出的 IP 在 IP 集合里:有域名的访问不看站点集的 IP 条件,落到兜底
+    const a = await post(baseUrl, 'a.example.com')
+    assert.equal(a.body.matched, null)
+    assert.equal(a.body.finalOutbound, '其他')
+    assert.deepEqual(spawned(), [], '一个 rule-set match 进程都不起')
+    // 域名在域名集合里:按域名命中,条目从索引里给
+    let mark = ctx.calls.length
+    const b = await post(baseUrl, 'www.dw.example')
+    assert.equal(b.body.matched.outbound, '国外')
+    assert.equal(b.body.matched.viaIp, undefined)
+    assert.deepEqual(b.body.matched.entries, [{ type: 'domain_suffix', value: 'dw.example', source: 'geosite-gfw2' }])
+    assert.deepEqual(cmds(ctx).slice(mark), [], '缓存期内不解码、不起进程')
+    // 目标直接是 IP:按 IP 命中,条目从 IP 集合的索引里给
+    mark = ctx.calls.length
+    const c = await post(baseUrl, '172.67.141.46')
+    assert.equal(c.body.matched.outbound, '国外')
+    assert.deepEqual(c.body.matched.entries, [{ type: 'ip_cidr', value: '172.64.0.0/13', source: 'geoip-cf2' }])
+    assert.deepEqual(spawned(mark), [], '按 IP 也在进程内比')
+    assert.equal(cmds(ctx).filter((x) => x.includes('rule-set decompile') && x.includes('.index.json')).length, 2, '两个集合各解码一次')
+    mark = ctx.calls.length
+    const d = await post(baseUrl, '104.21.9.27')
+    assert.equal(d.body.matched.outbound, '国外')
+    assert.deepEqual(cmds(ctx).slice(mark), [], '缓存期内不解码、不起进程')
+  } finally {
+    await close()
+  }
+})
+
+test('首包预判放行:节点服务器按目标、直连终端按来源,按内核的顺序判;占位地址、命中取反的端口 / 网段照常进内核', async () => {
+  const ctx = createMockContext()
+  const paths = createPaths('/opt/open-box')
+  const keep = [{ ip_cidr: ['172.19.0.0/30', '10.77.0.0/16'], invert: true }, { port: [53, 51820], port_range: ['6000:6100'], invert: true }]
+  const rules = [
+    { type: 'logical', mode: 'and', rules: [{ ip_cidr: ['38.207.169.210/32'] }, ...keep], action: 'bypass' },
+    { type: 'logical', mode: 'and', rules: [{ source_ip_cidr: ['192.168.3.18/32'] }, ...keep], action: 'bypass' },
+    { type: 'logical', mode: 'and', rules: [{ source_mac_address: ['00:15:5d:03:0a:12'] }, ...keep], action: 'bypass' },
+    { action: 'sniff' },
+  ]
+  const judge = (over) => preMatchVerdict(ctx, paths, rules, new Map(), { sourceIp: '192.168.3.18', targetIp: '34.69.118.104', port: 443, ...over })
+  assert.deepEqual(await judge({}), { index: 1, kind: 'terminal', verdict: 'bypass' })
+  assert.deepEqual(await judge({ fakeIp: true }), { index: 1, kind: 'terminal', verdict: 'kernel', reason: 'fakeip' })
+  assert.deepEqual(await judge({ port: 53 }), { index: 1, kind: 'terminal', verdict: 'kernel', reason: 'port', port: 53 })
+  assert.deepEqual(await judge({ port: 6050 }), { index: 1, kind: 'terminal', verdict: 'kernel', reason: 'port', port: 6050 })
+  assert.deepEqual(await judge({ targetIp: '10.77.1.2' }), { index: 1, kind: 'terminal', verdict: 'kernel', reason: 'ip', cidr: '10.77.0.0/16' })
+  assert.deepEqual(await judge({ targetIp: '' }), { index: 1, kind: 'terminal', verdict: 'bypass', ipUnknown: true })
+  assert.deepEqual(await judge({ sourceIp: '192.168.3.77', sourceMac: '00:15:5d:03:0a:12' }), { index: 2, kind: 'terminal', verdict: 'bypass' })
+  // 节点服务器:不看来源,任何终端连它都算;排在终端那条前面
+  assert.deepEqual(await judge({ sourceIp: '', targetIp: '38.207.169.210', port: 80 }), { index: 0, kind: 'nodes', verdict: 'bypass' })
+  assert.deepEqual(await judge({ targetIp: '38.207.169.210' }), { index: 0, kind: 'nodes', verdict: 'bypass' })
+  assert.deepEqual(await judge({ sourceIp: '', targetIp: '38.207.169.210', port: 51820 }), { index: 0, kind: 'nodes', verdict: 'kernel', reason: 'port', port: 51820 })
+  // 都不沾
+  assert.equal(await judge({ sourceIp: '192.168.3.77' }), null)
+  assert.equal(await judge({ sourceIp: '' }), null)
+})
+
+test('首包预判放行 · 部署的配置里节点服务器的地址在规则集文件里(obnode-direct-ip):按文件内容判;文件还没写就是一个都没有', async () => {
+  const paths = createPaths('/opt/open-box')
+  const file = `${paths.rulesetDir}/obnode-direct-ip.json`
+  const ctx = createMockContext({ files: { [file]: JSON.stringify({ version: 3, rules: [{ ip_cidr: ['38.207.169.210/32'] }] }) } })
+  const keep = [{ ip_cidr: ['172.19.0.0/30'], invert: true }, { port: [53], invert: true }]
+  const rules = [{ type: 'logical', mode: 'and', rules: [{ rule_set: ['obnode-direct-ip'] }, ...keep], action: 'bypass' }, { action: 'sniff' }]
+  const sets = new Map([['obnode-direct-ip', file]])
+  assert.deepEqual(await preMatchVerdict(ctx, paths, rules, sets, { targetIp: '38.207.169.210', port: 443 }), { index: 0, kind: 'nodes', verdict: 'bypass' })
+  assert.deepEqual(await preMatchVerdict(ctx, paths, rules, sets, { targetIp: '38.207.169.210', port: 53 }), { index: 0, kind: 'nodes', verdict: 'kernel', reason: 'port', port: 53 })
+  assert.equal(await preMatchVerdict(ctx, paths, rules, sets, { targetIp: '1.1.1.1', port: 443 }), null)
+  assert.equal(await preMatchVerdict(ctx, paths, rules, sets, { targetIp: '38.207.169.210', port: 443, fakeIp: true }), null)
+  // 读部署时写的地址(给推算用):按文件内容
+  const deployed = { route: { rule_set: [{ type: 'local', tag: 'obnode-direct-ip', format: 'source', path: file }], rules: [] } }
+  assert.deepEqual(await readDeployedDirectHostCidrs(ctx, deployed, '直连'), ['38.207.169.210/32'])
+  const { dropRuleSetIndex } = await import('../system/ruleset-index.mjs')
+  dropRuleSetIndex(['obnode-direct-ip'])
+  const empty = createMockContext()
+  assert.equal(await preMatchVerdict(empty, paths, rules, sets, { targetIp: '38.207.169.210', port: 443 }), null, '文件不在 = 空集合,不报错')
+  assert.deepEqual(await readDeployedDirectHostCidrs(empty, deployed, '直连'), [])
+})
+
+test('已部署配置里「订阅和节点站点直连」那条规则的地址:出口是内置直连、只带 domain / ip_cidr 的普通规则', () => {
+  const config = { route: { rules: [
+    { action: 'sniff' },
+    { ip_is_private: true, outbound: '直连' },
+    { network: 'udp', port: [123], outbound: '直连' },
+    { domain: ['vmiss-cn2.angeworld.top'], ip_cidr: ['38.207.169.210/32'], outbound: '直连' },
+    { type: 'logical', mode: 'and', rules: [{ ip_cidr: ['1.2.3.0/24'] }], outbound: '直连' },
+  ] } }
+  assert.deepEqual(deployedDirectHostCidrs(config, '直连'), ['38.207.169.210/32'])
+  assert.deepEqual(deployedDirectHostCidrs(config, 'direct'), [])
+  assert.deepEqual(deployedDirectHostCidrs(null, '直连'), [])
+})
+

@@ -7,14 +7,22 @@ import { DatabaseSync } from 'node:sqlite'
 import { fileURLToPath } from 'node:url'
 import { WebSocket, WebSocketServer } from 'ws'
 import { createDnsFilterObserver, createDnsFilterStore } from './system/dns-filter-observer.mjs'
+import { createDnsmasqQueryLog } from './system/dnsmasq-query-log.mjs'
+import { createDirectAnswerSwitch } from './system/direct-answer-bypass.mjs'
+import { panelPort } from './system/panel-port.mjs'
 import { readFilterArtifact } from './system/dns-filter.mjs'
 import { registerDnsFilterRoutes } from './api/dns-filter.mjs'
 import { registerDeployRoutes } from './api/deploy.mjs'
 import { registerGroupRoutes } from './api/groups.mjs'
 import { registerNodeLatencyRoutes } from './api/node-latency.mjs'
+import { registerSiteLatencyRoutes } from './api/site-latency.mjs'
+import { registerDnsUpstreamTestRoutes } from './api/dns-upstream-test.mjs'
 import { registerPenetrationRoutes } from './api/penetration.mjs'
 import { registerProfileRoutes } from './api/profile.mjs'
+import { registerResetRoutes } from './api/reset.mjs'
 import { registerServiceRoutes } from './api/service.mjs'
+import { registerTimezoneRoutes } from './api/timezone.mjs'
+import { syncProcessTimezoneOnStartup } from './system/timezone.mjs'
 import { registerRulesetRoutes } from './api/rulesets.mjs'
 import { registerUpdateRoutes } from './api/updates.mjs'
 import { registerRouteTestRoutes } from './api/route-test.mjs'
@@ -23,6 +31,10 @@ import { teardownProbeNetns } from './system/lan-probe.mjs'
 import { registerTrafficRoutes } from './api/traffic.mjs'
 import { registerLatencyHistoryRoutes } from './api/latency-history.mjs'
 import { createLatencyHistory } from './system/latency-history.mjs'
+import { createKernelStaleNodes } from './system/kernel-stale.mjs'
+import { createHotApplier, createRestartPending } from './api/hot-apply.mjs'
+import { createNodeProber } from './system/node-probe.mjs'
+import { createLatencyProbeCoordinator } from './system/latency-probe-coordinator.mjs'
 import { createLatencyScheduler } from './system/latency-scheduler.mjs'
 import { createFailoverManager } from './system/failover-manager.mjs'
 import { createDnsRewriteServer } from './system/dns-rewrite-server.mjs'
@@ -30,14 +42,20 @@ import { DNS_REWRITE_TAG, ensureDnsRewriteDefaults } from './engine/dns-rewrite.
 import { ensureTestUrlDefaults } from './engine/test-url.mjs'
 import { decideDnsServer } from './api/route-test.mjs'
 import { readSystemDns } from './system/resolv.mjs'
+import { directResolverServers } from './engine/dns.mjs'
+import { prepareDnsRegion, startRegionDetect } from './system/router-region.mjs'
 import { registerFailoverRoutes } from './api/failover.mjs'
 import { registerServerRoutes } from './api/servers.mjs'
-import { registerBackupRoutes } from './api/backup.mjs'
+import { CLIENT_APPS_ENABLED, registerClientAppRoutes, registerPublicClientRoutes } from './api/client-app.mjs'
+import { registerActivationRoutes } from './api/activation.mjs'
+import { registerClientConfigRoutes, registerPublicClientConfigRoutes } from './api/client-config.mjs'
+import { registerBackupBodyParser, registerBackupRoutes } from './api/backup.mjs'
 import { registerDiagnosticsRoutes } from './api/diagnostics.mjs'
-import { readMeta } from './system/updater.mjs'
+import { readMeta, readUpdateStatus } from './system/updater.mjs'
+import { createMemoryWatchdog, recordWatchdogRestart } from './system/memory-watchdog.mjs'
 import { seedDefaultStorage } from './system/seed-defaults.mjs'
-import { runDeploy, fetchSelections, resolveSelections, regenerateIfPlanChanged } from './api/deploy-runner.mjs'
-import { flushDnsCache } from './system/dns-cache.mjs'
+import { fetchSelections, resolveSelections, regenerateIfPlanChanged, isDeployLocked } from './api/deploy-runner.mjs'
+import { flushDnsCache, registerDnsCacheRoutes } from './system/dns-cache.mjs'
 import { startScheduler } from './system/scheduler.mjs'
 import { createTrafficCollector, createTrafficStore } from './system/traffic-collector.mjs'
 import { registerSubscriptionRoutes } from './api/subscriptions.mjs'
@@ -46,14 +64,17 @@ import { subscriptionFetch } from './system/insecure-fetch.mjs'
 import { createStore } from './store/openbox-store.mjs'
 import { createRealContext } from './system/context-real.mjs'
 import { createPaths } from './system/paths.mjs'
+import { detectPlatform } from './system/platform.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const rootDir = path.resolve(__dirname, '..')
 const distDir = path.join(rootDir, 'dist')
 const dataDir = path.join(rootDir, 'data')
 const dbPath = process.env.ZASHBOARD_DB_PATH || path.join(dataDir, 'zashboard.sqlite')
-const host = process.env.HOST || '0.0.0.0'
-const port = Number(process.env.PORT || 2026)
+// 默认听 ::(IPv4 / IPv6 双栈,GitHub #276:没有公网 IPv4 的用户要从外面经 IPv6 访问面板);系统没开 IPv6 时退回 0.0.0.0。
+// 防火墙那条面板放行只对局域网开(system/firewall.mjs),不会因此对外网开放
+const host = process.env.HOST || '::'
+const port = panelPort()
 // Open-Box 只管理本机唯一的 sing-box,clash_api 固定监听 127.0.0.1:9095;
 // 环境变量覆盖仅用于测试(指向假上游),生产环境不应设置。
 const DEFAULT_CLASH_API_BASE = process.env.OPENBOX_CLASH_API_BASE || 'http://127.0.0.1:9095'
@@ -159,12 +180,14 @@ seedDefaultStorage({
   log: (m) => console.log(m),
 })
 
+// 跑在哪种系统上(OpenWrt / Debian 的 systemd),见 system/platform.mjs;store 和 paths 都按它分叉
+const obPlatform = detectPlatform()
 // openbox-store 复用同一张 app_storage KV 表;controller 代理靠它拿本机 clash_api 的 secret。
 const store = createStore({
   get: (key) => getStorageValueStatement.get(key)?.value ?? null,
   set: (key, value) => upsertStorageValueStatement.run(key, value),
   del: (key) => deleteStorageValueStatement.run(key),
-})
+}, { platform: obPlatform })
 // DNS 重写第一次引入时补两条默认规则(只在还没初始化的档案上做一次;用户之后改 / 停 / 删都算数)
 try {
   if (ensureDnsRewriteDefaults(store)) console.log('[dns-rewrite] 档案首次初始化 DNS 重写,写入默认规则')
@@ -176,6 +199,13 @@ try {
   if (ensureTestUrlDefaults(store)) console.log('[profile] 内置测速默认地址已更新为 HTTP')
 } catch (err) {
   console.log(`[profile] 迁移测速地址失败:${err instanceof Error ? err.message : err}`)
+}
+// 路由器在中国大陆还是中国大陆之外(dns.region,决定 DNS 上游的默认值):老设备升级 / 全新安装第一次启动时先按中国大陆记下、直连 DNS
+// 换成上游 DNS,出口公网 IP 等下面 obCtx 建好之后在后台判(system/router-region.mjs)
+try {
+  if (prepareDnsRegion(store)) console.log('[dns-region] 档案里还没有路由器所在地区:先按中国大陆,后台按出口公网 IP 判一次')
+} catch (err) {
+  console.log(`[dns-region] 初始化地区失败:${err instanceof Error ? err.message : err}`)
 }
 
 // 会话密钥落库,不是每次启动随机生成:否则升级 / 重启面板 / 路由器重启后进程一换,所有
@@ -232,10 +262,14 @@ const revokeAccessSession = (id) => {
   writeAccessSessions(sessions)
 }
 
-// Open-Box 系统层依赖:paths 描述 OpenWrt 上的固定安装布局,ctx 是真实的 exec/fs 抽象
-// (与测试用的 createMockContext 同接口),两者都是无状态的纯对象/闭包,可安全全局复用。
-const obPaths = createPaths(process.env.OPENBOX_ROOT || '/opt/open-box')
+// Open-Box 系统层依赖:paths 描述固定安装布局(OpenWrt / Debian 同一套目录,只有服务脚本不同,见 system/platform.mjs),
+// ctx 是真实的 exec/fs 抽象(与测试用的 createMockContext 同接口),两者都是无状态的纯对象/闭包,可安全全局复用。
+const obPaths = createPaths(process.env.OPENBOX_ROOT || '/opt/open-box', { platform: obPlatform })
 const obCtx = createRealContext()
+// 定时任务按路由器本地时间的钟点跑:OpenWrt 上时区名和系统实际的 POSIX 串对得上,就按时区名设面板自己的 TZ
+// (固件没装 zoneinfo、有夏令时的时区也算得对;见 system/timezone.mjs)。计划任务第一次跑在一分钟后,来得及
+void syncProcessTimezoneOnStartup(obCtx, obPlatform).catch(() => {})
+startRegionDetect({ store, ctx: obCtx, paths: obPaths, log: (m) => console.log(m) })
 
 const parseStoredBoolean = (value) => {
   if (typeof value !== 'string') {
@@ -464,6 +498,32 @@ const replaceSnapshot = (entries) => {
     for (const [key, value] of Object.entries(entries)) {
       if (isProtectedStorageKey(key)) continue
       insertSnapshotStatement.run(key, value)
+    }
+
+    db.exec('COMMIT')
+  } catch (error) {
+    db.exec('ROLLBACK')
+    throw error
+  }
+}
+
+// 只改点名的这些键,别的一个不碰(PATCH 用)。全量覆盖会出事:两台浏览器 / 两台设备各持一份
+// 快照,后写的那台把别人改过的设置整份还原 —— 用户报的「改了无法保存、换个浏览器又恢复默认」
+// 就是这么来的(一台开着没关的旧页面,改任何一个无关设置都会把别处的改动冲掉)。
+const mergeSnapshot = (entries, removed) => {
+  db.exec('BEGIN')
+
+  try {
+    for (const key of removed) {
+      if (isProtectedStorageKey(key)) continue
+      deleteStorageValueStatement.run(key)
+    }
+
+    for (const [key, value] of Object.entries(entries)) {
+      if (isProtectedStorageKey(key)) continue
+      // 必须 upsert:合并是在"键已经存在"的表上改,纯 INSERT 会撞主键
+      // (第一版就是这么写的,实测直接 500:UNIQUE constraint failed)
+      upsertStorageValueStatement.run(key, value)
     }
 
     db.exec('COMMIT')
@@ -714,6 +774,8 @@ const closeSocketPair = (left, right, code = 1011, reason = '') => {
   closeSocket(right, code, reason)
 }
 
+const RELAY_DROP_BYTES = 4 * 1024 * 1024
+const RELAY_CLOSE_BYTES = 16 * 1024 * 1024
 const relayControllerWebSocket = (clientSocket, request) => {
   let upstreamSocket
 
@@ -742,10 +804,15 @@ const relayControllerWebSocket = (clientSocket, request) => {
       closeBoth(1011, 'Client websocket error')
     })
 
+    // 浏览器那头收得慢时,ws 会把没发出去的帧攒在进程内存里(不在 V8 堆里,堆上限管不到):连接页那种每秒一份
+    // 全量连接表的流,一台切到后台的手机几小时就能攒出上百 MB(正式路由器 2026-09-18 面板涨到 363 MB 被 OOM)。
+    // 这些流都是状态快照,攒到 4 MB 就丢帧、下一份补上;攒到 16 MB 说明客户端根本不收了,关掉让它自己重连
     upstreamSocket.on('message', (data, isBinary) => {
-      if (clientSocket.readyState === WebSocket.OPEN) {
-        clientSocket.send(data, { binary: isBinary })
-      }
+      if (clientSocket.readyState !== WebSocket.OPEN) return
+      const buffered = clientSocket.bufferedAmount
+      if (buffered > RELAY_CLOSE_BYTES) { closeBoth(1013, 'Client too slow'); return }
+      if (buffered > RELAY_DROP_BYTES) return
+      clientSocket.send(data, { binary: isBinary })
     })
 
     upstreamSocket.on('close', (code, reason) => {
@@ -768,14 +835,23 @@ const app = express()
 const server = http.createServer(app)
 const websocketServer = new WebSocketServer({ noServer: true })
 
-// 分享订阅是 capability URL：拿到随机 token 的设备可直接读取订阅内容，不需要面板登录。
-// 路由必须放在 /api 鉴权守卫之前；管理端的增删改仍注册在守卫之后。
-registerPublicSubscriptionShareRoutes(app, { store, fetchImpl: subscriptionFetch })
-
 // Express 默认路由大小写不敏感:GET /API/openbox/profile 会命中 /api/openbox/profile 的路由,
 // 但下面守卫中间件若只用精确前缀判断 req.path.startsWith('/api/') 就会放过它——必须在
 // 任何路由注册之前关掉大小写不敏感,否则 /API/... 绕过认证守卫却仍能打到真实 handler。
+// Express 5 在第一次 app.get() 时就按当时的设置建好 router,之后再 set 不生效,所以这行必须
+// 排在下面的分享公开路由之前。
 app.set('case sensitive routing', true)
+
+// 分享订阅是 capability URL：拿到随机 token 的设备可直接读取订阅内容，不需要面板登录。
+// 路由必须放在 /api 鉴权守卫之前；管理端的增删改仍注册在守卫之后。
+registerPublicSubscriptionShareRoutes(app, { store, fetchImpl: subscriptionFetch })
+// Open-Box 客户端(App)的公开接口:到家探测、地区分流、规则集(路径里带路由器 ID,内容没有凭据,api/client-app.mjs);
+// 「导入全部配置」的设备拉配置(token 认设备,内容用设备密钥加密,api/client-config.mjs)。App 发布前不注册(CLIENT_APPS_ENABLED)
+const readOpenboxVersion = async () => (await readMeta(obCtx, obPaths)).version || ''
+if (CLIENT_APPS_ENABLED) {
+  registerPublicClientRoutes(app, { store })
+  registerPublicClientConfigRoutes(app, { store, ctx: obCtx, paths: obPaths, fetchImpl: globalThis.fetch, readVersion: readOpenboxVersion })
+}
 
 app.use('/api/auth', express.json({ limit: '2kb' }))
 // 25MB 的 body 解析器放在鉴权守卫之后(见下方 /api/health 之前):未登录的请求不能先让
@@ -1069,6 +1145,28 @@ app.put('/api/storage', (req, res) => {
   })
 })
 
+// 增量同步:浏览器只把自己这次真正改过 / 删掉的键报上来,服务端按键合并。
+// 整份 PUT 仍然保留,给"开机对齐(清掉老版本遗留键)"和"导入设置 / 恢复备份"用 —— 那两种场景
+// 本来就该以传上来的那份为准。
+app.patch('/api/storage', (req, res) => {
+  const { entries = {}, removed = [] } = req.body ?? {}
+
+  if (!isValidEntries(entries) || !Array.isArray(removed) || removed.some((k) => typeof k !== 'string')) {
+    res.status(400).json({
+      message: 'entries must be an object with string values and removed must be an array of keys',
+    })
+    return
+  }
+
+  mergeSnapshot(entries, removed)
+
+  res.json({
+    ok: true,
+    updated: Object.keys(entries).length,
+    removed: removed.length,
+  })
+})
+
 app.get('/api/background-image', (_req, res) => {
   const row = getStorageValueStatement.get(backgroundImageStorageKey)
 
@@ -1106,15 +1204,66 @@ app.delete('/api/background-image', (_req, res) => {
 // Open-Box 业务路由:全部挂在守卫中间件之后、静态资源/SPA fallback 之前,
 // 因此天然继承"未设密一律 403、已设密未认证一律 401"的保护,无需各自重复鉴权。
 // 订阅拉取用不校验证书的 fetch(自签 / 过期证书的自建订阅也能加),不能传系统 fetch 把它盖掉
-registerSubscriptionRoutes(app, { store, fetchImpl: subscriptionFetch })
+// 内核在用的节点是不是面板此刻存的那份(system/kernel-stale.mjs):订阅卡片的「重启内核生效」常驻提示、
+// 延迟历史不记内核对旧定义节点的测速,都靠它
+const kernelStale = createKernelStaleNodes({ ctx: obCtx, paths: obPaths, store })
+// 订阅节点、节点组、故障转移、链式代理这些出站一改,就在后台在线换进内核、不重启(api/hot-apply.mjs,内核 tcp13)。
+// 换完刷新一下 kernelStale 的缓存:延迟历史按它判断内核测的是不是新定义
+const hotApplier = createHotApplier({ store, ctx: obCtx, paths: obPaths, fetchImpl: globalThis.fetch, log: (m) => console.log(m), onResult: () => { void kernelStale.refresh().catch(() => {}) } })
+// 右上角「要重启内核」的统一提示:运行中的配置和此刻该有的,除了能在线换的出站之外哪里不一样(api/hot-apply.mjs)
+const restartPending = createRestartPending({ store, ctx: obCtx, paths: obPaths, hotApplier })
+// 统一的节点测速(system/node-probe.mjs):弹窗、订阅卡片、代理页、链式代理全走它;全局一个,同一时刻只起一个实例
+const nodeProber = createNodeProber({ ctx: obCtx, paths: obPaths, log: (m) => console.log(m) })
+// 延迟历史 + 自动组的硬性定时测速(system/latency-scheduler.mjs):sing-box 的 URLTest 只在有流量时才按
+// interval 测,闲置的组停在启动那一次;这里由面板按 interval 定时调内核测,结果记进 openbox/latency-history,
+// 所有浏览器共享;自动优选和故障转移通过同一个探测协调器按各自 interval 复用节点结果。
+// 内核用的是旧定义的节点,内核那边的结果不记(见 kernelStale);面板测速实例测的照记。
+// 和流量采集一样只在 startServer 里启动。
+const latencyHistory = createLatencyHistory({ store, skip: (tag) => kernelStale.isStale(tag) })
+// 备份导入的 32 MB 请求体解析要排在所有 /api/openbox 路由前面(见 api/backup.mjs,GitHub #303)
+registerBackupBodyParser(app)
+registerSubscriptionRoutes(app, { store, fetchImpl: subscriptionFetch, kernelStale, applyNow: () => hotApplier.runNow() })
 registerSubscriptionShareRoutes(app, { store })
-registerProfileRoutes(app, { store })
+registerProfileRoutes(app, { store, applyNow: () => hotApplier.runNow() })
 registerDeployRoutes(app, { store, ctx: obCtx, paths: obPaths })
-registerServiceRoutes(app, { store, ctx: obCtx, paths: obPaths })
+registerServiceRoutes(app, { store, ctx: obCtx, paths: obPaths, restartPending })
+// 后端设置 · 时区:读 / 改路由器的系统时区(system/timezone.mjs)
+registerTimezoneRoutes(app, { ctx: obCtx, platform: obPlatform })
+// 恢复默认分流 / 恢复出厂设置(破坏性,前端都有确认弹窗)。
+// 出厂 = 回到刚装好的样子:KV 表整张清掉(含面板设置、背景图、**面板密码**、会话、clash 密钥)、
+// 流量统计清掉,然后按随包默认重新播种一遍(面板设置 + 背景图 + 初始目标分流)。
+registerResetRoutes(app, {
+  ctx: obCtx,
+  paths: obPaths,
+  log: (m) => console.log(m),
+  wipeAll: () => {
+    db.exec('BEGIN')
+    try {
+      db.exec('DELETE FROM app_storage')
+      // 统计数据和 KV 表在同一个库里(traffic-collector 的 traffic_daily)
+      db.exec('DELETE FROM traffic_daily')
+      db.exec('COMMIT')
+    } catch (error) {
+      db.exec('ROLLBACK')
+      throw error
+    }
+    // 播种回随包默认:面板设置、背景图、初始目标分流 —— 和全新安装第一次启动时走的是同一条路
+    return seedDefaultStorage({
+      countConfigEntries: () => db.prepare(`SELECT COUNT(*) AS c FROM app_storage WHERE key LIKE 'config/%'`).get().c,
+      insert: (key, value) => upsertStorageValueStatement.run(key, value),
+      hasKey: (key) => Boolean(getStorageValueStatement.get(key)),
+      log: (m) => console.log(m),
+    })
+  },
+})
 registerRulesetRoutes(app, { store, ctx: obCtx, paths: obPaths, fetchImpl: globalThis.fetch })
 registerPenetrationRoutes(app, { store, ctx: obCtx, paths: obPaths, fetchImpl: globalThis.fetch })
-registerNodeLatencyRoutes(app, { ctx: obCtx, paths: obPaths, store, fetchImpl: globalThis.fetch })
-registerGroupRoutes(app, { store })
+registerNodeLatencyRoutes(app, { ctx: obCtx, paths: obPaths, store, fetchImpl: globalThis.fetch, prober: nodeProber, history: latencyHistory, kernelStale })
+// 概览里的站点延时小卡片:面板经内核的回环入站(panel-in)真去访问一次,量连接建好之后的一次往返
+registerSiteLatencyRoutes(app, { store, fetchImpl: globalThis.fetch })
+registerDnsUpstreamTestRoutes(app, { ctx: obCtx, paths: obPaths, store, fetchImpl: globalThis.fetch })
+registerDnsCacheRoutes(app, { ctx: obCtx, store })
+registerGroupRoutes(app, { store, applyNow: () => hotApplier.runNow() })
 registerUpdateRoutes(app, { store, ctx: obCtx, paths: obPaths, fetchImpl: globalThis.fetch })
 registerRouteTestRoutes(app, { store, ctx: obCtx, paths: obPaths, fetchImpl: globalThis.fetch })
 registerTerminalTestRoutes(app, { store, ctx: obCtx, paths: obPaths, fetchImpl: globalThis.fetch })
@@ -1129,18 +1278,15 @@ const trafficCollector = createTrafficCollector({
   log: (m) => console.log(m),
 })
 registerTrafficRoutes(app, { collector: trafficCollector, ctx: obCtx, paths: obPaths, store })
-// 延迟历史 + 自动组的硬性定时测速(system/latency-scheduler.mjs):sing-box 的 URLTest 只在有流量时才按
-// interval 测,闲置的组停在启动那一次;这里由面板按 interval 定时调内核测,结果记进 openbox/latency-history,
-// 所有浏览器共享。和流量采集一样只在 startServer 里启动。
-const latencyHistory = createLatencyHistory({ store })
-const latencyScheduler = createLatencyScheduler({ store, ctx: obCtx, paths: obPaths, history: latencyHistory, fetchImpl: globalThis.fetch, log: (m) => console.log(m) })
+const latencyProbeCoordinator = createLatencyProbeCoordinator()
+const latencyScheduler = createLatencyScheduler({ store, ctx: obCtx, paths: obPaths, history: latencyHistory, probeCoordinator: latencyProbeCoordinator, fetchImpl: globalThis.fetch, log: (m) => console.log(m) })
 registerLatencyHistoryRoutes(app, { history: latencyHistory, scheduler: latencyScheduler })
 // 故障转移组的后台主备管理(system/failover-manager.mjs):按 config.meta.json 里的运行映射定期端到端探测各页签
 // 的节点、组内先恢复、组间按顺序转移、主用恢复后切回、全部失败切兜底拒绝。跟随服务端生命周期,浏览器关了照样跑
-const failoverManager = createFailoverManager({ store, ctx: obCtx, paths: obPaths, history: latencyHistory, fetchImpl: globalThis.fetch, log: (m) => console.log(m) })
+const failoverManager = createFailoverManager({ store, ctx: obCtx, paths: obPaths, history: latencyHistory, probeCoordinator: latencyProbeCoordinator, fetchImpl: globalThis.fetch, log: (m) => console.log(m) })
 registerFailoverRoutes(app, { manager: failoverManager })
 // DNS 重写的应答服务(system/dns-rewrite-server.mjs):内核把命中重写源域名的查询交到 127.0.0.1:7854,这里按档案
-// 里此刻的规则生成答案;没命中的按直连侧上游(WAN 下发的 DNS)解析
+// 里此刻的规则生成答案;没命中的按直连 DNS 解析
 // 「代理 v6 降为 IPv4」时重写服务要知道源域名按现有分流走不走代理:按已部署的 config.json 里的 DNS 规则判(跳过重写
 // 规则本身),配置按 meta.generatedAt 缓存,只在重新部署后重读
 let deployedDnsConfig = { version: null, config: null }
@@ -1161,21 +1307,42 @@ const dnsRewriteSourceViaProxy = async (name) => {
     return Boolean(d.viaProxy)
   } catch { return null }
 }
-const dnsRewriteServer = createDnsRewriteServer({ store, fallbackServers: () => readSystemDns(obCtx).catch(() => []), sourceViaProxy: dnsRewriteSourceViaProxy, log: (m) => console.log(m) })
-const dnsFilterData = createDnsFilterStore(db)
+// 后备解析和内核直连侧同一个口径:按直连 DNS,上游 DNS 展开成系统的上游 DNS(engine/dns.mjs 的 directResolverServers)
+const dnsRewriteServer = createDnsRewriteServer({ store, fallbackServers: async () => directResolverServers(store.getProfile(), await readSystemDns(obCtx).catch(() => [])), sourceViaProxy: dnsRewriteSourceViaProxy, log: (m) => console.log(m) })
+// dnsmasq 转发模式下认终端用的 dnsmasq 查询日志(system/dnsmasq-query-log.mjs):部署时开没开记在元数据的 dnsmasqQueryLog 里
+const dnsmasqQueryLog = createDnsmasqQueryLog({ exec: (cmd, args, opts) => obCtx.exec(cmd, args, opts), log: (m) => console.log(m) })
+const dnsFilterData = createDnsFilterStore(db, { dnsmasq: dnsmasqQueryLog })
+const readDeployMeta = async () => { try { return JSON.parse(await obCtx.readFile(`${obPaths.etc}/config.meta.json`)) } catch { return null } }
 const dnsFilterObserver = createDnsFilterObserver({
   data: dnsFilterData, readConfig: readDeployedConfig, getSecret: () => store.getClashSecret(),
   getNames: () => Object.fromEntries((readFilterArtifact(store)?.blocks || []).map((b) => [b.tag, b.name])),
-  enabled: async () => {
-    try { return JSON.parse(await obCtx.readFile(`${obPaths.etc}/config.meta.json`)).dnsFilter?.enabled === true }
-    catch { return false }
+  enabled: async () => (await readDeployMeta())?.dnsFilter?.enabled === true,
+  queryLog: obPaths.platform === 'systemd' ? null : dnsmasqQueryLog,
+  // 'file':读自己加的查询日志;'syslog':用户自己开了查询日志、写进系统日志,改读 logread(#322);false:不读
+  queryLogWanted: async () => {
+    const q = (await readDeployMeta())?.dnsmasqQueryLog
+    return q?.active === true ? 'file' : q?.reason === 'user' && q?.syslog === true ? 'syslog' : false
   },
 })
 const dnsFilterUpdater = registerDnsFilterRoutes(app, { store, ctx: obCtx, paths: obPaths, data: dnsFilterData, observer: dnsFilterObserver })
+// 直连应答放行(system/direct-answer-bypass.mjs):内核 DNS 直连侧的应答由内核同步写进入口放行集合,面板只按入口模式
+// 开关(白名单模式建 data/flip/direct-answer.on,别的模式删掉并清空集合)
+const directAnswerObserver = createDirectAnswerSwitch({
+  ctx: obCtx, paths: obPaths,
+  readMeta: async () => { try { return JSON.parse(await obCtx.readFile(`${obPaths.etc}/config.meta.json`)) } catch { return null } },
+  log: (m) => console.log(m),
+})
 let dnsFilterTimer
 registerServerRoutes(app, { store, ctx: obCtx })
+// App 码 / 客户端配置要的登录后接口:同上,App 发布前不注册
+if (CLIENT_APPS_ENABLED) {
+  registerClientAppRoutes(app, { store, ctx: obCtx, platform: obPaths.platform })
+  registerClientConfigRoutes(app, { store, ctx: obCtx, paths: obPaths, fetchImpl: globalThis.fetch, readVersion: readOpenboxVersion })
+}
 // 导出诊断包(后端设置那张卡片):版本、固件、内核状态、脱敏配置、最近日志,给 issue 用
 registerDiagnosticsRoutes(app, { store, ctx: obCtx, paths: obPaths })
+// 激活(#/active 页面):概览顶栏从推广换成自己填的文字,状态存在路由器上
+registerActivationRoutes(app, { store, ctx: obCtx, paths: obPaths })
 // 导出 / 导入(后端设置那张卡片):档案 + 节点组,可选订阅和节点
 registerBackupRoutes(app, {
   store,
@@ -1189,7 +1356,7 @@ registerBackupRoutes(app, {
   },
 })
 // 自动更新计划:每分钟看一眼档案里的计划,到点就做(见 system/scheduler.mjs)
-startScheduler({ store, ctx: obCtx, paths: obPaths, fetchImpl: globalThis.fetch, subscriptionFetchImpl: subscriptionFetch, runDeploy, log: (m) => console.log(m) })
+startScheduler({ store, ctx: obCtx, paths: obPaths, fetchImpl: globalThis.fetch, subscriptionFetchImpl: subscriptionFetch, hotApplier, log: (m) => console.log(m) })
 
 // /api/* 专用 JSON 错误兜底:必须注册在所有路由之后、SPA fallback 之前。任何路由处理器里
 // 未被自己 try/catch 的异常(同步抛出,或调用 next(err))原本会落到 Express 默认错误处理器,
@@ -1299,12 +1466,34 @@ server.on('upgrade', (request, socket, head) => {
 
 websocketServer.on('connection', relayControllerWebSocket)
 
+// 面板内存自检(system/memory-watchdog.mjs):常驻内存连续几次超过上限就平滑退出,procd 立刻拉起新进程。
+// 部署 / 停止 / 回滚 / 升级进行中不动,等它们结束的下一轮再说
+const memoryWatchdog = createMemoryWatchdog({
+  isBusy: async () => isDeployLocked(store) || (await readUpdateStatus(obCtx, obPaths)).running === true,
+  onExceed: async ({ rssMb, limitMb }) => {
+    console.log(`[memory] 面板常驻内存 ${rssMb.toFixed(0)} MB 连续超过上限 ${limitMb} MB,平滑重启面板（procd 会立刻拉起新进程）`)
+    try {
+      const usage = process.memoryUsage()
+      await recordWatchdogRestart(obCtx, `${obPaths.dataDir}/panel-watchdog.json`, {
+        at: new Date().toISOString(), rssMb: Math.round(rssMb), limitMb,
+        heapUsedMb: Math.round(usage.heapUsed / 1048576), externalMb: Math.round(usage.external / 1048576), uptimeSeconds: Math.round(process.uptime()),
+      })
+    } catch { /* 记不下来不影响重启 */ }
+    server.closeIdleConnections?.()
+    await Promise.race([shutdownServer().catch(() => {}), new Promise((resolve) => setTimeout(resolve, 5000))])
+    process.exit(0)
+  },
+})
+
 const startServer = async () => {
+  memoryWatchdog.start()
   trafficCollector.start()
   latencyScheduler.start()
   failoverManager.start()
+  hotApplier.start()
   dnsRewriteServer.start().catch(() => {})
   dnsFilterObserver.start()
+  directAnswerObserver.start()
   clearInterval(dnsFilterTimer)
   dnsFilterTimer = setInterval(() => dnsFilterUpdater.updateIfDue().catch((error) => console.log(`[dns-filter] 更新失败: ${error.message}`)), 60000)
   dnsFilterTimer.unref?.()
@@ -1314,23 +1503,31 @@ const startServer = async () => {
     return server
   }
 
-  await new Promise((resolve, reject) => {
+  const listenOn = (listenHost) => new Promise((resolve, reject) => {
     const handleError = (error) => {
       server.off('error', handleError)
       reject(error)
     }
 
     server.once('error', handleError)
-    server.listen(port, host, () => {
+    server.listen(port, listenHost, () => {
       server.off('error', handleError)
       resolve()
     })
   })
+  try {
+    await listenOn(host)
+  } catch (error) {
+    // 内核没有 IPv6(或者被整个关掉)时 :: 绑不上,退回只听 IPv4
+    if (host !== '::' || !['EAFNOSUPPORT', 'EADDRNOTAVAIL', 'EINVAL'].includes(error && error.code)) throw error
+    console.warn(`listen on [::]:${port} failed (${error.code}), falling back to 0.0.0.0`)
+    await listenOn('0.0.0.0')
+  }
 
   const address = server.address()
   const listenLabel =
     typeof address === 'object' && address
-      ? `http://${address.address}:${address.port}`
+      ? `http://${address.family === 'IPv6' ? `[${address.address}]` : address.address}:${address.port}`
       : `http://${host}:${port}`
 
   console.log(`zashboard server listening on ${listenLabel}`)
@@ -1353,13 +1550,18 @@ const shutdownServer = async () => {
     })
   }
 
+  memoryWatchdog.stop()
   // 先把攒着没写的流量增量落盘,再关库
   trafficCollector.stop()
   latencyScheduler.stop()
   failoverManager.stop()
+  hotApplier.stop()
   dnsRewriteServer.stop()
   clearInterval(dnsFilterTimer)
   dnsFilterObserver.stop()
+  // 跟着 logread 读的子进程(syslog 模式)一起结束
+  dnsmasqQueryLog.stop()
+  await directAnswerObserver.stop()
   if (typeof db.close === 'function') {
     db.close()
   }

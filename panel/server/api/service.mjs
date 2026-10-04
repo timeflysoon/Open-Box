@@ -9,7 +9,7 @@ import { cancelPendingDeploys, runDeploy, runExclusive } from './deploy-runner.m
 // 校验 → 落盘 → DNS 接管 → 防火墙 → 启动 → 验证,失败自动回滚到直连。
 const failureDetail = (result) => result.message || `deploy failed at stage: ${result.stage}`
 
-export const registerServiceRoutes = (app, { store, ctx, paths, stopWaitMs = 8000 } = {}) => {
+export const registerServiceRoutes = (app, { store, ctx, paths, stopWaitMs = 8000, restartPending = null } = {}) => {
   const router = express.Router({ caseSensitive: true })
   router.use(express.json({ limit: '1mb' }))
 
@@ -24,7 +24,13 @@ export const registerServiceRoutes = (app, { store, ctx, paths, stopWaitMs = 800
     ])
     // 侧边栏底部要显示「运行时长」
     const uptimeSeconds = core.running ? await processUptime(ctx, 'sing-box') : null
-    res.json({ core: { ...core, autostart, uptimeSeconds }, panel, conflicts })
+    // 有没有保存了、要重启内核才生效的改动(api/hot-apply.mjs):右上角统一提示一处,内核停着时不算(启动就生效)
+    let pendingRestart = { pending: false, reasons: [] }
+    if (core.running && restartPending) {
+      try { pendingRestart = await restartPending.get() } catch { /* 算不出来就不提示 */ }
+    }
+    // platform:'openwrt' / 'systemd'(Debian / Ubuntu)。界面按它隐藏只有 OpenWrt 才有的东西(dnsmasq 分流、LuCI 之类)
+    res.json({ core: { ...core, autostart, uptimeSeconds }, panel, conflicts, platform: paths.platform || 'openwrt', pendingRestart: { pending: Boolean(pendingRestart.pending), reasons: pendingRestart.reasons || [] } })
   })
 
   // POST /api/openbox/service/core/:action
@@ -65,7 +71,7 @@ export const registerServiceRoutes = (app, { store, ctx, paths, stopWaitMs = 800
           // 用户得点两遍(正式路由器上实测)。等不到就如实报失败。
           const waited = await waitForServiceState(ctx, paths.initd.core, false, { timeoutMs: stopWaitMs })
           if (!waited.reached) {
-            r = { ok: false, code: 1, stderr: `内核在 ${Math.round(stopWaitMs / 1000)} 秒内没有退出(${waited.status.raw.trim() || 'running'})` }
+            r = { ok: false, code: 1, stderr: `内核在 ${Math.round(stopWaitMs / 1000)} 秒内没有退出（${waited.status.raw.trim() || 'running'}）` }
           }
         }
         if (r.ok) {

@@ -10,6 +10,9 @@ import {
   pairKindFor,
   hourDayKey,
   HOUR_DETAIL_KEEP_DAYS,
+  TAIL_COLLAPSE_AFTER_DAYS,
+  TAIL_KEEP_HOSTS,
+  TAIL_OTHER_KEY,
 } from './traffic-collector.mjs'
 
 const fakeStore = () => ({
@@ -37,7 +40,7 @@ const pendingOf = (collector) => {
   return Object.fromEntries(rows.map((r) => [`${r.day}|${r.kind}|${r.key}`, { up: r.up, down: r.down, conns: r.conns }]))
 }
 
-test('helpers:chains[0] 是末端节点;host 优先域名(小写)否则目标 IP;localDay 补零', () => {
+test('helpers:chains[0] 是末端节点;host 优先域名（小写）否则目标 IP;localDay 补零', () => {
   assert.equal(leafOf(['破晓 | 香港-04', '香港-自动', '其他']), '破晓 | 香港-04')
   assert.equal(leafOf([]), '')
   assert.equal(hostOf({ host: 'Example.COM', destinationIP: '1.1.1.1' }), 'example.com')
@@ -151,7 +154,7 @@ test('sqlite store:upsert 累加、按月/按天查询、清理', { skip: !sqlit
   assert.equal(store.month('2026-09').length, 1)
 })
 
-test('sqlite store:某个出站按天 / 按月 / 按小时的量(概览「统计直连流量」关掉时扣直连用);按月不混进「天@小时」行', { skip: !sqlite && '本机 Node 没有 node:sqlite' }, () => {
+test('sqlite store:某个出站按天 / 按月 / 按小时的量（概览「统计直连流量」关掉时扣直连用）;按月不混进「天@小时」行', { skip: !sqlite && '本机 Node 没有 node:sqlite' }, () => {
   const db = new sqlite.DatabaseSync(':memory:')
   const store = createTrafficStore(db)
   store.add([
@@ -357,3 +360,213 @@ test('清理一天跑一次:启动时一次,之后跨天才再跑;改了保留�
   assert.deepEqual(pruned.at(-1), '2026-08-05', '改了时长,下一次 tick 就按新期限清')
   c.stop()
 })
+
+test('故障转移页签子组当了 chains[0]（内核没记到节点）:按 /proxies 里子组的选中项落到真实节点;没选中取成员第一个;问不到 /proxies 原样留', async () => {
+  const { resolveLeaf } = await import('./traffic-collector.mjs')
+  const proxies = {
+    '__fo:g-1:lane-a': { type: 'URLTest', now: '香港-01', all: ['香港-01', '香港-02'] },
+    '__fo:g-1:lane-b': { type: 'URLTest', now: '', all: ['美国-01', '美国-02'] },
+    '__fo:g-1:lane-c': { type: 'URLTest', now: '__fo:g-1:lane-c', all: [] },
+  }
+  assert.equal(resolveLeaf(['__fo:g-1:lane-a', '香港-故转', 'Google'], proxies), '香港-01')
+  assert.equal(resolveLeaf(['__fo:g-1:lane-b', '美国-故转', 'AI'], proxies), '美国-01')
+  assert.equal(resolveLeaf(['__fo:g-1:lane-c', '组'], proxies), '__fo:g-1:lane-c', '自指不死循环,原样留')
+  assert.equal(resolveLeaf(['__fo:g-1:lane-a', '组'], null), '__fo:g-1:lane-a')
+  assert.equal(resolveLeaf(['节点A', '策略'], proxies), '节点A')
+  // 走完整采集:第二次快照带增量时,以子组为末端的连接记到真实节点名下
+  const calls = []
+  const fetchImpl = async (url) => {
+    calls.push(url.replace(/^http:\/\/[^/]+/, ''))
+    if (url.endsWith('/proxies')) return { ok: true, json: async () => ({ proxies }) }
+    return { ok: true, json: async () => ({ connections: [conn('c1', calls.filter((u) => u === '/connections').length * 100, 0, ['__fo:g-1:lane-a', '香港-故转', 'Google'])] }) }
+  }
+  const store = fakeStore()
+  const collector = createTrafficCollector({ store, fetchImpl, now: () => at })
+  await collector.poll()
+  await collector.poll()
+  const nodeKeys = Object.keys(pendingOf(collector)).filter((k) => k.includes('|node|')).map((k) => k.split('|')[2])
+  assert.ok(nodeKeys.includes('香港-01'), JSON.stringify(nodeKeys))
+  assert.ok(!nodeKeys.some((k) => k.startsWith('__fo:')))
+  assert.equal(calls.filter((u) => u === '/proxies').length, 1, '已经见过的连接不再为它多问 /proxies:用 30 秒内的那份表就能解析')
+})
+
+test('普通自动测速组（新加坡-自动）当了 chains[0] 也归到它此刻选中的节点;选中项还是组就继续下钻;组表 30 秒内复用', async () => {
+  const { resolveLeaf } = await import('./traffic-collector.mjs')
+  const proxies = {
+    '新加坡-自动': { type: 'URLTest', now: '牛逼-新加坡-01', all: ['牛逼-新加坡-01', '牛逼-新加坡-02'] },
+    '国外': { type: 'Selector', now: '新加坡-自动', all: ['新加坡-自动', '直连'] },
+    '空组': { type: 'URLTest', now: '', all: [] },
+    '牛逼-新加坡-01': { type: 'Shadowsocks' },
+  }
+  assert.equal(resolveLeaf(['新加坡-自动', '国外'], proxies), '牛逼-新加坡-01')
+  assert.equal(resolveLeaf(['国外'], proxies), '牛逼-新加坡-01', '选中项还是组就继续下钻')
+  assert.equal(resolveLeaf(['空组', '国外'], proxies), '空组', '没成员就原样')
+  assert.equal(resolveLeaf(['牛逼-新加坡-01', '新加坡-自动'], proxies), '牛逼-新加坡-01')
+  const calls = []
+  let n = 0
+  const fetchImpl = async (url) => {
+    calls.push(url.replace(/^http:\/\/[^/]+/, ''))
+    if (url.endsWith('/proxies')) return { ok: true, json: async () => ({ proxies }) }
+    n += 1
+    return { ok: true, json: async () => ({ connections: [conn('c1', n * 100, 0, ['新加坡-自动', '国外'])] }) }
+  }
+  const store = fakeStore()
+  const collector = createTrafficCollector({ store, fetchImpl, now: () => at })
+  await collector.poll()
+  await collector.poll()
+  const nodeKeys = Object.keys(pendingOf(collector)).filter((k) => k.includes('|node|')).map((k) => k.split('|')[2])
+  assert.deepEqual([...new Set(nodeKeys)], ['牛逼-新加坡-01'])
+  // 第一轮:建表一次;第二轮:c1 是第一轮就见过的连接,表也还新鲜(30 秒内),直接用它解析,不再为它多问
+  assert.equal(calls.filter((u) => u === '/proxies').length, 1, JSON.stringify(calls))
+})
+
+test('老数据合并长尾:三张按访问目标拆的表用同一份保留名单;「其他」按前一维各并一行;别的行不动;重复跑没有副作用', { skip: !sqlite && '本机 Node 没有 node:sqlite' }, () => {
+  const db = new sqlite.DatabaseSync(':memory:')
+  const store = createTrafficStore(db)
+  const day = '2026-07-01'
+  const T = '\t'
+  // 5 个访问目标,流量 h1 > h2 > h3 > h4 > h5;保留前 2 个
+  const hosts = [['h1.com', 500], ['h2.com', 400], ['h3.com', 30], ['h4.com', 20], ['5.5.5.5', 10]]
+  store.add([
+    { day, kind: 'total', key: '', up: 0, down: 960, conns: 9 },
+    { day, kind: 'client', key: '10.0.0.2', up: 0, down: 700, conns: 5 },
+    { day, kind: 'node', key: '直连', up: 0, down: 60, conns: 3 },
+    { day, kind: 'client_node', key: `10.0.0.2${T}直连`, up: 0, down: 60, conns: 3 },
+    ...hosts.map(([key, down]) => ({ day, kind: 'host', key, up: 1, down, conns: 1 })),
+    // 终端 A 访问 h1 h3 h4;终端 B 访问 h2 h5
+    { day, kind: 'client_host', key: `10.0.0.2${T}h1.com`, up: 0, down: 500, conns: 1 },
+    { day, kind: 'client_host', key: `10.0.0.2${T}h3.com`, up: 0, down: 30, conns: 2 },
+    { day, kind: 'client_host', key: `10.0.0.2${T}h4.com`, up: 0, down: 20, conns: 1 },
+    { day, kind: 'client_host', key: `10.0.0.3${T}h2.com`, up: 0, down: 400, conns: 1 },
+    { day, kind: 'client_host', key: `10.0.0.3${T}5.5.5.5`, up: 0, down: 10, conns: 1 },
+    // 直连走 h3 h4 h5(都在长尾里),代理走 h1 h2
+    { day, kind: 'node_host', key: `直连${T}h3.com`, up: 0, down: 30, conns: 1 },
+    { day, kind: 'node_host', key: `直连${T}h4.com`, up: 0, down: 20, conns: 1 },
+    { day, kind: 'node_host', key: `直连${T}5.5.5.5`, up: 0, down: 10, conns: 1 },
+    { day, kind: 'node_host', key: `节点A${T}h1.com`, up: 0, down: 500, conns: 1 },
+    { day, kind: 'node_host', key: `节点A${T}h2.com`, up: 0, down: 400, conns: 1 },
+    // 小时明细不参与
+    { day: `${day}@08`, kind: 'host', key: 'h5.com', up: 0, down: 1, conns: 1 },
+  ])
+  assert.equal(store.needsCollapse(day, 2), true)
+  assert.equal(store.needsCollapse(day, 4), false, '行数没超过「保留数 + 其他那一行」就不用动')
+  const before = store.daySum(day, 'host')
+  const removed = store.collapseDay(day, 2)
+  assert.equal(removed, 3 + 3 + 3, 'host 3 行 + client_host 3 行 + node_host 3 行')
+
+  assert.deepEqual(store.day(day, 'host', 10).map((r) => [r.key, r.down, r.conns]), [['h1.com', 500, 1], ['h2.com', 400, 1], [TAIL_OTHER_KEY, 60, 3]])
+  const after = store.daySum(day, 'host')
+  assert.deepEqual([after.up, after.down], [before.up, before.down], '合计一个字节不差')
+  // 交叉表:留下的目标原样在;长尾按前一维各并一行
+  assert.deepEqual(store.drill(day, 'client', '10.0.0.2', 'host', 10).rows.map((r) => [r.key, r.down, r.conns]), [['h1.com', 500, 1], [TAIL_OTHER_KEY, 50, 3]])
+  assert.deepEqual(store.drill(day, 'client', '10.0.0.3', 'host', 10).rows.map((r) => [r.key, r.down]), [['h2.com', 400], [TAIL_OTHER_KEY, 10]])
+  assert.deepEqual(store.drill(day, 'node', '直连', 'host', 10).rows.map((r) => [r.key, r.down]), [[TAIL_OTHER_KEY, 60]])
+  assert.deepEqual(store.drill(day, 'node', '节点A', 'host', 10).rows.map((r) => [r.key, r.down]), [['h1.com', 500], ['h2.com', 400]])
+  // 反过来点开「其他」:哪些终端 / 节点构成的
+  assert.deepEqual(store.drill(day, 'host', TAIL_OTHER_KEY, 'client', 10).rows.map((r) => [r.key, r.down]), [['10.0.0.2', 50], ['10.0.0.3', 10]])
+  assert.deepEqual(store.drill(day, 'host', TAIL_OTHER_KEY, 'node', 10).rows.map((r) => [r.key, r.down]), [['直连', 60]])
+  // 「统计直连流量」关掉时的算法:一维的「其他」减掉 直连×其他 = 0,留下的目标不受影响(同一份名单的意义)
+  const direct = new Map(store.drill(day, 'node', '直连', 'host', 10).rows.map((r) => [r.key, r.down]))
+  assert.deepEqual(store.day(day, 'host', 10).map((r) => [r.key, r.down - (direct.get(r.key) || 0)]), [['h1.com', 500], ['h2.com', 400], [TAIL_OTHER_KEY, 0]])
+  // 别的维度、小时明细都没动
+  assert.deepEqual(store.dayTotal(day), { up: 0, down: 960, conns: 9 })
+  assert.equal(store.row(day, 'client', '10.0.0.2').down, 700)
+  assert.equal(store.row(day, 'client_node', `10.0.0.2${T}直连`).down, 60)
+  assert.equal(store.row(`${day}@08`, 'host', 'h5.com').down, 1)
+
+  // 再跑一遍:什么都不删;之后又进来新的长尾行(补写)再并一次,量累加进「其他」
+  assert.equal(store.collapseDay(day, 2), 0)
+  store.add([{ day, kind: 'host', key: 'late.com', up: 0, down: 5, conns: 1 }, { day, kind: 'client_host', key: `10.0.0.2${T}late.com`, up: 0, down: 5, conns: 1 }])
+  assert.equal(store.collapseDay(day, 2), 2)
+  assert.equal(store.row(day, 'host', TAIL_OTHER_KEY).down, 65)
+  assert.equal(store.row(day, 'client_host', `10.0.0.2${T}${TAIL_OTHER_KEY}`).down, 55)
+
+  // usage:早于分界日的日子单独给 oldBytes / oldDays
+  const u = store.usage('2026-08-01')
+  assert.equal(u.oldDays, 1)
+  assert.equal(u.oldBytes, u.dayBytes)
+  assert.equal(store.usage().oldDays, 0)
+})
+
+test('合并长尾的调度:清理时把过线且行数超标的日子排队,之后每个 tick 只做一天;进程起来第一次看整个保留期,平时只看刚过线的几天', () => {
+  const need = new Set(['2026-07-20', '2026-06-01', '2026-08-04'])
+  const asked = []
+  const done = []
+  const logs = []
+  const store = {
+    ...fakeStore(),
+    needsCollapse: (day) => { asked.push(day); return need.has(day) },
+    collapseDay: (day) => { done.push(day); need.delete(day); return 100 },
+  }
+  let today = new Date(2026, 8, 4)
+  const c = createTrafficCollector({ store, now: () => new Date(today), getKeepMonths: () => 3, log: (m) => logs.push(m) })
+  assert.equal(TAIL_COLLAPSE_AFTER_DAYS, 30)
+  assert.equal(TAIL_KEEP_HOSTS, 300)
+  c.prune()
+  // 9 月 4 日往前 30 天是 8 月 5 日:8 月 4 日起更早的才合并;第一次看满 3 个月
+  assert.equal(asked[0], '2026-08-04')
+  assert.ok(asked.length >= 90 && !asked.includes('2026-08-05'), '没过线的日子不碰')
+  assert.equal(c.collapsePending, 3)
+  assert.deepEqual(done, [], '清理时只排队,不干活')
+  c.tick(); assert.deepEqual(done, ['2026-08-04'])
+  c.tick(); c.tick()
+  assert.deepEqual(done, ['2026-08-04', '2026-07-20', '2026-06-01'])
+  assert.equal(c.collapsePending, 0)
+  assert.ok(logs.some((m) => m.includes('3 天') && m.includes('300 行')), '做完记一行汇总')
+  c.tick(); assert.equal(done.length, 3, '队列空了就不再动')
+
+  // 第二天:只看刚过线的 3 天
+  asked.length = 0
+  today = new Date(2026, 8, 5)
+  need.add('2026-08-05')
+  c.tick()
+  assert.deepEqual(asked, ['2026-08-05', '2026-08-04', '2026-08-03'])
+  assert.deepEqual(done.at(-1), '2026-08-05')
+})
+
+test('/proxies 不能被一条活着的长连接拖成每轮都问:表 30 秒刷一次;只有新出现的、末端是组的连接才按需再刷,且最多 10 秒一次;连接的节点第一次解析后记住,组后来改选也不改', async () => {
+  let selected = '香港-01'
+  const proxiesOf = () => ({
+    '香港-自动': { type: 'URLTest', now: selected, all: ['香港-01', '香港-02'] },
+    '香港-01': { type: 'Shadowsocks' },
+    '香港-02': { type: 'Shadowsocks' },
+  })
+  let t = at.getTime()
+  let conns = []
+  const calls = []
+  const fetchImpl = async (url) => {
+    const path = url.replace(/^http:\/\/[^/]+/, '')
+    calls.push(path)
+    if (path === '/proxies') return { ok: true, json: async () => ({ proxies: proxiesOf() }) }
+    return { ok: true, json: async () => ({ connections: conns.map((c) => conn(c.id, c.bytes, 0, ['香港-自动', '国外'])) }) }
+  }
+  const proxiesCalls = () => calls.filter((u) => u === '/proxies').length
+  const store = fakeStore()
+  const collector = createTrafficCollector({ store, fetchImpl, now: () => new Date(t) })
+  const step = async (ms, mutate) => { t += ms; if (mutate) mutate(); for (const c of conns) c.bytes += 100; await collector.poll() }
+
+  conns = [{ id: 'long', bytes: 0 }]
+  await step(0)                                  // 基线:表是空的,问一次
+  assert.equal(proxiesCalls(), 1)
+  for (let i = 0; i < 10; i++) await step(2000)  // 这条长连接活了 20 秒,一直有流量
+  assert.equal(proxiesCalls(), 1, '老问题:以前这 10 轮每轮都会再问一次')
+  await step(12_000)                              // 过了 30 秒:例行刷新
+  assert.equal(proxiesCalls(), 2)
+  // 组改选了 02。紧接着来一条新的组末端连接:离上次刷新才 2 秒,不再问,用手上的表(里面选中的还是 01)
+  selected = '香港-02'
+  await step(2000, () => conns.push({ id: 'soon', bytes: 0 }))
+  assert.equal(proxiesCalls(), 2, '10 秒内不为新连接重复刷')
+  // 再过 12 秒又来一条新的:表已经 14 秒没刷,按需刷一次,拿到此刻选中的 02
+  await step(12_000, () => conns.push({ id: 'later', bytes: 0 }))
+  assert.equal(proxiesCalls(), 3)
+  for (let i = 0; i < 5; i++) await step(2000)
+  assert.equal(proxiesCalls(), 3, '之后这三条连接都见过了,不再为它们刷')
+
+  const rows = pendingOf(collector)
+  const node = (name) => Object.entries(rows).filter(([k]) => k.startsWith(`${localDay(at)}|node|${name}`)).reduce((n, [, v]) => n + v.down + v.up, 0)
+  assert.ok(node('香港-01') > 0 && node('香港-02') > 0)
+  assert.ok(!Object.keys(rows).some((k) => k.includes('|node|香港-自动')), '没有记到组名下')
+  // long 是 01 时建立的:组改选之后它的流量仍然记在 01;later 建立时选中的是 02
+  assert.equal(node('香港-02'), 100 * 6, 'later 自己的 6 轮增量(出现那一轮 + 之后 5 轮)')
+})
+

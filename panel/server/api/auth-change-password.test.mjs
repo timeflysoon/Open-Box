@@ -50,7 +50,7 @@ const extractCookie = (res) => {
   return match ? match[0] : ''
 }
 
-test('未设密时:POST /api/auth/change-password → 409(不是通用守卫的 403)', async () => {
+test('未设密时:POST /api/auth/change-password → 409（不是通用守卫的 403）', async () => {
   const res = await postJson('/api/auth/change-password', {
     currentPassword: 'whatever',
     newPassword: 'new-secret-1',
@@ -88,7 +88,7 @@ test('newPassword 长度 < 4 → 400,密码未被更改', async () => {
   assert.equal(loginRes.status, 200)
 })
 
-test('改密成功:旧密码登录失败、新密码登录成功、当前会话续上(重新签发 cookie)', async () => {
+test('改密成功:旧密码登录失败、新密码登录成功、当前会话续上（重新签发 cookie）', async () => {
   const setupRes = await postJson('/api/auth/setup', { password: 'original-password-1' })
   const oldCookie = extractCookie(setupRes)
   assert.ok(oldCookie, 'setup 应签发 cookie')
@@ -122,7 +122,7 @@ test('改密成功:旧密码登录失败、新密码登录成功、当前会话�
   assert.equal(newCookieCheck.status, 200)
 })
 
-test('登录暴力破解防护:同一来源连续 5 次错密码后被锁,正确密码也要等锁过期(429 + retryAfter)', async () => {
+test('登录暴力破解防护:同一来源连续 5 次错密码后被锁,正确密码也要等锁过期（429 + retryAfter）', async () => {
   await postJson('/api/auth/setup', { password: 'original-password-1' })
   for (let i = 0; i < 5; i++) {
     const r = await postJson('/api/auth/login', { password: 'wrong-' + i })

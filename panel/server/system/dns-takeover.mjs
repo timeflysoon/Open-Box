@@ -8,10 +8,11 @@
 // 三个持久化文件(都在 data/ 下):
 //   dnsmasq-backup.txt    接管前用户的 DNS 设置(uci show 形态),还原 / stop 的依据——它是"用户基线"
 //   dnsmasq-takeover.txt  这次写了什么:第一行 plan=,后面 server= / forward= / noresolv=1,init 脚本开机照抄
-//   dnsmasq-forward.conf  domains 的转发条目 + DNS 重写的 rebind 例外(all 也可能有例外),开机重放
+//   dnsmasq-forward.conf  domains 的转发条目 + DNS 重写的 rebind 例外(all 也可能有例外)+ 查询日志那两行,开机重放
 import { dnsmasqSafeDomain } from '../engine/dns-names.mjs'
 import { normalizeDomain } from '../engine/dns-rewrite.mjs'
 import { forwardConfText } from './dns-forward.mjs'
+import { DNSMASQ_QUERY_LOG_PATH, queryLogConfText } from './dnsmasq-query-log.mjs'
 
 export { dnsmasqSafeDomain }
 
@@ -63,7 +64,7 @@ const parseBackup = (text) => {
 // 就不存在时它们也返回非零,那是幂等的正常情况,不是故障。
 const must = async (ctx, cmd, args, what) => {
   const r = await ctx.exec(cmd, args)
-  if (r.code !== 0) throw new Error(`${what} 失败(code ${r.code}):${String(r.stderr || r.stdout || '').trim() || '闪存可能已写满'}`)
+  if (r.code !== 0) throw new Error(`${what} 失败（code ${r.code}）:${String(r.stderr || r.stdout || '').trim() || '闪存可能已写满'}`)
   return r
 }
 
@@ -151,8 +152,61 @@ const removeInstalledForward = async (ctx) => {
   return had
 }
 
-export const applyDnsTakeover = async (ctx, paths, { mode, forwardDomains = [], forward, rewriteSources = [] } = {}) => {
-  if (mode !== 'dnsmasq') return { changed: false, actions: [], effective: { mode: 'none', domains: [], reason: '' } }
+// dnsmasq 查询日志(system/dnsmasq-query-log.mjs;「域名解析查询」认终端用):受管文件里写上那两行,dnsmasq 就把日志写进
+// DNSMASQ_QUERY_LOG_PATH。用户自己在 uci 里开了查询日志或改了日志位置就不接管(reason 'user'),免得把他的 logread 搬走
+const QUERY_LOG_OFF = Object.freeze({ active: false, reason: '' })
+// dnsmasq 已经有别处设了日志去向 / 查询日志:uci 选项,或者 dnsmasq 会读的配置文件——固件自带的 /etc/dnsmasq.conf、init 脚本
+// 生成的 /var/etc/dnsmasq.conf.*、conf-dir 里别的文件。dnsmasq 2.9x 见到重复的 log-facility 直接拒绝启动(illegal repeated
+// keyword),DNS 和 DHCP 一起停(GitHub #286:dnsmasq-full 自带的 /etc/dnsmasq.conf 里就有 log-facility=/dev/null,v0.1.259~261
+// 开着域名过滤的 dnsmasq 转发模式全断网)。openwrt/initd/openbox 的 openbox_dnsmasq_logging_conflict 是同一个判断
+// 返回 { user, syslog }:user = 别处设了日志去向 / 查询日志;syslog = 查询日志开着、而且写进系统日志(没设 log-facility,或设的
+// 是 syslog 的设施名而不是文件 / 标准错误)——这时面板改读 logread 认终端(system/dnsmasq-query-log.mjs,#322)
+export const userDnsmasqLogging = async (ctx) => {
+  const get = async (key) => String((await ctx.exec('uci', ['-q', 'get', `dhcp.@dnsmasq[0].${key}`])).stdout || '').trim()
+  let queries = (await get('logqueries')) === '1'
+  let facility = await get('logfacility')
+  const confDir = await dnsmasqConfDir(ctx)
+  const r = await ctx.exec('sh', ['-c', `grep -sHE '^[[:space:]]*log-(facility|queries)([[:space:]=]|$)' /etc/dnsmasq.conf /var/etc/dnsmasq.conf* "$1"/* 2>/dev/null; true`, 'sh', confDir])
+  let found = false
+  for (const raw of String(r.stdout || '').split('\n')) {
+    const i = raw.indexOf(':')
+    if (i < 0) continue
+    const file = raw.slice(0, i).trim()
+    if (!file || file.endsWith(`/${DNS_FORWARD_CONF_NAME}`)) continue
+    const line = raw.slice(i + 1).trim()
+    found = true
+    if (/^log-queries\b/.test(line)) queries = true
+    const m = /^log-facility\s*=\s*(\S+)/.exec(line)
+    if (m && !facility) facility = m[1]
+  }
+  const user = queries || facility !== '' || found
+  return { user, syslog: user && queries && !/^[/-]/.test(facility) }
+}
+// 加上查询日志那两行后 dnsmasq 没起来(别的没料到的原因):自动撤掉并记在这里,之后部署 / 热切换都不再加——不然每次都
+// 断一下网。init 脚本开机重放时发现同样的情况也写它
+export const queryLogFailedPath = (paths) => `${paths.dataDir}/dnsmasq-query-log.failed`
+// 重启后 dnsmasq 是不是真的起来了:配置有错时它一启动就退出,procd 隔几秒再拉,拉起来又退——轮询几次,有两次以上
+// 看不到 dnsmasq 进程就算没起来
+const dnsmasqStaysUp = async (ctx, { polls = 6, intervalMs = 500 } = {}) => {
+  let misses = 0
+  for (let i = 0; i < polls; i++) {
+    await ctx.sleep(intervalMs)
+    if ((await ctx.exec('pidof', ['dnsmasq'])).code !== 0) misses++
+  }
+  return misses < 2
+}
+// 重启 dnsmasq 之前:日志文件还不在就建一个空的普通文件——部署是面板做的,面板几秒内就读起来(dnsmasq 启动那几行也留得住,
+// 转进系统日志)。已经在的(面板在读的普通文件、面板停着时指向 /dev/null 的软链接)不动。开机那条路由 init 脚本先指向 /dev/null
+const ensureQueryLogFile = async (ctx) => {
+  if (await ctx.exists(DNSMASQ_QUERY_LOG_PATH)) return
+  await ctx.mkdirp(DNSMASQ_QUERY_LOG_PATH.slice(0, DNSMASQ_QUERY_LOG_PATH.lastIndexOf('/')))
+  await ctx.writeFile(DNSMASQ_QUERY_LOG_PATH, '')
+}
+// dnsmasq 已经按不带日志那两行的配置重启过(或者本来就没带):日志文件没人写了,拿掉
+const removeQueryLog = async (ctx) => { await ctx.remove(DNSMASQ_QUERY_LOG_PATH) }
+
+export const applyDnsTakeover = async (ctx, paths, { mode, forwardDomains = [], forward, rewriteSources = [], queryLog = false } = {}) => {
+  if (mode !== 'dnsmasq') return { changed: false, actions: [], effective: { mode: 'none', domains: [], reason: '' }, queryLog: QUERY_LOG_OFF }
   // 计划(engine/routing-model.mjs + system/dns-forward.mjs 展开过的)优先;老调用方只传名单时按老语义折算
   let plan = forward && typeof forward === 'object'
     ? forward
@@ -176,6 +230,38 @@ export const applyDnsTakeover = async (ctx, paths, { mode, forwardDomains = [], 
     else if (!(plan.domains || []).length) plan = { mode: 'none', domains: [], reason: '转发名单是空的,按全部直连处理' }
   }
   const effective = { mode: plan.mode, domains: plan.mode === 'domains' ? plan.domains : [], reason: plan.reason || '' }
+  // 查询日志只在 dnsmasq 真往内核转的时候有用(none 一个都不转)
+  let logState = QUERY_LOG_OFF
+  if (queryLog && plan.mode !== 'none' && paths.platform !== 'systemd') {
+    if (await ctx.exists(queryLogFailedPath(paths))) logState = { active: false, reason: 'failed' }
+    else {
+      const logging = await userDnsmasqLogging(ctx)
+      logState = logging.user ? { active: false, reason: 'user', ...(logging.syslog ? { syslog: true } : {}) } : { active: true, reason: '' }
+    }
+  }
+  const logText = logState.active ? queryLogConfText() : ''
+  // 带着查询日志那两行重启 dnsmasq:没起来就撤掉那两行、再重启一次,记下失败(见 queryLogFailedPath)。plain 是不带那两行的受管文件正文
+  const restartDnsmasq = async (installed, plain) => {
+    await must(ctx, '/etc/init.d/dnsmasq', ['restart'], 'dnsmasq 重启')
+    if (logText && !(await dnsmasqStaysUp(ctx))) await rollbackQueryLog(installed, plain)
+  }
+  // 受管文件没变、不用重启:dnsmasq 此刻根本没在跑(上一版加上那两行就没起来过),照样撤掉
+  const checkRunning = async (installed, plain) => {
+    if (logText && (await ctx.exec('pidof', ['dnsmasq'])).code !== 0 && !(await dnsmasqStaysUp(ctx))) await rollbackQueryLog(installed, plain)
+  }
+  const rollbackQueryLog = async (installed, plain) => {
+    if (plain) {
+      await ctx.writeFile(installed, plain)
+      await ctx.writeFile(dnsForwardFilePath(paths), plain)
+    } else {
+      await removeInstalledForward(ctx)
+      if (await ctx.exists(dnsForwardFilePath(paths))) await ctx.remove(dnsForwardFilePath(paths))
+    }
+    await must(ctx, '/etc/init.d/dnsmasq', ['restart'], 'dnsmasq 重启')
+    await removeQueryLog(ctx)
+    await ctx.writeFile(queryLogFailedPath(paths), `dnsmasq 加上查询日志(log-queries / log-facility)后起不来,已自动去掉 ${new Date().toISOString()}\n`)
+    logState = { active: false, reason: 'failed' }
+  }
   // 用户显式启用的重写答案应能交回终端:固定地址、以及 CNAME 目标最终都可能是内网地址。
   // 只豁免这些源域名,不关闭全局 rebind 保护,也不改用户的 uci rebind_domain 列表。
   // dnsmasq 2.90 的 rebind 例外不支持 *. 通配符,用完整标签后缀;根域也会豁免重绑定检查,
@@ -196,24 +282,28 @@ export const applyDnsTakeover = async (ctx, paths, { mode, forwardDomains = [], 
       await must(ctx, 'uci', ['commit', 'dhcp'], 'uci commit dhcp')
     }
     if (!uciSame || removed) await must(ctx, '/etc/init.d/dnsmasq', ['restart'], 'dnsmasq 重启')
+    await removeQueryLog(ctx)
     // 还原到位 = 不再接管:备份消费掉(init 的 stop 看到没有备份就不动 dnsmasq),状态记 none
     if (hadBackup) await ctx.remove(bp)
     await ctx.writeFile(dnsTakeoverStatePath(paths), stateTextFor('none'))
-    return { changed: !uciSame || removed, actions: [!uciSame || removed ? 'restore:none' : 'none'], effective }
+    return { changed: !uciSame || removed, actions: [!uciSame || removed ? 'restore:none' : 'none'], effective, queryLog: logState }
   }
 
   // ---------- domains:uci = 用户基线原样;转发文件进 conf-dir ----------
   if (plan.mode === 'domains') {
-    const text = forwardConfText(plan.domains) + rebindText
+    const text = forwardConfText(plan.domains) + rebindText + logText
     const installed = await installedForwardPath(ctx)
     const confSame = (await ctx.exists(installed)) && (await ctx.readFile(installed)) === text
     const target = { servers: baseline.servers, noresolv: baseline.noresolv }
     const uciSame = sameUci(current, target)
     const stateText = stateTextFor('domains', { forward: installed, noresolv: target.noresolv })
     await ctx.writeFile(dnsForwardFilePath(paths), text)
+    if (logText) await ensureQueryLogFile(ctx)
     if (confSame && uciSame) {
+      await checkRunning(installed, forwardConfText(plan.domains) + rebindText)
+      if (!logText) await removeQueryLog(ctx)
       await ctx.writeFile(dnsTakeoverStatePath(paths), stateText)
-      return { changed: false, actions: ['unchanged'], effective }
+      return { changed: false, actions: ['unchanged'], effective, queryLog: logState }
     }
     if (!confSame) {
       await ctx.mkdirp(installed.slice(0, installed.lastIndexOf('/')))
@@ -224,39 +314,45 @@ export const applyDnsTakeover = async (ctx, paths, { mode, forwardDomains = [], 
       // 闪存写满时 commit 静默失败,dnsmasq 重启后还是旧配置——不能报"部署成功"
       await must(ctx, 'uci', ['commit', 'dhcp'], 'uci commit dhcp')
     }
-    await must(ctx, '/etc/init.d/dnsmasq', ['restart'], 'dnsmasq 重启')
+    await restartDnsmasq(installed, forwardConfText(plan.domains) + rebindText)
+    if (!logText) await removeQueryLog(ctx)
     await ctx.writeFile(dnsTakeoverStatePath(paths), stateText)
-    return { changed: true, actions: ['backup', 'set-per-domain', 'restart-dnsmasq'], effective }
+    return { changed: true, actions: ['backup', 'set-per-domain', 'restart-dnsmasq'], effective, queryLog: logState }
   }
 
-  // ---------- all:上游只剩内核,noresolv=1;受管文件只保留重写的 rebind 例外 ----------
+  // ---------- all:上游只剩内核,noresolv=1;受管文件只放重写的 rebind 例外和查询日志那两行 ----------
   const installed = await installedForwardPath(ctx)
+  const managedText = rebindText + logText
   let confChanged = false
-  if (rebindText) {
-    confChanged = !(await ctx.exists(installed)) || (await ctx.readFile(installed)) !== rebindText
-    await ctx.writeFile(dnsForwardFilePath(paths), rebindText)
+  if (managedText) {
+    confChanged = !(await ctx.exists(installed)) || (await ctx.readFile(installed)) !== managedText
+    await ctx.writeFile(dnsForwardFilePath(paths), managedText)
     if (confChanged) {
       await ctx.mkdirp(installed.slice(0, installed.lastIndexOf('/')))
-      await ctx.writeFile(installed, rebindText)
+      await ctx.writeFile(installed, managedText)
     }
   } else {
     confChanged = await removeInstalledForward(ctx)
     if (await ctx.exists(dnsForwardFilePath(paths))) await ctx.remove(dnsForwardFilePath(paths))
   }
+  if (logText) await ensureQueryLogFile(ctx)
   const target = { servers: [SINGBOX_DNS_UPSTREAM], noresolv: '1' }
   const stateText = stateTextFor('all', { servers: target.servers, noresolv: '1' })
   const uciSame = sameUci(current, target)
   if (uciSame && !confChanged) {
+    await checkRunning(installed, rebindText)
+    if (!logText) await removeQueryLog(ctx)
     await ctx.writeFile(dnsTakeoverStatePath(paths), stateText)
-    return { changed: false, actions: ['unchanged'], effective }
+    return { changed: false, actions: ['unchanged'], effective, queryLog: logState }
   }
   if (!uciSame) {
     await writeUci(ctx, target)
     await must(ctx, 'uci', ['commit', 'dhcp'], 'uci commit dhcp')
   }
-  await must(ctx, '/etc/init.d/dnsmasq', ['restart'], 'dnsmasq 重启')
+  await restartDnsmasq(installed, rebindText)
+  if (!logText) await removeQueryLog(ctx)
   await ctx.writeFile(dnsTakeoverStatePath(paths), stateText)
-  return { changed: true, actions: ['backup', 'set-upstream', 'restart-dnsmasq'], effective }
+  return { changed: true, actions: ['backup', 'set-upstream', 'restart-dnsmasq'], effective, queryLog: logState }
 }
 
 // 还原到接管前(切到别的 DNS 模式、部署失败回滚):按备份重建 uci、拿掉转发文件、删状态文件
@@ -265,6 +361,8 @@ export const restoreDnsTakeover = async (ctx, paths) => {
   const sp = dnsTakeoverStatePath(paths)
   if (await ctx.exists(sp)) await ctx.remove(sp)
   if (await ctx.exists(dnsForwardFilePath(paths))) await ctx.remove(dnsForwardFilePath(paths))
+  // Debian / Ubuntu 上没有 dnsmasq 接管这回事(system/platform.mjs):没有 uci 可还原,也不能去重启 dnsmasq
+  if (paths.platform === 'systemd') return { restored: true }
   await removeInstalledForward(ctx)
   const hasBackup = await ctx.exists(bp)
   try {
@@ -283,6 +381,7 @@ export const restoreDnsTakeover = async (ctx, paths) => {
     }
     await must(ctx, 'uci', ['commit', 'dhcp'], 'uci commit dhcp')
     await must(ctx, '/etc/init.d/dnsmasq', ['restart'], 'dnsmasq 重启')
+    await removeQueryLog(ctx)
   } catch (error) {
     // 没提交成功的改动不能留在 uci 暂存区——下一个不相干的 commit dhcp 会把半截改动一起带进闪存
     await ctx.exec('uci', ['-q', 'revert', 'dhcp'])

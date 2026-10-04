@@ -7,5 +7,12 @@
     "ws": "8.19.0",
     "yaml": "2.8.2"
   },
-  "packageManager": "pnpm@10.15.0"
+  "packageManager": "pnpm@10.15.0",
+  "devDependencies": {},
+  "optionalDependencies": {},
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
+  }
 }

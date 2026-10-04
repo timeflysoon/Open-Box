@@ -31,7 +31,7 @@ const ctxWith = (files) => ({
   readFile: async (p) => files[p],
 })
 
-test('优先读 resolv.conf.auto —— 那里才是 WAN 下发的上游', async () => {
+test('优先读 resolv.conf.auto —— 那里才是系统的上游(所有接口的:WAN 口下发、DHCP 分配、手动指定)', async () => {
   const ctx = ctxWith({
     '/tmp/resolv.conf.d/resolv.conf.auto': 'nameserver 192.168.1.1\n',
     '/etc/resolv.conf': 'nameserver 127.0.0.1\n',
@@ -39,7 +39,7 @@ test('优先读 resolv.conf.auto —— 那里才是 WAN 下发的上游', async
   assert.deepEqual(await readSystemDns(ctx), ['192.168.1.1'])
 })
 
-test('auto 文件里只有回环时继续往下试,最终拿不到就返回空(调用方回落到档案里的值)', async () => {
+test('auto 文件里只有回环时继续往下试,最终拿不到就返回空（调用方回落到档案里的值）', async () => {
   const ctx = ctxWith({
     '/tmp/resolv.conf.d/resolv.conf.auto': 'nameserver 127.0.0.1\n',
     '/etc/resolv.conf': 'nameserver 127.0.0.1\n',
@@ -62,4 +62,19 @@ test('丢掉链路本地 / 带 zone / 不是 IP 的 nameserver:fe80::1%wan6 会�
     'nameserver not-an-ip',
   ].join('\n')
   assert.deepEqual(parseResolvConf(text), ['211.139.29.150', '2409:8000::1'])
+})
+
+test('systemd-resolved 的机器:/etc/resolv.conf 只有 127.0.0.53 stub,真正的上游在 /run/systemd/resolve/resolv.conf', async () => {
+  const ctx = ctxWith({
+    '/run/systemd/resolve/resolv.conf': 'nameserver 192.168.3.1\nnameserver 223.5.5.5\n',
+    '/etc/resolv.conf': 'nameserver 127.0.0.53\noptions edns0 trust-ad\n',
+  })
+  assert.deepEqual(await readSystemDns(ctx), ['192.168.3.1', '223.5.5.5'])
+})
+
+test('内核自己的地址不算上游:tun 起来后 resolved 会把 172.19.0.2 写进 resolv.conf 第一行,读回来就是自环', () => {
+  assert.deepEqual(parseResolvConf('nameserver 172.19.0.2\nnameserver 192.168.3.1\n'), ['192.168.3.1'])
+  assert.deepEqual(parseResolvConf('nameserver 198.19.0.22\nnameserver fdfe:dcba:9876::2\nnameserver fc00::1\nnameserver 223.5.5.5\n'), ['223.5.5.5'])
+  // 172.19.0.4 起不是 tun 网段,是别人的私网地址,照常可用
+  assert.deepEqual(parseResolvConf('nameserver 172.19.0.4\n'), ['172.19.0.4'])
 })
