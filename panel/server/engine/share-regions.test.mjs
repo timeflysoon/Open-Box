@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import test from 'node:test'
-import { DEFAULT_SHARE_REGIONS, SHARE_REGIONS_DEFAULT_FILE, effectiveShareRegions, shareRegionsVersion, validateShareRegions } from './share-regions.mjs'
+import {
+  DEFAULT_SHARE_REGIONS, SHARE_REGIONS_DEFAULT_FILE, effectiveShareRegions, normalizeShareGroup, shareRegionsVersion, validateShareRegions,
+} from './share-regions.mjs'
 
 // 默认三组只有一份:客户端内置的 clients/core/regions-default.json。面板这份是拷贝(发布包里没有 clients/),一字不差
 // 只打包面板的检出里没有 clients/(比如发版用的 worktree),那就没得比,跳过
@@ -15,10 +17,10 @@ test('panel default share regions are an exact copy of the clients default', { s
 test('default groups pass validation; empty list means back to defaults', () => {
   assert.equal(validateShareRegions(structuredClone(DEFAULT_SHARE_REGIONS)), null)
   assert.equal(validateShareRegions([]), null)
-  assert.equal(effectiveShareRegions({}), DEFAULT_SHARE_REGIONS)
-  assert.equal(effectiveShareRegions({ shareRegions: [] }), DEFAULT_SHARE_REGIONS)
+  assert.deepEqual(effectiveShareRegions({}), DEFAULT_SHARE_REGIONS)
+  assert.deepEqual(effectiveShareRegions({ shareRegions: [] }), DEFAULT_SHARE_REGIONS)
   const custom = [{ ...structuredClone(DEFAULT_SHARE_REGIONS[2]) }]
-  assert.equal(effectiveShareRegions({ shareRegions: custom }), custom)
+  assert.deepEqual(effectiveShareRegions({ shareRegions: custom }), custom)
   assert.notEqual(shareRegionsVersion(custom), shareRegionsVersion(DEFAULT_SHARE_REGIONS))
 })
 
@@ -33,11 +35,67 @@ test('validation rejects malformed groups', () => {
     ['bad region code', base().map((g, i) => (i === 0 ? { ...g, regions: ['cn'] } : g))],
     ['bad catchAll', base().map((g, i) => (i === 0 ? { ...g, catchAll: 'block' } : g))],
     ['bad resolver', base().map((g, i) => (i === 0 ? { ...g, dns: { directResolver: 'dns.example' } } : g))],
+    ['bad direct dns', base().map((g, i) => (i === 0 ? { ...g, dns: { ...g.dns, direct: 'dns.example' } } : g))],
+    ['bad proxy port', base().map((g, i) => (i === 0 ? { ...g, dns: { ...g.dns, proxyPort: 70000 } } : g))],
+    ['too many backups', base().map((g, i) => (i === 0 ? { ...g, dns: { ...g.dns, directExtras: ['1.0.0.1', '8.8.8.8', '9.9.9.9', '223.6.6.6'].map((server) => ({ server, protocol: 'udp', port: 53 })) } } : g))],
+    ['duplicate upstream', base().map((g, i) => (i === 0 ? { ...g, dns: { ...g.dns, proxyExtras: [{ server: '1.1.1.1', protocol: 'udp', port: 53 }] } } : g))],
+    ['system DNS on the proxy side in Mainland China', base().map((g, i) => (i === 0 ? { ...g, dns: { ...g.dns, proxy: 'wan' } } : g))],
+    ['description too long', base().map((g, i) => (i === 0 ? { ...g, description: 'x'.repeat(121) } : g))],
+    ['default not boolean', base().map((g, i) => (i === 0 ? { ...g, default: 'yes' } : g))],
     ['bad rule type', base().map((g, i) => (i === 0 ? { ...g, rules: [{ type: 'regex', value: '.*', action: 'direct' }] } : g))],
     ['bad cidr', base().map((g, i) => (i === 0 ? { ...g, rules: [{ type: 'ipcidr', value: '10.0.0.0/33', action: 'direct' }] } : g))],
     ['bad geo name', base().map((g, i) => (i === 0 ? { ...g, rules: [{ type: 'geosite', value: '../etc', action: 'direct' }] } : g))],
     ['no name', base().map((g, i) => (i === 0 ? { ...g, name: {} } : g))],
+    ['blank name', base().map((g, i) => (i === 0 ? { ...g, name: '  ' } : g))],
+    ['name too long', base().map((g, i) => (i === 0 ? { ...g, name: '名'.repeat(31) } : g))],
   ]
   for (const [label, value] of cases) assert.ok(validateShareRegions(value), label)
   assert.equal(validateShareRegions(base().map((g, i) => (i === 0 ? { ...g, rules: [{ type: 'ipcidr', value: '10.1.2.3', action: 'direct' }] } : g))), null)
 })
+
+test('一组:名字一个字符串 + 说明;DNS 和路由器的 DNS 上游同一个形状,默认值按这一组有没有中国大陆', () => {
+  const [cn, hkmo, other] = DEFAULT_SHARE_REGIONS
+  assert.equal(cn.name, '中国大陆')
+  assert.ok(cn.description)
+  assert.deepEqual(cn.dns, { direct: 'wan', directProtocol: 'udp', directPort: 53, directExtras: [], proxy: '1.1.1.1', proxyProtocol: 'tcp', proxyPort: 53, proxyExtras: [] })
+  for (const g of [hkmo, other]) assert.equal(g.dns.proxy, 'wan', g.id)
+  // 中国大陆之外的组代理侧可以用系统 DNS;备用上游照收
+  const ok = structuredClone(DEFAULT_SHARE_REGIONS)
+  ok[2].dns.directExtras = [{ server: '1.1.1.1', protocol: 'tcp', port: 53 }]
+  assert.equal(validateShareRegions(ok), null)
+})
+
+test('老写法照收:多语种名字取简体 → 繁体 → 英文,directResolver 换成直连上游,代理侧按地区给默认', () => {
+  const legacy = { id: 'x', name: { 'zh-TW': '中國大陸', en: 'Mainland' }, regions: ['CN'], rules: [], catchAll: 'proxy', dns: { directResolver: '223.5.5.5' } }
+  const g = normalizeShareGroup(legacy)
+  assert.equal(g.name, '中國大陸')
+  assert.equal(g.description, '')
+  assert.deepEqual(g.dns, { direct: '223.5.5.5', directProtocol: 'udp', directPort: 53, directExtras: [], proxy: '1.1.1.1', proxyProtocol: 'tcp', proxyPort: 53, proxyExtras: [] })
+  assert.equal(normalizeShareGroup({ ...legacy, regions: [], dns: { directResolver: '' } }).dns.proxy, 'wan')
+  const other = { id: 'o', name: { en: 'Else' }, regions: [], default: true, rules: [], catchAll: 'direct', dns: { directResolver: '' } }
+  assert.equal(validateShareRegions([legacy, other]), null)
+  assert.equal(effectiveShareRegions({ shareRegions: [legacy, other] })[1].name, 'Else')
+})
+
+test('「在这些地区之外」:至少一个地区;可以列别的组的地区;算不算中国大陆看有没有列中国', () => {
+  const base = () => structuredClone(DEFAULT_SHARE_REGIONS)
+  // 其他地区 = 中国、香港、澳门之外:和前两组的地区不冲突;列了中国就不算中国大陆,代理侧可以用系统 DNS
+  const ok = base()
+  ok[2] = { ...ok[2], regions: ['CN', 'HK', 'MO'], regionMatch: 'outside' }
+  assert.equal(validateShareRegions(ok), null)
+  assert.equal(normalizeShareGroup(ok[2]).regionMatch, 'outside')
+  assert.equal('regionMatch' in normalizeShareGroup(base()[0]), false)
+  // 没列中国:会用在中国大陆,代理侧不能用系统 DNS;默认值也按中国大陆给
+  const noCn = base()
+  noCn[2] = { ...noCn[2], regions: ['HK'], regionMatch: 'outside' }
+  assert.match(validateShareRegions(noCn), /cannot use the system DNS/)
+  assert.equal(normalizeShareGroup({ ...noCn[2], dns: undefined }).dns.proxy, '1.1.1.1')
+  // 一个地区都没有不行;取值只认 inside / outside
+  const empty = base()
+  empty[2] = { ...empty[2], regions: [], regionMatch: 'outside' }
+  assert.match(validateShareRegions(empty), /needs at least one region/)
+  const bad = base()
+  bad[2] = { ...bad[2], regionMatch: 'except' }
+  assert.match(validateShareRegions(bad), /regionMatch/)
+})
+

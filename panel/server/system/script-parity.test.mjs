@@ -152,12 +152,12 @@ test('die 时排空 stdin 必须有时间上限:stdin 是"开着但不来数据"
 test('"请用另一个脚本"的提示必须给出能照抄的完整命令(用户照着敲 install.sh 只会得到 not found)', () => {
   assert.match(
     SCRIPTS['update.sh'],
-    /未检测到现有 Open-Box 安装[\s\S]{0,200}curl -fsSL https:\/\/raw\.githubusercontent\.com\/liandu2024\/Open-Box\/main\/scripts\/install\.sh/,
+    /未检测到现有 Open-Box 安装[\s\S]{0,200}curl -fsSL https:\/\/raw\.githubusercontent\.com\/timeflysoon\/Open-Box\/main\/scripts\/install\.sh/,
     'update.sh 在没装过时要给出完整的安装命令',
   )
   assert.match(
     SCRIPTS['install.sh'],
-    /已存在且包含完整安装[\s\S]{0,260}curl -fsSL https:\/\/raw\.githubusercontent\.com\/liandu2024\/Open-Box\/main\/scripts\/update\.sh/,
+    /已存在且包含完整安装[\s\S]{0,260}curl -fsSL https:\/\/raw\.githubusercontent\.com\/timeflysoon\/Open-Box\/main\/scripts\/update\.sh/,
     'install.sh 在已装过时要给出完整的升级命令',
   )
 })

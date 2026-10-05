@@ -7,7 +7,8 @@
 // 保留端口列表写错 = 用户能把共享网络的服务器开在面板端口上,自己把面板顶掉。
 export const PANEL_PORT_FALLBACK = 2026
 
+// globalThis.process:engine/servers.mjs 引了它,那套代码也打进 App(client-engine,QuickJS 里没有 process),在那边就是回落值
 export const panelPort = () => {
-  const n = Number(process.env.PORT)
+  const n = Number(globalThis.process?.env?.PORT)
   return Number.isInteger(n) && n >= 1 && n <= 65535 ? n : PANEL_PORT_FALLBACK
 }

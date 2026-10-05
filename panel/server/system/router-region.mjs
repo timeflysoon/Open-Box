@@ -17,7 +17,8 @@
 import net from 'node:net'
 import { DEFAULT_DNS_PORT, DEFAULT_PROXY_UPSTREAM, DNS_REGIONS, WAN_UPSTREAM, dnsServerEntry, isWanUpstream } from '../engine/dns-upstream.mjs'
 import { directUpstream } from '../engine/dns.mjs'
-import { ipIndexHas, loadRuleSetIndex } from './ruleset-index.mjs'
+import { effectiveShareRegions } from '../engine/share-regions.mjs'
+import { dropRuleSetIndex, ipIndexHas, loadRuleSetIndex } from './ruleset-index.mjs'
 import { rulesetPath } from './rulesets.mjs'
 import { readSystemDns } from './resolv.mjs'
 import { PROBE_MARK } from './node-probe.mjs'
@@ -180,3 +181,89 @@ export const startRegionDetect = ({ store, ctx, paths, log = () => {}, delayMs =
     runNow: run,
   }
 }
+
+// ---- 出口 IP 在哪个国家 / 地区(设置 · 客户端「路由器标识」的地区,没手动选就按它;用户 2026-10-04)----
+// 按随包的 geoip-xx 一份份查,只认两个字母的(geoip-cloudflare / google / telegram 这类不是国家,不然 Cloudflare 出口的 IP
+// 会被判成 cloudflare)。常见的和地区分流里出现的先查、命中就停;每查完一份就放掉(正式路由器只有 1 GB,一份一次 decompile,
+// 见 system/ruleset-index.mjs 开头)。结果按出口 IP 记在裸键里(本机的,不进档案、不进导出),出口 IP 没变就不再查
+export const EGRESS_COUNTRY_KEY = 'openbox/egress-country'
+export const COMMON_COUNTRIES = Object.freeze(['cn', 'hk', 'tw', 'mo', 'jp', 'sg', 'us', 'kr', 'gb', 'de', 'fr', 'nl', 'ca', 'au', 'ru', 'in', 'my', 'th', 'vn', 'ph', 'id', 'ae', 'tr', 'it', 'es'])
+
+// 随包 geoip 里的国家(规则库清单 manifest.json 的 files);读不到清单就只查常见的
+const geoipCountries = async (ctx, paths) => {
+  try {
+    const manifest = JSON.parse(await ctx.readFile(`${paths.geoDir}/manifest.json`))
+    return Object.keys(manifest.files || {}).map((file) => (/^geoip-([a-z]{2})\.srs$/.exec(file) || [])[1]).filter(Boolean)
+  } catch {
+    return [...COMMON_COUNTRIES]
+  }
+}
+
+// IP 在哪个国家:两位代码(大写);判不出 ''。first:先查的几个(地区分流里出现的)
+export const ipCountry = async ({
+  ctx, paths, ip, first = [],
+  countries = () => geoipCountries(ctx, paths),
+  load = (tag) => loadRuleSetIndex(ctx, paths, tag, rulesetPath(paths, tag)),
+  drop = dropRuleSetIndex,
+}) => {
+  const all = await countries()
+  const order = [...new Set([...first.map((c) => String(c).toLowerCase()), ...COMMON_COUNTRIES, ...all])].filter((c) => all.includes(c))
+  for (const cc of order) {
+    const tag = `geoip-${cc}`
+    const index = await load(tag).catch(() => null)
+    const hit = Boolean(index && index.ip && ipIndexHas(index.ip, ip))
+    drop([tag])
+    if (hit) return cc.toUpperCase()
+  }
+  return ''
+}
+
+// 记下的结果:{ ip, country, at };没有 / 坏了是 null
+export const readEgressCountry = (store) => {
+  try {
+    const value = JSON.parse(store.getRaw(EGRESS_COUNTRY_KEY) || 'null')
+    return value && /^[A-Z]{2}$/.test(value.country) ? value : null
+  } catch {
+    return null
+  }
+}
+
+// 判一次:取出口 IP(和 DNS 判地区同一个 fetchEgressIp);和上次同一个 IP 就用上次的国家,不再查规则集。
+// 回 { country, ip, at }:取不到出口 IP / 查不出时 country 是上次记下的(没有就 '')
+export const detectEgressCountry = async ({
+  store, ctx, paths, platform = process.platform, systemDnsReader = readSystemDns, egressIp = fetchEgressIp, country = ipCountry,
+  now = Date.now, timeoutMs = FETCH_TIMEOUT_MS,
+}) => {
+  const last = readEgressCountry(store)
+  const systemDns = await systemDnsReader(ctx).catch(() => [])
+  const ip = await egressIp({ ctx, paths, profile: store.getProfile() || {}, systemDns, platform, timeoutMs })
+  if (!ip) return { country: last ? last.country : '', ip: '', at: last ? last.at : 0 }
+  if (last && last.ip === ip) {
+    const record = { ...last, at: now() }
+    store.setRaw(EGRESS_COUNTRY_KEY, JSON.stringify(record))
+    return record
+  }
+  const first = effectiveShareRegions(store.getProfile() || {}).flatMap((g) => g.regions || [])
+  const cc = await country({ ctx, paths, ip, first })
+  if (!cc) return { country: last ? last.country : '', ip, at: last ? last.at : 0 }
+  const record = { ip, country: cc, at: now() }
+  store.setRaw(EGRESS_COUNTRY_KEY, JSON.stringify(record))
+  return record
+}
+
+// 启动后在后台判一次(不挡启动):还没判过、或者上次判已经超过一周。判不出就算了,打开「客户端」页签时会再判
+export const startEgressCountryDetect = ({ store, ctx, paths, log = () => {}, delayMs = 60_000, maxAgeMs = 7 * 24 * 3600 * 1000, detect = detectEgressCountry, now = Date.now, platform = process.platform } = {}) => {
+  const last = readEgressCountry(store)
+  if (last && now() - last.at < maxAgeMs) return null
+  const timer = setTimeout(async () => {
+    try {
+      const r = await detect({ store, ctx, paths, platform })
+      if (r.country) log(`[egress-country] 出口 IP ${r.ip || '(取不到)'} → ${r.country}`)
+    } catch (error) {
+      log(`[egress-country] 没判出出口国家:${error instanceof Error ? error.message : String(error)}`)
+    }
+  }, delayMs)
+  if (timer.unref) timer.unref()
+  return { stop: () => clearTimeout(timer) }
+}
+

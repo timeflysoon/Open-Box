@@ -1023,6 +1023,57 @@ test('refresh 期间只改了自动更新开关 → 刷新照常写节点,开关
   }
 })
 
+test('refresh 拉到的新节点和节点组同名 → 这次不存、报清楚是谁和谁撞了,旧节点照用(PM 2026-10-04:遇到重名不能保存)', async () => {
+  const { fetchImpl, release } = deferredFetch()
+  const { baseUrl, store, close } = await startApp(fetchImpl)
+  try {
+    release()
+    const created = await (await postJson(baseUrl, '/api/openbox/subscriptions', { url: 'http://a', name: '机场' })).json()
+    const before = JSON.stringify(store.getNodes())
+    const tags = store.getNodes().map((n) => n.tag)
+    // 之后有人建了一个和其中一个节点同名的节点组;再刷新,机场给的还是这两个节点
+    store.setGroups([...store.getGroups(), { id: 'g-x', name: tags[0], type: 'selector', mode: 'static', members: [] }])
+    const again = deferredFetch()
+    again.release()
+    const { refreshSubscriptionById } = await import('./subscriptions.mjs')
+    await assert.rejects(
+      refreshSubscriptionById(store, created.id, { fetchImpl: again.fetchImpl, lookup: fakePublicLookup }),
+      { message: new RegExp(`^订阅「机场」更新后的节点「${tags[0]}」和节点组同名,这次更新没有保存`) },
+    )
+    assert.equal(JSON.stringify(store.getNodes()), before)
+  } finally {
+    await close()
+  }
+})
+
+test('新建 / 改订阅后的节点和节点组同名 → 不存,说清是谁和谁撞了(PM 2026-10-04:遇到重名不能保存)', async () => {
+  const { fetchImpl, release } = deferredFetch()
+  const { baseUrl, store, close } = await startApp(fetchImpl)
+  try {
+    release()
+    // 先有一个和机场节点同名的节点组,再新建订阅:不存
+    store.setGroups([...store.getGroups(), { id: 'g-x', name: '香港-01', type: 'selector', mode: 'static', members: [] }])
+    const created = await postJson(baseUrl, '/api/openbox/subscriptions', { url: 'http://a', name: '机场' })
+    assert.equal(created.status, 400)
+    assert.match((await created.json()).error, /^订阅「机场」的节点「香港-01」和节点组同名,没有保存/)
+    assert.equal(store.getSubscriptions().length, 0)
+    assert.equal(store.getNodes().length, 0)
+    // 改个组名就能建;之后用改名规则把一个节点改成和组同名:不存,节点不动
+    store.setGroups(store.getGroups().map((g) => (g.id === 'g-x' ? { ...g, name: '我的组' } : g)))
+    const ok = await (await postJson(baseUrl, '/api/openbox/subscriptions', { url: 'http://a', name: '机场' })).json()
+    const before = JSON.stringify(store.getNodes())
+    const patched = await fetch(`${baseUrl}/api/openbox/subscriptions/${ok.id}`, {
+      method: 'PATCH', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ renameOptions: { overrides: { 'HK-01': '我的组' } } }),
+    })
+    assert.equal(patched.status, 400)
+    assert.match((await patched.json()).error, /^订阅「机场」的节点「我的组」和节点组同名,没有保存/)
+    assert.equal(JSON.stringify(store.getNodes()), before)
+  } finally {
+    await close()
+  }
+})
+
 test('refresh 期间改了名字或来源 → 这次结果作废（报错、节点不动）,新名字和新来源保留', async () => {
   const { fetchImpl, release } = deferredFetch()
   const { baseUrl, store, close } = await startApp(fetchImpl)

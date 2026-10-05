@@ -4,6 +4,7 @@ import { applyHotFlip, fetchSelections, resolveSelections, runExclusive } from '
 import { readJsonFile, writeJsonFile, readMeta, fetchLatestVersion, compareVersions, startUpdate, readUpdateStatus } from './updater.mjs'
 import { serviceStatus } from './service.mjs'
 import { refreshSubscriptionById } from '../api/subscriptions.mjs'
+import { subscriptionDue, subscriptionSettled } from '../engine/subscription-schedule.mjs'
 
 const dayKey = (d = new Date()) => `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`
 
@@ -69,38 +70,29 @@ export const runScheduledTasks = async ({ store, ctx, paths, fetchImpl = globalT
     for (const id of Object.keys(subState)) if (!subs.some((s) => s.id === id)) { delete subState[id]; changed = true }
     let poolChanged = false
     for (const sub of subs) {
-      // 停用的订阅不拉(GitHub #40)
-      if (sub.enabled === false) continue
       const plan = sub.autoUpdate
-      if (!plan || plan.enabled !== true) continue
       const st = subState[sub.id] || {}
-      const hourly = plan.mode === 'hours'
-      if (hourly) {
-        // 每隔几小时:从上一次定时拉取算起;还没拉过就从订阅最近一次保存 / 手动更新算,刚添加的订阅
-        // 不用马上再拉一遍。留 1 分钟余量,免得整点那个 tick 差几秒被判成没到
-        const hours = Math.max(1, Number(plan.hours) || 6)
-        const last = st.lastAt ? new Date(st.lastAt) : (sub.updatedAt ? new Date(sub.updatedAt) : null)
-        if (last && now - last < hours * 3600 * 1000 - 60 * 1000) continue
-      } else {
-        if (Number(plan.hour) !== hour) continue
-        if (st.day === today) continue
-        const days = Math.max(1, Number(plan.days) || 1)
-        const last = st.lastAt ? new Date(st.lastAt) : null
-        const due = !last || now - last >= (days - 0.5) * 24 * 3600 * 1000
-        subState[sub.id] = { ...st, day: today }
+      // 该不该拉、拉完记什么:engine/subscription-schedule.mjs(App 本机刷新订阅用同一份)。按天的到点了不管拉不拉都记下今天
+      const check = subscriptionDue({ plan, enabled: sub.enabled, updatedAt: sub.updatedAt, lastAt: st.lastAt, lastDay: st.day, now: now.getTime(), hour, today })
+      if (check.lastDay !== st.day) {
+        subState[sub.id] = { ...st, day: check.lastDay }
         changed = true
-        if (!due) continue
+      }
+      if (!check.due) continue
+      const settled = (ok) => {
+        const r = subscriptionSettled({ plan, ok, lastAt: st.lastAt, now: now.toISOString(), today })
+        return { day: r.lastDay, lastAt: r.lastAt }
       }
       const before = JSON.stringify(store.getNodes())
       try {
         const r = await refreshSubscriptionById(store, sub.id, { fetchImpl: subscriptionFetchImpl || fetchImpl, ...(lookup ? { lookup } : {}) })
         const nodesChanged = JSON.stringify(store.getNodes()) !== before
         if (nodesChanged) poolChanged = true
-        subState[sub.id] = { day: today, lastAt: now.toISOString(), result: `ok:${r.nodeCount}` }
+        subState[sub.id] = { ...settled(true), result: `ok:${r.nodeCount}` }
         log(`[schedule] subscription ${sub.name}: ${r.nodeCount} nodes, ${nodesChanged ? 'changed' : 'unchanged'}`)
       } catch (err) {
         // 按小时的失败也记这次时间:否则下一分钟就再拉,拉不通的机场会被每分钟敲一次
-        subState[sub.id] = { day: today, lastAt: hourly ? now.toISOString() : st.lastAt, result: `error:${err instanceof Error ? err.message : err}` }
+        subState[sub.id] = { ...settled(false), result: `error:${err instanceof Error ? err.message : err}` }
         log(`[schedule] subscription ${sub.name} failed: ${err instanceof Error ? err.message : err}`)
       }
       // 每拉完一条就落一次状态:几条订阅串行要跑一两分钟,中途面板重启(比如赶上自动升级)

@@ -91,8 +91,12 @@ test('端口白名单(#198 / #199):只有名单上的端口进内核,其余从�
 test('直连应答放行:有 nft 重定向时建两个带超时的集合,命中就打内核标记;集合空着等于没有', () => {
   const text = entryBypassNft({ autoRedirect: true, directAnswered: true })
   assert.ok(text.startsWith('\tset direct_answered4 {\n\t\ttype ipv4_addr; flags timeout;\n\t}\n\tset direct_answered6 {\n\t\ttype ipv6_addr; flags timeout;\n\t}\n'))
-  assert.ok(text.includes(`\t\tip daddr @direct_answered4 ${MARK}`))
-  assert.ok(text.includes(`\t\tip6 daddr @direct_answered6 ${MARK}`))
+  for (const [family, name] of [['ip', 'direct_answered4'], ['ip6', 'direct_answered6']]) {
+    assert.ok(text.includes(`\t\t${family} daddr @${name} meta l4proto != { tcp, udp } ${MARK}`), text)
+    assert.ok(text.includes(`\t\t${family} daddr @${name} meta l4proto { tcp, udp } th dport != 53 ${MARK}`), text)
+  }
+  // 发往集合里地址的 DNS 查询不放(否则跳过内核的 DNS 劫持,域名过滤管不到):没有不带端口条件就放 TCP / UDP 的规则
+  assert.ok(!/daddr @direct_answered[46] meta mark set/.test(text), text)
   assert.ok(!text.includes('entry_bypass_out'), '路由器自己的出站不放')
   assert.equal(entryBypassNft({ autoRedirect: true }).includes('direct_answered'), false)
 })

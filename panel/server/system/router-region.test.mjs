@@ -7,10 +7,11 @@ import { createStore } from '../store/openbox-store.mjs'
 import { createMockContext } from './context.mjs'
 import { createRealContext } from './context-real.mjs'
 import { createPaths } from './paths.mjs'
-import { loadRuleSetIndex } from './ruleset-index.mjs'
+import { buildRuleSetIndex, loadRuleSetIndex } from './ruleset-index.mjs'
 import { regionDnsError } from '../engine/dns-upstream.mjs'
 import {
-  REGION_DETECT_KEY, applyDetectedRegion, detectRouterRegion, fetchEgressIp, ipInChina, parseEgressIp, prepareDnsRegion, settleRegionBeforeDeploy, startRegionDetect,
+  EGRESS_COUNTRY_KEY, REGION_DETECT_KEY, applyDetectedRegion, detectEgressCountry, detectRouterRegion, fetchEgressIp, ipCountry, ipInChina, parseEgressIp,
+  prepareDnsRegion, readEgressCountry, settleRegionBeforeDeploy, startEgressCountryDetect, startRegionDetect,
 } from './router-region.mjs'
 
 const paths = createPaths('/opt/open-box')
@@ -209,3 +210,70 @@ test('settleRegionBeforeDeploy:部署前地区还没判出就当场判一次并�
   assert.equal(other.getRaw(REGION_DETECT_KEY), 'pending')
   assert.equal(other.getProfile().dns.region, 'cn')
 })
+
+test('ipCountry:只认两个字母的国家规则集;先查地区分流里的和常见的,命中就停;每查完一份就放掉', async () => {
+  // 假规则集(真的区间表):每个国家一个网段;清单里没有的国家不查
+  const ranges = { jp: '1.0.0.0/24', us: '8.8.8.0/24', de: '5.5.5.0/24', zz: '9.9.9.0/24' }
+  const countries = async () => ['ad', 'de', 'jp', 'us', 'zz']
+  const loaded = []
+  const dropped = []
+  const load = async (tag) => {
+    loaded.push(tag)
+    return buildRuleSetIndex({ version: 3, rules: [{ ip_cidr: [ranges[tag.replace('geoip-', '')] || '203.0.113.0/24'] }] })
+  }
+  const drop = (tags) => dropped.push(...tags)
+  assert.equal(await ipCountry({ ctx: {}, paths, ip: '5.5.5.5', first: ['DE'], countries, load, drop }), 'DE')
+  assert.deepEqual(loaded, ['geoip-de'], '地区分流里出现的先查,命中就停')
+  assert.deepEqual(dropped, ['geoip-de'], '查完就放掉')
+  loaded.length = 0
+  assert.equal(await ipCountry({ ctx: {}, paths, ip: '9.9.9.9', countries, load, drop }), 'ZZ')
+  assert.deepEqual(loaded, ['geoip-jp', 'geoip-us', 'geoip-de', 'geoip-ad', 'geoip-zz'], '常见的(只查随包里有的)先查,再按清单查剩下的')
+  assert.equal(await ipCountry({ ctx: {}, paths, ip: '203.0.113.9', countries: async () => ['jp'], load: async () => null, drop }), '', '没有规则集数据判不出')
+})
+
+test('detectEgressCountry:按出口 IP 记下国家;出口 IP 没变就不再查规则集;取不到 IP / 查不出时回上次记下的', async () => {
+  const store = memStore()
+  let calls = 0
+  const country = async ({ ip }) => { calls += 1; return ip === '8.8.8.8' ? 'US' : '' }
+  const deps = { store, ctx: {}, paths, systemDnsReader: async () => [], country, now: () => 100 }
+  assert.deepEqual(await detectEgressCountry({ ...deps, egressIp: async () => '8.8.8.8' }), { ip: '8.8.8.8', country: 'US', at: 100 })
+  assert.deepEqual(readEgressCountry(store), { ip: '8.8.8.8', country: 'US', at: 100 })
+  assert.deepEqual(await detectEgressCountry({ ...deps, egressIp: async () => '8.8.8.8', now: () => 200 }), { ip: '8.8.8.8', country: 'US', at: 200 })
+  assert.equal(calls, 1, '同一个出口 IP 不再查')
+  assert.deepEqual(await detectEgressCountry({ ...deps, egressIp: async () => '' }), { country: 'US', ip: '', at: 200 })
+  assert.deepEqual(await detectEgressCountry({ ...deps, egressIp: async () => '1.2.3.4' }), { country: 'US', ip: '1.2.3.4', at: 200 })
+  assert.equal(calls, 2)
+  store.setRaw(EGRESS_COUNTRY_KEY, 'broken')
+  assert.equal(readEgressCountry(store), null)
+})
+
+test('startEgressCountryDetect:没判过 / 超过一周才在后台判一次', async () => {
+  const store = memStore()
+  let runs = 0
+  const detect = async () => { runs += 1; return { country: 'CN', ip: '1.1.1.1' } }
+  const handle = startEgressCountryDetect({ store, ctx: {}, paths, delayMs: 5, detect, now: () => 1000 })
+  assert.ok(handle)
+  await new Promise((resolve) => setTimeout(resolve, 30))
+  assert.equal(runs, 1)
+  store.setRaw(EGRESS_COUNTRY_KEY, JSON.stringify({ ip: '1.1.1.1', country: 'CN', at: 1000 }))
+  assert.equal(startEgressCountryDetect({ store, ctx: {}, paths, delayMs: 5, detect, now: () => 2000 }), null, '一周内判过就不判')
+  assert.ok(startEgressCountryDetect({ store, ctx: {}, paths, delayMs: 1, detect, now: () => 1000 + 8 * 24 * 3600 * 1000 }))
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  assert.equal(runs, 2)
+})
+
+test('ipCountry(真 geoip):中国大陆 / 澳门 / 台湾 / 美国 / 日本的地址判得出国家', { skip: !(fs.existsSync(SINGBOX) && fs.existsSync(GEOIP_CN)) && 'no .tools/sing-box or geodata' }, async () => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ob-country-'))
+  try {
+    const ctx = createRealContext()
+    const geoDir = path.dirname(GEOIP_CN)
+    const realPaths = { dataDir, singbox: SINGBOX, geoDir }
+    const load = (tag) => loadRuleSetIndex(ctx, realPaths, tag, path.join(geoDir, `${tag}.srs`))
+    for (const [ip, cc] of [['223.5.5.5', 'CN'], ['202.175.3.3', 'MO'], ['168.95.1.1', 'TW'], ['8.8.8.8', 'US'], ['210.130.1.1', 'JP']]) {
+      assert.equal(await ipCountry({ ctx, paths: realPaths, ip, load }), cc, ip)
+    }
+  } finally {
+    fs.rmSync(dataDir, { recursive: true, force: true })
+  }
+})
+

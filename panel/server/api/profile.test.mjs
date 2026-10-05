@@ -359,6 +359,36 @@ test('servers 校验:协议/端口/凭据/重复端口/保留端口', async () =
   assert.match(validateServers([{ id: 'm', name: 'M', protocol: 'mixed', port: 7080, password: 'p' }]), /set together/)
 })
 
+test('serverInfo(设置 · 客户端的路由器标识):名称有长度上限,图标是图标代码,地区是两个大写字母或空,别的字段(包括去掉的简短说明)不收', () => {
+  assert.equal(validateProfilePatch({ serverInfo: {} }), null)
+  assert.equal(validateProfilePatch({ serverInfo: { name: '家里', icon: 'brand:openai', iconSvg: '<svg viewBox="0 0 24 24"/>', region: 'HK' } }), null)
+  assert.equal(validateProfilePatch({ serverInfo: { name: '', icon: '', iconSvg: '', region: '' } }), null)
+  for (const icon of ['CN', 'globe:asia', 'misc:arrow-right']) assert.equal(validateProfilePatch({ serverInfo: { icon } }), null)
+  for (const icon of ['<b>', 'a b', 1, 'x'.repeat(81)]) assert.match(validateProfilePatch({ serverInfo: { icon } }), /icon/)
+  for (const iconSvg of ['<script>alert(1)</script>', 1, `<svg>${'x'.repeat(70000)}</svg>`]) assert.match(validateProfilePatch({ serverInfo: { iconSvg } }), /iconSvg/)
+  assert.match(validateProfilePatch({ serverInfo: { name: 'x'.repeat(41) } }), /name/)
+  assert.match(validateProfilePatch({ serverInfo: { description: '说明' } }), /not allowed/)
+  for (const region of ['cn', 'CHN', 'C1', 1]) assert.match(validateProfilePatch({ serverInfo: { region } }), /region/)
+  assert.match(validateProfilePatch({ serverInfo: { other: 1 } }), /not allowed/)
+  assert.match(validateProfilePatch({ serverInfo: [] }), /object/)
+})
+
+test('PUT /profile:路由器标识去掉首尾空白;共享服务器不再带图标(老数据里的丢掉)', async () => {
+  const { baseUrl, store, close } = await startApp()
+  try {
+    const server = { id: 'home', name: 'HOME', protocol: 'shadowsocks', port: 8388, method: 'aes-256-gcm', password: 'pw', icon: 'CN', iconSvg: '<svg/>' }
+    const res = await putJson(baseUrl, '/api/openbox/profile', { serverInfo: { name: '  家里 ', region: 'HK' }, servers: [server] })
+    assert.equal(res.status, 200)
+    const saved = store.getProfile()
+    assert.deepEqual(saved.serverInfo, { name: '家里', region: 'HK' })
+    assert.equal('icon' in saved.servers[0], false)
+    assert.equal('iconSvg' in saved.servers[0], false)
+    assert.equal(saved.servers[0].name, 'HOME')
+  } finally {
+    await close()
+  }
+})
+
 test('bypassPorts(#183):空串或端口 / 范围写法,别的不收', () => {
   assert.equal(validateProfilePatch({ bypassPorts: '' }), null)
   assert.equal(validateProfilePatch({ bypassPorts: '21114-21119, 2233' }), null)
@@ -486,6 +516,27 @@ test('PUT /profile chainProxies:存库时按节点内容重算摘要;名称撞�
     assert.equal(store.getProfile().chainProxies.length, 1, '校验没过的不落库')
     const del = await putJson(baseUrl, '/api/openbox/profile', { chainProxies: [] })
     assert.deepEqual((await del.json()).profile.chainProxies, [])
+  } finally {
+    await close()
+  }
+})
+
+// PM 2026-10-04:遇到重名不能保存。站点集和订阅节点同名、只改站点集时和已有链式代理同名(以前这两种存得进去,部署才报重名)
+test('PUT /profile:站点集和订阅节点 / 已有链式代理同名 → 400,说清是谁和谁撞了', async () => {
+  const { store, baseUrl, close } = await startApp()
+  try {
+    store.setSubscriptions([{ id: 'sub', name: '机场' }])
+    store.setNodes([{ tag: 'HK-01', type: 'shadowsocks', server: 'hk.example.com', server_port: 443, fields: {}, source: 'sharelink', subscriptionId: 'sub' }])
+    const policy = (name) => ({ routing: { policies: [{ id: 'p', name, default: 'direct', domainSuffix: ['a.com'] }] } })
+    const node = await putJson(baseUrl, '/api/openbox/profile', policy('HK-01'))
+    assert.equal(node.status, 400)
+    assert.equal((await node.json()).error, '名称「HK-01」重复:订阅「机场」的节点和站点集同名,不能保存。请换一个名字')
+    const entry = { id: 'c1', enabled: true, name: '住宅-美国', link: 'socks5://u:p@res.example.net:1080#x', upstream: 'HK-01' }
+    assert.equal((await putJson(baseUrl, '/api/openbox/profile', { chainProxies: [entry] })).status, 200)
+    const chain = await putJson(baseUrl, '/api/openbox/profile', policy('住宅-美国'))
+    assert.equal(chain.status, 400)
+    assert.match((await chain.json()).error, /^名称「住宅-美国」重复:链式代理和站点集同名/)
+    assert.equal((await putJson(baseUrl, '/api/openbox/profile', policy('AI'))).status, 200)
   } finally {
     await close()
   }

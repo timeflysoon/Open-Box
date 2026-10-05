@@ -20,125 +20,17 @@ import { writeNodeDirectSets } from '../system/node-direct-files.mjs'
 import { isNodeDirectTag } from '../engine/direct-hosts.mjs'
 import { serviceStatus } from '../system/service.mjs'
 import { DNS_FILTER_RUNTIME, filterKey, filterSettings } from '../engine/dns-filter.mjs'
+import { canonical, configRestartKeys, planOutboundUpdate, withOutbounds } from '../engine/hot-swap.mjs'
 
-const GROUP_TYPES = new Set(['selector', 'urltest'])
-const isGroup = (o) => Boolean(o && GROUP_TYPES.has(o.type) && Array.isArray(o.outbounds))
-
-// 键排好序的 JSON:两份配置可能来自不同版本的生成器,字段顺序不一定一样
-export const canonical = (value) => {
-  if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`
-  if (value && typeof value === 'object') {
-    return `{${Object.keys(value).filter((k) => value[k] !== undefined).sort().map((k) => `${JSON.stringify(k)}:${canonical(value[k])}`).join(',')}}`
-  }
-  return JSON.stringify(value === undefined ? null : value)
-}
-
-// selector 的 default 只在缓存文件里没有这个组的选择时才用得上(内核重建组时从缓存恢复),生成时又跟着此刻的选择走
-// (FakeIP 开着时写成当前选择):不能因为它不一样就重建组
-const outboundKey = (o) => {
-  if (o && o.type === 'selector') return canonical({ ...o, default: undefined })
-  return canonical(o)
-}
-
-const entriesOf = (config) => {
-  const map = new Map()
-  for (const o of (config && config.outbounds) || []) if (o && typeof o.tag === 'string') map.set(o.tag, { kind: 'outbound', value: o })
-  for (const e of (config && config.endpoints) || []) if (e && typeof e.tag === 'string') map.set(e.tag, { kind: 'endpoint', value: e })
-  return map
-}
-const dependenciesOf = (o) => [...(isGroup(o) ? o.outbounds : []), ...(o && typeof o.detour === 'string' && o.detour ? [o.detour] : [])]
-
-// 运行中的配置 → 新配置,出站 / endpoint 要怎么换。返回 { endpoints, outbounds, remove }(按内核要的顺序:被依赖的在前、
-// 删除时依赖别人的在前),或 { error } 表示没法在线换(同名的从 endpoint 变成出站、依赖成环……),交给重启
-export const planOutboundUpdate = (deployed, fresh) => {
-  const before = entriesOf(deployed)
-  const after = entriesOf(fresh)
-  const kindChanged = [...after].filter(([tag, a]) => before.has(tag) && before.get(tag).kind !== a.kind).map(([tag]) => tag)
-  if (kindChanged.length) return { error: `出站类型在 endpoint 和普通出站之间变了:${kindChanged.join('、')}` }
-  const changed = new Set([...after].filter(([tag, a]) => !before.has(tag) || outboundKey(before.get(tag).value) !== outboundKey(a.value)).map(([tag]) => tag))
-  const removed = [...before.keys()].filter((tag) => !after.has(tag))
-  // 组手里拿着成员对象:成员换了 / 删了,组(以及拿着这个组的组)一起重建
-  const touched = new Set([...changed, ...removed])
-  for (let grew = true; grew;) {
-    grew = false
-    for (const [tag, a] of after) {
-      if (touched.has(tag) || !isGroup(a.value)) continue
-      if (a.value.outbounds.some((m) => touched.has(m))) {
-        touched.add(tag)
-        changed.add(tag)
-        grew = true
-      }
-    }
-  }
-  // 建的顺序:依赖(组的成员、detour)在这次也要建的,排在它前面
-  const order = []
-  const state = new Map()
-  const visit = (tag, path) => {
-    if (state.get(tag) === 'done') return null
-    if (state.get(tag) === 'visiting') return `${[...path, tag].join(' → ')}`
-    state.set(tag, 'visiting')
-    for (const dep of dependenciesOf(after.get(tag).value)) {
-      if (!changed.has(dep)) continue
-      const cycle = visit(dep, [...path, tag])
-      if (cycle) return cycle
-    }
-    state.set(tag, 'done')
-    order.push(tag)
-    return null
-  }
-  for (const tag of changed) {
-    const cycle = visit(tag, [])
-    if (cycle) return { error: `出站依赖成环:${cycle}` }
-  }
-  // 内核先建全部 endpoint 再建出站:endpoint 依赖这次要建的出站就排不出来
-  for (const tag of order) {
-    if (after.get(tag).kind !== 'endpoint') continue
-    const dep = dependenciesOf(after.get(tag).value).find((d) => changed.has(d) && after.get(d).kind === 'outbound')
-    if (dep) return { error: `endpoint「${tag}」依赖这次也要替换的出站「${dep}」` }
-  }
-  // 删的顺序:删掉的组里还有别的要删的成员,组先删
-  const removeOrder = []
-  const removedSet = new Set(removed)
-  const seen = new Set()
-  const visitRemove = (tag) => {
-    if (seen.has(tag)) return
-    seen.add(tag)
-    for (const [other, b] of before) {
-      if (removedSet.has(other) && other !== tag && dependenciesOf(b.value).includes(tag)) visitRemove(other)
-    }
-    removeOrder.push(tag)
-  }
-  for (const tag of removed) visitRemove(tag)
-  return {
-    endpoints: order.filter((tag) => after.get(tag).kind === 'endpoint').map((tag) => after.get(tag).value),
-    outbounds: order.filter((tag) => after.get(tag).kind === 'outbound').map((tag) => after.get(tag).value),
-    remove: removeOrder,
-    created: order.filter((tag) => !before.has(tag)),
-    replaced: order.filter((tag) => before.has(tag)),
-  }
-}
-
-// 运行中的配置换上新的出站 / endpoint,其余原样(键的先后照旧)
-export const withOutbounds = (deployed, fresh) => {
-  const out = {}
-  for (const key of Object.keys(deployed)) {
-    if (key === 'endpoints') continue
-    out[key] = key === 'outbounds' ? fresh.outbounds || [] : deployed[key]
-  }
-  if (!('outbounds' in out)) out.outbounds = fresh.outbounds || []
-  if (Array.isArray(fresh.endpoints) && fresh.endpoints.length) out.endpoints = fresh.endpoints
-  return out
-}
+// 比对本身(出站怎么换、别的哪几段变了)在 engine/hot-swap.mjs,App 本机刷新订阅用同一份;原来从这里引的照旧能引
+export { canonical, planOutboundUpdate, withOutbounds }
 
 // 除出站 / endpoint 之外,运行中的和此刻该有的哪里不一样(= 要重启内核才能生效的改动)。reasons 是界面的分类:
 //   dns(DNS 设置、域名过滤)/ route(分流规则)/ inbounds(tun、共享网络、DNS 入站)/ system(入口放行、dnsmasq 这些
 //   部署时写进系统的设置,和别的)
 export const restartReasons = ({ deployed, fresh, meta, profile }) => {
   const reasons = new Set()
-  const keys = new Set([...Object.keys(deployed || {}), ...Object.keys(fresh || {})])
-  for (const key of keys) {
-    if (key === 'outbounds' || key === 'endpoints') continue
-    if (canonical(deployed[key]) === canonical(fresh[key])) continue
+  for (const key of configRestartKeys(deployed, fresh)) {
     reasons.add(key === 'dns' ? 'dns' : key === 'route' ? 'route' : key === 'inbounds' ? 'inbounds' : 'system')
   }
   const inputs = meta && meta.buildInputs

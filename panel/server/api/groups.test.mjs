@@ -36,6 +36,28 @@ const seed = (store) => {
   return { A, B }
 }
 
+// PM 2026-10-04:遇到重名不能保存。节点组和订阅节点同名(以前只查站点集 / 链式代理 / 组之间)
+test('PUT /groups:组名和订阅节点同名就不能存,说清是谁和谁撞了', async () => {
+  const store = memStore()
+  const { A, B } = seed(store)
+  store.setSubscriptions([{ id: 'sub', name: '机场' }])
+  store.setNodes([{ tag: 'node-1', type: 'ss', server: '1.2.3.4', server_port: 1, subscriptionId: 'sub' }])
+  const { baseUrl, close } = await startApp(store)
+  try {
+    const res = await put(baseUrl, [A, { ...B, name: 'node-1' }])
+    assert.equal(res.status, 400)
+    assert.deepEqual(await res.json(), { error: '名称「node-1」重复:订阅「机场」的节点和节点组同名,不能保存。请换一个名字' })
+    assert.deepEqual(store.getGroups().map((g) => g.name).filter((n) => n === 'A' || n === 'B'), ['A', 'B'])
+    // 内置出口改名撞上节点也一样
+    const builtin = store.getGroups().find((g) => g.kind === 'direct')
+    const res2 = await put(baseUrl, [...store.getGroups().filter((g) => g.id !== builtin.id), { ...builtin, name: 'node-1' }])
+    assert.equal(res2.status, 400)
+    assert.match((await res2.json()).error, /内置出口/)
+  } finally {
+    await close()
+  }
+})
+
 // 审查第 7 项:A 改名,引用 A 的组 B、站点集默认出口、兜底默认、终端分流都要跟着改,
 // 否则 B 静默变成直连、站点集落到成员表第一项,保存却返回 200 且 dropped 为空。
 test('PUT /groups:按 id 认出改名,其他组的成员、站点集 default / 兜底、终端分流的引用一并迁移', async () => {

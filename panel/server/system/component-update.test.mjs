@@ -92,7 +92,7 @@ TMP_DL="$2"
 ASSETS="$3"
 EXPECT_VERSION=v0.2.0
 ARCH=x64
-REPO=liandu2024/Open-Box
+REPO=timeflysoon/Open-Box
 info() { :; }
 warn() { :; }
 die() { echo "$*" >&2; exit 1; }
@@ -101,7 +101,7 @@ write_status() { :; }
 safe_rm_rf() { rm -rf "$1"; }
 build_url() { echo "$1"; }
 fetch_to_file() {
-  case "$1" in https://github.com/liandu2024/Open-Box/releases/download/v0.2.0/*) ;; *) die "wrong source";; esac
+  case "$1" in https://github.com/timeflysoon/Open-Box/releases/download/v0.2.0/*) ;; *) die "wrong source";; esac
   cp "$ASSETS/\${1##*/}" "$2"
 }
 download_with_progress() { echo "\${1##*/}" >> "$TMP_DL/requested"; fetch_to_file "$1" "$2"; }

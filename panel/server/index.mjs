@@ -43,7 +43,7 @@ import { ensureTestUrlDefaults } from './engine/test-url.mjs'
 import { decideDnsServer } from './api/route-test.mjs'
 import { readSystemDns } from './system/resolv.mjs'
 import { directResolverServers } from './engine/dns.mjs'
-import { prepareDnsRegion, startRegionDetect } from './system/router-region.mjs'
+import { prepareDnsRegion, startEgressCountryDetect, startRegionDetect } from './system/router-region.mjs'
 import { registerFailoverRoutes } from './api/failover.mjs'
 import { registerServerRoutes } from './api/servers.mjs'
 import { CLIENT_APPS_ENABLED, registerClientAppRoutes, registerPublicClientRoutes } from './api/client-app.mjs'
@@ -270,6 +270,8 @@ const obCtx = createRealContext()
 // (固件没装 zoneinfo、有夏令时的时区也算得对;见 system/timezone.mjs)。计划任务第一次跑在一分钟后,来得及
 void syncProcessTimezoneOnStartup(obCtx, obPlatform).catch(() => {})
 startRegionDetect({ store, ctx: obCtx, paths: obPaths, log: (m) => console.log(m) })
+// 「路由器标识」的地区没手动选时按出口 IP 判的国家:还没判过 / 超过一周就在后台判一次(不挡启动,App 发布前不做)
+if (CLIENT_APPS_ENABLED) startEgressCountryDetect({ store, ctx: obCtx, paths: obPaths, log: (m) => console.log(m) })
 
 const parseStoredBoolean = (value) => {
   if (typeof value !== 'string') {
@@ -849,7 +851,7 @@ registerPublicSubscriptionShareRoutes(app, { store, fetchImpl: subscriptionFetch
 // 「导入全部配置」的设备拉配置(token 认设备,内容用设备密钥加密,api/client-config.mjs)。App 发布前不注册(CLIENT_APPS_ENABLED)
 const readOpenboxVersion = async () => (await readMeta(obCtx, obPaths)).version || ''
 if (CLIENT_APPS_ENABLED) {
-  registerPublicClientRoutes(app, { store })
+  registerPublicClientRoutes(app, { store, readVersion: readOpenboxVersion })
   registerPublicClientConfigRoutes(app, { store, ctx: obCtx, paths: obPaths, fetchImpl: globalThis.fetch, readVersion: readOpenboxVersion })
 }
 
@@ -1336,7 +1338,7 @@ let dnsFilterTimer
 registerServerRoutes(app, { store, ctx: obCtx })
 // App 码 / 客户端配置要的登录后接口:同上,App 发布前不注册
 if (CLIENT_APPS_ENABLED) {
-  registerClientAppRoutes(app, { store, ctx: obCtx, platform: obPaths.platform })
+  registerClientAppRoutes(app, { store, ctx: obCtx, paths: obPaths, platform: obPaths.platform, readVersion: readOpenboxVersion })
   registerClientConfigRoutes(app, { store, ctx: obCtx, paths: obPaths, fetchImpl: globalThis.fetch, readVersion: readOpenboxVersion })
 }
 // 导出诊断包(后端设置那张卡片):版本、固件、内核状态、脱敏配置、最近日志,给 issue 用

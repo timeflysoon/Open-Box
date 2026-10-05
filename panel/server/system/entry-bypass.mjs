@@ -86,8 +86,13 @@ export const entryBypassNft = ({ ports = '', portsMode = 'blacklist', clientRout
   const inRules = []
   const outRules = []
   if (directAnswered) {
-    inRules.push(`ip daddr @${DIRECT_ANSWERED_SET[4]} ${MARK}`)
-    inRules.push(`ip6 daddr @${DIRECT_ANSWERED_SET[6]} ${MARK}`)
+    // 发往这些地址的 DNS 查询(53 端口)不放:集合里偶尔有公共 DNS 的地址(主机名按直连解析、IP 又落在要进内核的网段里,
+    // 比如挂在 Cloudflare / 谷歌云上的),终端直接往它的 53 端口发查询时打了放行位,就跳过了内核的 DNS 劫持,
+    // 域名过滤和按规则分流解析都管不到。不打放行位,照常被劫持进内核(内核的 nat 链里 DNS 劫持排在按目标地址放行之前)
+    for (const [family, name] of [['ip', DIRECT_ANSWERED_SET[4]], ['ip6', DIRECT_ANSWERED_SET[6]]]) {
+      inRules.push(`${family} daddr @${name} meta l4proto != { tcp, udp } ${MARK}`)
+      inRules.push(`${family} daddr @${name} meta l4proto { tcp, udp } th dport != 53 ${MARK}`)
+    }
   }
   const portEls = bypassPortsElements(ports)
   const lanIfnames = [...new Set(lanIfaces)].filter((n) => IFNAME_RE.test(n))

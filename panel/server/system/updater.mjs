@@ -3,7 +3,7 @@
 // 升级本身交给随包发布的 scripts/update.sh(--detach 后台跑、--cancel 协作式取消、
 // /tmp/openbox-update.status 报进度),面板只负责:读版本、探最新版、发起/取消、
 // 读进度。这样 LuCI 兜底页和面板用的是同一条升级路径,不会各有一套坑。
-export const REPO = 'liandu2024/Open-Box'
+export const REPO = 'timeflysoon/Open-Box'
 export const UPDATE_MIRRORS = ['', 'https://ghfast.top/', 'https://gh-proxy.com/', 'https://gh.llkk.cc/']
 
 export const parseKeyValues = (text) => {

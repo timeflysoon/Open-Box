@@ -1,7 +1,7 @@
 // 「订阅和节点站点直连」:订阅链接的主机名、各节点的服务器地址,一律直连,不看站点集。
 // 节点服务器本身如果被路由进代理,就是拿代理去连代理;订阅链接也经常和节点同域。
 // 域名进 domain,IP 进 ip_cidr(/32、/128)。
-import { cidrsOverlap } from '../system/local-subnets.mjs'
+import { cidrsOverlap } from './cidr.mjs'
 
 // Cloudflare 公布的全部地址段(https://www.cloudflare.com/ips/,多年不变)。优选 IP / 优选域名 / argo / Workers 这类节点
 // 的服务器地址(或它的域名解析出来的地址)都落在这里——这是成千上万个网站共用的任播地址,chatgpt.com 也在里面。

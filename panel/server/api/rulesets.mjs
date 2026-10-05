@@ -70,43 +70,53 @@ export const loadEntries = async (ctx, paths, tag) => {
 // 每条带来源(哪个规则集 / 自定义 / 规则集链接的网址),按 全部/域名/IP 分档,可搜索、可排序、分页。
 const FAMILY_OF = (type) => (type.startsWith('domain') ? 'domain' : type.startsWith('ip') ? 'ip' : 'other')
 const CUSTOM_SOURCE = 'custom'
-// 规则集链接(list-xxxxxxxx):部署时编成域名一份 list-xxx.srs、IP 一份 list-xxx-ip.srs(system/rule-lists.mjs),
-// 哪份有就解哪份;一份都没有(还没部署过)就按网址现拉一次解析(.srs 交给内核解)
-const loadRuleListEntries = async (ctx, paths, tag, url, fetchImpl) => {
-  const out = []
-  let found = false
-  for (const part of [tag, ruleListIpTag(tag)]) {
-    if (!(await ctx.exists(rulesetPath(paths, part)))) continue
-    found = true
-    out.push(...await loadEntries(ctx, paths, part))
-  }
-  if (found) return out
-  if (!url) throw new Error(`规则集链接 ${tag} 还没有编译,也不知道网址`)
-  const parsed = await loadRuleList(fetchImpl, url, { decompile: srsDecompiler(ctx, paths, `penetration-${tag}`) })
-  for (const [type, values] of Object.entries(parsed)) for (const value of values) out.push({ type, value })
-  return out
-}
-const buildPolicyEntries = async (ctx, paths, policy, fetchImpl) => {
-  const out = []
-  const missing = []
+// 一个站点集展开成什么:手写条件 + 每个规则集要解哪几份 .srs。面板的域名穿透(下面的 buildPolicyEntries)和
+// App 本地分流(api/client-config.mjs 随配置下发的展开清单,PM 2026-10-04:配对后完全脱离路由器)共用这一份判断。
+//   custom    [{ type, content }],顺序 domain → domain_suffix → domain_keyword → ip_cidr
+//   rulesets  [{ tag, source, url, parts }],按 policy.rulesets 的顺序;source 是界面上「来源」那一列(规则集链接写网址)。
+//             parts = 要解的 .srs,只列 hasRuleset 说有的:geosite / geoip 是它自己;规则集链接(list-xxxxxxxx)部署时编成
+//             域名一份 list-xxx.srs、IP 一份 list-xxx-ip.srs(system/rule-lists.mjs),哪份有列哪份;不合法 / 不认识的 tag 是 []
+export const policyDrillPlan = async (policy, hasRuleset) => {
+  const custom = []
   for (const [type, list] of [['domain', policy.domain], ['domain_suffix', policy.domainSuffix], ['domain_keyword', policy.domainKeyword], ['ip_cidr', policy.ipCidr]]) {
-    for (const value of list || []) out.push({ type, family: FAMILY_OF(type), content: value, source: CUSTOM_SOURCE })
+    for (const value of list || []) custom.push({ type, content: value })
   }
   const urlOfTag = new Map((policy.ruleUrls || []).map((u) => [listTagForUrl(u), u]))
+  const rulesets = []
   for (const tag of policy.rulesets || []) {
-    if (!isSafeRulesetTag(tag)) { missing.push(tag); continue }
+    let candidates = []
+    let url = ''
+    if (isSafeRulesetTag(tag) && isRuleListTag(tag)) {
+      url = urlOfTag.get(tag) || ''
+      candidates = [tag, ruleListIpTag(tag)]
+    } else if (isSafeRulesetTag(tag) && /^(geosite|geoip)-/.test(tag)) {
+      candidates = [tag]
+    }
+    const parts = []
+    for (const part of candidates) if (await hasRuleset(part)) parts.push(part)
+    rulesets.push({ tag, source: url || tag, url, parts })
+  }
+  return { custom, rulesets }
+}
+
+const buildPolicyEntries = async (ctx, paths, policy, fetchImpl) => {
+  const plan = await policyDrillPlan(policy, (tag) => ctx.exists(rulesetPath(paths, tag)))
+  const out = plan.custom.map(({ type, content }) => ({ type, family: FAMILY_OF(type), content, source: CUSTOM_SOURCE }))
+  const missing = []
+  for (const { tag, source, url, parts } of plan.rulesets) {
     try {
-      if (isRuleListTag(tag)) {
-        const url = urlOfTag.get(tag) || ''
-        for (const e of await loadRuleListEntries(ctx, paths, tag, url, fetchImpl)) {
-          out.push({ type: e.type, family: FAMILY_OF(e.type), content: e.value, source: url || tag })
-        }
+      const entries = []
+      if (parts.length) {
+        for (const part of parts) entries.push(...await loadEntries(ctx, paths, part))
+      } else if (url) {
+        // 规则集链接一份都还没编(没部署过):按网址现拉一次解析(.srs 交给内核解)
+        const parsed = await loadRuleList(fetchImpl, url, { decompile: srsDecompiler(ctx, paths, `penetration-${tag}`) })
+        for (const [type, values] of Object.entries(parsed)) for (const value of values) entries.push({ type, value })
+      } else {
+        missing.push(tag)
         continue
       }
-      if (!/^(geosite|geoip)-/.test(tag)) { missing.push(tag); continue }
-      for (const e of await loadEntries(ctx, paths, tag)) {
-        out.push({ type: e.type, family: FAMILY_OF(e.type), content: e.value, source: tag })
-      }
+      for (const e of entries) out.push({ type: e.type, family: FAMILY_OF(e.type), content: e.value, source })
     } catch {
       // 某个规则集缺失/解不开:其余的照样列,把它记在 missing 里让界面提示
       missing.push(tag)
@@ -121,44 +131,55 @@ const intParam = (raw, fallback, max) => {
   return max ? Math.min(n, max) : n
 }
 
+// 「域名穿透」的一页(面板对话框,下面的 /policies/entries;App 本地分流不调它,按随配置下发的展开清单自己展开)。
+// query:name=站点集名字 &tab=all|domain|ip &q= &sort=type|content|source &dir=asc|desc &offset=0 &limit=100(最多 100);
+// 回 { status, body },出错时 body 是 { message }
+export const policyEntries = async ({ ctx, paths, store, fetchImpl = globalThis.fetch }, query = {}) => {
+  const name = String(query.name || '').trim()
+  if (!name) return { status: 400, body: { message: 'name is required' } }
+  const conf = normalizeRouting(store?.getProfile?.()?.routing)
+  const tab = ['domain', 'ip'].includes(String(query.tab)) ? String(query.tab) : 'all'
+  const q = String(query.q || '').trim().toLowerCase()
+  const sort = ['type', 'content', 'source'].includes(String(query.sort)) ? String(query.sort) : ''
+  const dir = String(query.dir) === 'desc' ? -1 : 1
+  const offset = intParam(query.offset, 0)
+  const limit = intParam(query.limit, 100, MAX_LIMIT) || 100
+
+  if (name === conf.fallback.name) {
+    // 兜底没有自己的规则:上面都没命中的流量走它
+    return { status: 200, body: { name, fallback: true, counts: { all: 0, domain: 0, ip: 0 }, total: 0, matched: 0, offset, limit, hasMore: false, entries: [], missing: [] } }
+  }
+  const policy = conf.policies.find((p) => p.name === name)
+  if (!policy) return { status: 404, body: { message: `站点集不存在:${name}` } }
+
+  try {
+    const { entries, missing } = await buildPolicyEntries(ctx, paths, policy, fetchImpl)
+    const counts = { all: entries.length, domain: 0, ip: 0 }
+    for (const e of entries) if (e.family === 'domain') counts.domain++; else if (e.family === 'ip') counts.ip++
+    let list = tab === 'all' ? entries : entries.filter((e) => e.family === tab)
+    if (q) list = list.filter((e) => e.content.toLowerCase().includes(q) || e.source.toLowerCase().includes(q) || e.type.includes(q))
+    if (sort) list = [...list].sort((a, b) => dir * String(a[sort]).localeCompare(String(b[sort])))
+    return {
+      status: 200,
+      body: {
+        name, fallback: false, counts, total: entries.length, matched: list.length, offset, limit,
+        hasMore: offset + limit < list.length,
+        entries: list.slice(offset, offset + limit),
+        missing,
+      },
+    }
+  } catch (error) {
+    return { status: 503, body: { message: error instanceof Error ? error.message : String(error) } }
+  }
+}
+
 export const registerRulesetRoutes = (app, { ctx, paths, store, fetchImpl = globalThis.fetch } = {}) => {
   const router = express.Router({ caseSensitive: true })
 
   // GET /api/openbox/policies/entries?name=AI&tab=all|domain|ip&q=&sort=type|content|source&dir=asc|desc&offset=0&limit=100
   router.get('/policies/entries', async (req, res) => {
-    const name = String(req.query.name || '').trim()
-    if (!name) return res.status(400).json({ message: 'name is required' })
-    const conf = normalizeRouting(store?.getProfile?.()?.routing)
-    const tab = ['domain', 'ip'].includes(String(req.query.tab)) ? String(req.query.tab) : 'all'
-    const q = String(req.query.q || '').trim().toLowerCase()
-    const sort = ['type', 'content', 'source'].includes(String(req.query.sort)) ? String(req.query.sort) : ''
-    const dir = String(req.query.dir) === 'desc' ? -1 : 1
-    const offset = intParam(req.query.offset, 0)
-    const limit = intParam(req.query.limit, 100, MAX_LIMIT) || 100
-
-    if (name === conf.fallback.name) {
-      // 兜底没有自己的规则:上面都没命中的流量走它
-      return res.json({ name, fallback: true, counts: { all: 0, domain: 0, ip: 0 }, total: 0, matched: 0, offset, limit, hasMore: false, entries: [], missing: [] })
-    }
-    const policy = conf.policies.find((p) => p.name === name)
-    if (!policy) return res.status(404).json({ message: `站点集不存在:${name}` })
-
-    try {
-      const { entries, missing } = await buildPolicyEntries(ctx, paths, policy, fetchImpl)
-      const counts = { all: entries.length, domain: 0, ip: 0 }
-      for (const e of entries) if (e.family === 'domain') counts.domain++; else if (e.family === 'ip') counts.ip++
-      let list = tab === 'all' ? entries : entries.filter((e) => e.family === tab)
-      if (q) list = list.filter((e) => e.content.toLowerCase().includes(q) || e.source.toLowerCase().includes(q) || e.type.includes(q))
-      if (sort) list = [...list].sort((a, b) => dir * String(a[sort]).localeCompare(String(b[sort])))
-      res.json({
-        name, fallback: false, counts, total: entries.length, matched: list.length, offset, limit,
-        hasMore: offset + limit < list.length,
-        entries: list.slice(offset, offset + limit),
-        missing,
-      })
-    } catch (error) {
-      res.status(503).json({ message: error instanceof Error ? error.message : String(error) })
-    }
+    const { status, body } = await policyEntries({ ctx, paths, store, fetchImpl }, req.query)
+    res.status(status).json(body)
   })
 
   // GET /api/openbox/rulesets/preview?url=https://…/Check.list&q=&offset=0&limit=50

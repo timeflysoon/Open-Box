@@ -3,6 +3,7 @@ import { TUN_STACKS, TUN_MTU_MIN, TUN_MTU_MAX, TUN_MSS_MIN, TUN_MSS_MAX, isTunSt
 import { validateDnsFilter } from '../engine/dns-filter.mjs'
 import { DNS_REWRITE_DEFAULTS, validateDnsRewrite } from '../engine/dns-rewrite.mjs'
 import { RESERVED_PORTS, SERVER_PROTOCOLS, SS_METHODS } from '../engine/servers.mjs'
+import { normalizeServerInfo, validateServerInfo } from '../engine/server-info.mjs'
 import { validateShareRegions } from '../engine/share-regions.mjs'
 import { clientMatch, isIpOrCidr, isMac } from '../engine/client-routes.mjs'
 import { validateChainProxies } from '../engine/chain-proxy.mjs'
@@ -12,6 +13,7 @@ import { cancelRegionDetect } from '../system/router-region.mjs'
 import { ICON_SCALE_LIMIT, builtinTags, normalizeGroups } from '../engine/user-groups.mjs'
 import { DNSMASQ_OUTBOUND_TAG } from '../engine/config.mjs'
 import { appliedSummary } from './subscriptions.mjs'
+import { saveNameError } from '../engine/name-guard.mjs'
 
 // 站点集不能叫的名字:节点组名、内置直连/拒绝现在的名字、dnsmasq 回送出站——都是同一个出站命名空间
 export const reservedPolicyNames = (groups) => {
@@ -151,6 +153,11 @@ export const validateProfilePatch = (patch, { reservedNames = [] } = {}) => {
     const error = validateServers(patch.servers)
     if (error) return error
   }
+  // 设置 · 客户端的「路由器标识」(engine/server-info.mjs):App 里节点 / 配置卡片显示的名称、图标、地区
+  if ('serverInfo' in patch) {
+    const error = validateServerInfo(patch.serverInfo)
+    if (error) return error
+  }
 
   if ('clientRoutes' in patch) {
     const error = validateClientRoutes(patch.clientRoutes)
@@ -284,6 +291,7 @@ export const validateClientRoutes = (list) => {
 // 共享网络的服务器。id 会拼进入站 tag 和 uci 段名,限定字符;端口不能撞面板/内核自用的,
 // 也不能互相重复;各协议缺了凭据就开不起来,直接挡在保存这一步。
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
 export const validateServers = (servers) => {
   if (!Array.isArray(servers)) return 'servers must be an array'
   const ports = new Set()
@@ -497,6 +505,22 @@ export const registerProfileRoutes = (app, { store, applyNow = null } = {}) => {
         return
       }
     }
+    // 站点集 / 链式代理和订阅节点、节点组、内置出口之间撞名就不能存(PM 2026-10-04:遇到重名不能保存;判断和 App 共用
+    // engine/name-guard.mjs)。上面两道是老的细分检查,这一道补上站点集和订阅节点、只改站点集时和已有链式代理撞名
+    if ((patch.routing && typeof patch.routing === 'object') || Array.isArray(patch.chainProxies)) {
+      const current = store.getProfile() || {}
+      const nameError = saveNameError({
+        nodes: store.getNodes(),
+        subscriptions: typeof store.getSubscriptions === 'function' ? store.getSubscriptions() : [],
+        groups: store.getGroups(),
+        routing: { ...(current.routing || {}), ...(patch.routing && typeof patch.routing === 'object' ? patch.routing : {}) },
+        chainProxies: Array.isArray(patch.chainProxies) ? patch.chainProxies : current.chainProxies,
+      }, [...(patch.routing && typeof patch.routing === 'object' ? ['policy'] : []), ...(Array.isArray(patch.chainProxies) ? ['chain'] : [])])
+      if (nameError) {
+        res.status(400).json({ error: nameError })
+        return
+      }
+    }
     // 链式代理改名:名字就是出站 tag,节点组成员 / 故障转移页签成员 / 站点集默认出口 / 兜底 / 终端分流 / 别的链式代理的
     // 上游都按名字引用,和节点组改名(api/groups.mjs)一样按 id 认出改名、把引用一并迁移
     // 路由器在中国大陆时代理 DNS 不能用上游 DNS(中国大陆的 DNS 对境外域名有污染,用户 2026-10-02):按合并之后的整份判,
@@ -509,6 +533,9 @@ export const registerProfileRoutes = (app, { store, applyNow = null } = {}) => {
       }
     }
     const renamed = Array.isArray(patch.chainProxies) ? applyChainRenames(store, patch) : []
+    if ('serverInfo' in patch) patch.serverInfo = normalizeServerInfo(patch.serverInfo)
+    // App 里节点的图标、名称统一在「路由器标识」里设(用户 2026-10-04),共享服务器自己不再带图标:老数据里的一起丢掉
+    if (Array.isArray(patch.servers)) patch.servers = patch.servers.map((server) => Object.fromEntries(Object.entries(server).filter(([key]) => key !== 'icon' && key !== 'iconSvg')))
     const profile = store.setProfile(patch)
     // 用户自己选了地区:后台按出口 IP 自动判的那一次就不做了(system/router-region.mjs)
     if (patch.dns && typeof patch.dns === 'object' && 'region' in patch.dns) cancelRegionDetect(store)

@@ -4,18 +4,20 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 import express from 'express'
+import { loadIconIndex } from '../engine/icon-index.mjs'
 import { createStore } from '../store/openbox-store.mjs'
 import { ROUTER_ID_KEY, lanAddresses, registerClientAppRoutes, registerPublicClientRoutes, routerId } from './client-app.mjs'
+import { EGRESS_COUNTRY_KEY } from '../system/router-region.mjs'
 import { DEFAULT_SHARE_REGIONS, shareRegionsVersion } from '../engine/share-regions.mjs'
 
-const setup = async () => {
+const setup = async ({ readVersion = async () => '0.1.280', detectCountry, ctx = null, paths = null } = {}) => {
   const map = new Map()
   const store = createStore({ get: (k) => map.get(k) ?? null, set: (k, v) => map.set(k, v), del: (k) => map.delete(k) })
   const geoDir = fs.mkdtempSync(path.join(os.tmpdir(), 'openbox-geo-'))
   fs.writeFileSync(path.join(geoDir, 'geosite-cn.srs'), Buffer.from('SRS-test'))
   const app = express()
-  registerPublicClientRoutes(app, { store, geoDir })
-  registerClientAppRoutes(app, { store })
+  registerPublicClientRoutes(app, { store, geoDir, readVersion })
+  registerClientAppRoutes(app, { store, ctx, paths, readVersion, ...(detectCountry ? { detectCountry } : {}) })
   const server = app.listen(0)
   await new Promise((resolve) => server.once('listening', resolve))
   return {
@@ -58,6 +60,66 @@ test('public client routes answer only for this router id', async () => {
     assert.equal((await fetch(`${base}/client/v1/${id}/geodata/geoip-xx.srs`)).status, 404)
     assert.equal((await fetch(`${base}/client/v1/${id}/geodata/..%2F..%2Fetc%2Fpasswd`)).status, 404)
     assert.equal((await fetch(`${base}/client/v1/${'f'.repeat(32)}/geodata/geosite-cn.srs`)).status, 404)
+  } finally { await close() }
+})
+
+test('regions 顺带回共享网络服务器的 ID / 名字(按共享网络页的顺序、只要在用的、没有凭据)和服务器信息;版本只跟地区分流走', async () => {
+  const { store, base, close } = await setup()
+  try {
+    const id = routerId(store)
+    const before = await (await fetch(`${base}/client/v1/${id}/regions`)).json()
+    assert.deepEqual(before.nodes, [])
+    // 什么都没设:名称是「Open-Box v版本号」,没判过出口国家就没有地区,没有图标
+    assert.deepEqual(before.server, { name: 'Open-Box v0.1.280', icon: '', iconSvg: '', region: '', regionSvg: '', regionAuto: true })
+    store.setProfile({ servers: [
+      { id: 'home', enabled: true, name: 'HOME', protocol: 'shadowsocks', port: 8388, method: 'aes-256-gcm', password: 'secret-1' },
+      { id: 'off', enabled: false, name: 'OFF', protocol: 'shadowsocks', port: 8389, method: 'aes-256-gcm', password: 'secret-2' },
+      { id: 'hk', name: 'HK', protocol: 'shadowsocks', port: 8391, method: 'aes-256-gcm', password: 'secret-4' },
+    ] })
+    store.setRaw(EGRESS_COUNTRY_KEY, JSON.stringify({ ip: '1.2.3.4', country: 'CN', at: 1 }))
+    const after = await (await fetch(`${base}/client/v1/${id}/regions`)).json()
+    assert.deepEqual(after.nodes, [{ id: 'home', name: 'HOME' }, { id: 'hk', name: 'HK' }])
+    // 地区没手动选:用出口 IP 判出来的
+    assert.equal(after.server.region, 'CN')
+    assert.equal(after.server.regionAuto, true)
+    // 国旗 App 不自带:按地区代码从图标索引带上
+    assert.match(after.server.regionSvg, /^<svg/)
+    // 设了服务器信息:图标 SVG 由服务端按代码从图标索引现取(国旗也有),索引里没有的代码才用保存时存的那份
+    store.setProfile({ serverInfo: { name: '家里', icon: 'brand:openai', region: 'HK' } })
+    const custom = await (await fetch(`${base}/client/v1/${id}/regions`)).json()
+    const index = loadIconIndex()
+    assert.deepEqual(custom.server, { name: '家里', icon: 'brand:openai', iconSvg: index['brand:openai'], region: 'HK', regionSvg: index.HK, regionAuto: false })
+    store.setProfile({ serverInfo: { icon: 'brand:not-in-index', iconSvg: '<svg id="saved"/>' } })
+    const fallback = await (await fetch(`${base}/client/v1/${id}/regions`)).json()
+    assert.equal(fallback.server.iconSvg, '<svg id="saved"/>')
+    // 节点信息、服务器信息变了地区分流的版本不变(App 不用重载分流)
+    assert.equal(after.version, before.version)
+    assert.equal(custom.version, before.version)
+    assert.ok(!JSON.stringify(after).includes('secret'))
+  } finally { await close() }
+})
+
+test('info 带服务器信息的现值、默认名称和出口国家;egress-country 按出口 IP 判一次', async () => {
+  const calls = []
+  const detectCountry = async ({ store }) => {
+    calls.push('detect')
+    const record = { ip: '8.8.8.8', country: 'US', at: 2 }
+    store.setRaw(EGRESS_COUNTRY_KEY, JSON.stringify(record))
+    return record
+  }
+  const { store, base, close } = await setup({ detectCountry, ctx: {}, paths: {} })
+  try {
+    const info = await (await fetch(`${base}/api/openbox/client-app/info`)).json()
+    assert.deepEqual(info.serverInfo, {})
+    assert.deepEqual(info.serverInfoDefaults, { name: 'Open-Box v0.1.280' })
+    assert.equal(info.egressCountry, null)
+    const detected = await (await fetch(`${base}/api/openbox/client-app/egress-country`, { method: 'POST' })).json()
+    assert.deepEqual(detected, { ip: '8.8.8.8', country: 'US', at: 2 })
+    assert.deepEqual(calls, ['detect'])
+    store.setProfile({ serverInfo: { name: 'X' } })
+    const again = await (await fetch(`${base}/api/openbox/client-app/info`)).json()
+    assert.deepEqual(again.serverInfo, { name: 'X' })
+    assert.deepEqual(again.egressCountry, { ip: '8.8.8.8', country: 'US', at: 2 })
   } finally { await close() }
 })
 

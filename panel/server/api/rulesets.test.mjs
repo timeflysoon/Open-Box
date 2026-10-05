@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import express from 'express'
-import { clearRulesetEntriesCache, registerRulesetRoutes } from './rulesets.mjs'
+import { clearRulesetEntriesCache, policyDrillPlan, registerRulesetRoutes } from './rulesets.mjs'
 import { createMockContext } from '../system/context.mjs'
 import { listTagForUrl } from '../engine/rule-list.mjs'
 import { createPaths } from '../system/paths.mjs'
@@ -197,6 +197,34 @@ test('GET /policies/entries:规则集链接展开本地编好的那几份 .srs,�
   } finally {
     await new Promise((resolve) => server2.close(resolve))
   }
+})
+
+// 展开清单(面板域名穿透和 App 本地展开共用):手写条件固定顺序;每个规则集列出路由器上有的那几份,
+// 缺文件、不认识、不合法的都是空(界面列进「没能展开」)
+test('policyDrillPlan:手写条件 + 每个规则集要解的那几份 .srs', async () => {
+  const URL_A = 'https://example.com/a.list'
+  const URL_B = 'https://example.com/b.list'
+  const A = listTagForUrl(URL_A)
+  const B = listTagForUrl(URL_B)
+  const present = new Set(['geosite-google', `${A}-ip`])
+  const plan = await policyDrillPlan({
+    ipCidr: ['1.1.1.0/24'], domainKeyword: ['kw'], domainSuffix: ['gg.example'], domain: ['www.gg.example'],
+    ruleUrls: [URL_A, URL_B],
+    rulesets: ['geosite-google', 'geoip-missing', A, B, 'something-else', '../etc/passwd'],
+  }, async (tag) => present.has(tag))
+  assert.deepEqual(plan.custom, [
+    { type: 'domain', content: 'www.gg.example' }, { type: 'domain_suffix', content: 'gg.example' },
+    { type: 'domain_keyword', content: 'kw' }, { type: 'ip_cidr', content: '1.1.1.0/24' },
+  ])
+  assert.deepEqual(plan.rulesets, [
+    { tag: 'geosite-google', source: 'geosite-google', url: '', parts: ['geosite-google'] },
+    { tag: 'geoip-missing', source: 'geoip-missing', url: '', parts: [] },
+    { tag: A, source: URL_A, url: URL_A, parts: [`${A}-ip`] },
+    // 一份都没编出来:面板现拉网址展开,App 列进「没能展开」
+    { tag: B, source: URL_B, url: URL_B, parts: [] },
+    { tag: 'something-else', source: 'something-else', url: '', parts: [] },
+    { tag: '../etc/passwd', source: '../etc/passwd', url: '', parts: [] },
+  ])
 })
 
 test('GET /rulesets/preview:按网址拉回来解析,形状和 /rulesets/entries 一致;非 http 或 https直接 400;拉不动 503', async () => {

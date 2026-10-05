@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { fetchSelections, resolveSelections, dnsClassesFlipped, firstLayerChanged } from './deploy-runner.mjs'
+import { buildCurrentConfig, fetchSelections, resolveSelections, dnsClassesFlipped, firstLayerChanged } from './deploy-runner.mjs'
+import { parseSubscription } from '../engine/subscription.mjs'
+import { createStore } from '../store/openbox-store.mjs'
 import { createMockContext } from '../system/context.mjs'
 import { createPaths } from '../system/paths.mjs'
 import { configMetaPath } from '../system/deploy.mjs'
@@ -296,4 +298,23 @@ test('regenerateIfPlanChanged:判断没变就什么都不做;变了就真的走 
   assert.equal(deployed.length, 1)   // 判断变了之后真的执行了部署
   assert.equal(deployed[0].store, store)
   assert.ok(logs.some((m) => m.includes('重新生成配置')))
+})
+
+// 故障转移的运行映射(写进 config.meta.json,后台管理器和 App 都按它)必须和配置同一次生成:以前另调一次 emitUserGroups、
+// 只传了订阅节点,页签里放了链式代理时映射说「单节点 / 空」,配置里却是子组,管理器切换就切错
+test('buildCurrentConfig:故障转移页签里有链式代理时,映射和配置对得上', () => {
+  const m = new Map()
+  const store = createStore({ get: (k) => (m.has(k) ? m.get(k) : null), set: (k, v) => m.set(k, v), del: (k) => m.delete(k) })
+  const node = parseSubscription('ss://YWVzLTI1Ni1nY206c2VjcmV0cHc=@hk.example.com:8388#香港01').nodes[0]
+  store.setSubscriptions([{ id: 'sub', name: '机场', url: 'https://sub.example/x' }])
+  store.setNodes([{ ...node, subscriptionId: 'sub', tag: '香港-01' }])
+  store.setGroups([{ id: 'fo', name: '故转', type: 'failover', lanes: [{ id: 'm', members: ['香港-01', '链-香港'] }, { id: 'b', members: ['链-香港'] }] }])
+  store.setProfile({ chainProxies: [{ id: 'c1', name: '链-香港', upstream: '香港-01', link: 'socks5://u:p@1.2.3.4:1080#x' }] })
+  const { config, failover } = buildCurrentConfig(store, [], { rulesetDir: '/tmp/rs', geoDir: '/tmp/geo' })
+  const lanes = failover.find((f) => f.tag === '故转').lanes
+  assert.deepEqual(lanes.map((l) => [l.mode, l.ref]), [['urltest', '__fo:fo:m'], ['single', '链-香港']])
+  assert.deepEqual(lanes[0].valid, ['香港-01', '链-香港'])
+  const sub = config.outbounds.find((o) => o.tag === '__fo:fo:m')
+  assert.deepEqual(sub.outbounds, ['香港-01', '链-香港'])
+  assert.ok(config.outbounds.find((o) => o.tag === '故转').outbounds.includes('链-香港'))
 })

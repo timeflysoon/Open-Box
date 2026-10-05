@@ -32,9 +32,9 @@ const fakeCurlDir = (body) => {
 test('探最新版本号:直连不通、镜像通道时经镜像问;wget / curl 两种都认 Location 里的 tag', () => {
   const dir = fakeCurlDir(`case "$url" in
   https://github.com/*) exit 7 ;;
-  https://mirror.test/https://github.com/*) printf 'HTTP/2 302\\r\\nlocation: https://github.com/liandu2024/Open-Box/releases/tag/v0.1.266\\r\\n\\r\\n' ;;
+  https://mirror.test/https://github.com/*) printf 'HTTP/2 302\\r\\nlocation: https://github.com/timeflysoon/Open-Box/releases/tag/v0.1.266\\r\\n\\r\\n' ;;
 esac`)
-  const script = `DOWNLOADER=curl; REPO=liandu2024/Open-Box; CHANNEL=mirror; MIRROR_PREFIX=https://mirror.test
+  const script = `DOWNLOADER=curl; REPO=timeflysoon/Open-Box; CHANNEL=mirror; MIRROR_PREFIX=https://mirror.test
 ${fn(update, 'build_url')}
 ${fn(update, 'resolve_latest_tag_from')}
 LATEST_URL="https://github.com/$REPO/releases/latest"

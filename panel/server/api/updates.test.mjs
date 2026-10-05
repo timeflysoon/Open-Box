@@ -30,7 +30,7 @@ test('fetchLatestVersion:从 releases/latest 的 302 跳转里取 tag,直连失�
   const fetchImpl = async (url) => {
     calls.push(url)
     if (url.startsWith('https://github.com/')) throw new Error('offline')
-    return { status: 302, headers: new Map([['location', 'https://github.com/liandu2024/Open-Box/releases/tag/v0.2.3']]), url: '' }
+    return { status: 302, headers: new Map([['location', 'https://github.com/timeflysoon/Open-Box/releases/tag/v0.2.3']]), url: '' }
   }
   const r = await fetchLatestVersion(fetchImpl, { mirrors: ['https://mirror.test/'] })
   assert.equal(r.latest, 'v0.2.3')
@@ -51,7 +51,7 @@ test('GET /update/status + POST /update/run:读 meta/通道/状态文件,发起�
   let online = false
   const fetchImpl = async () => {
     if (!online) throw new Error('offline')
-    return { status: 302, headers: new Map([['location', 'https://github.com/liandu2024/Open-Box/releases/tag/v0.2.3']]), url: '' }
+    return { status: 302, headers: new Map([['location', 'https://github.com/timeflysoon/Open-Box/releases/tag/v0.2.3']]), url: '' }
   }
   const { base, close } = await startApp(ctx, { getProfile: () => ({}) }, fetchImpl)
   try {
@@ -90,7 +90,7 @@ test('定时器:Open-Box 自身更新按「每隔几天」探,间隔内不重复
   const ctx = createMockContext({ files: { [paths.metaPath]: JSON.stringify({ version: 'v0.1.60' }), [paths.updateScript]: '' } })
   let probes = 0
   const fetchImpl = async (url, init = {}) => {
-    if (init.method === 'HEAD') { probes++; return { status: 302, headers: new Map([['location', 'https://github.com/liandu2024/Open-Box/releases/tag/v0.1.60']]), url: '' } }
+    if (init.method === 'HEAD') { probes++; return { status: 302, headers: new Map([['location', 'https://github.com/timeflysoon/Open-Box/releases/tag/v0.1.60']]), url: '' } }
     throw new Error('unexpected')
   }
   const store = { getProfile: () => ({ updates: { geo: { auto: false }, openbox: { auto: true, hour: 4, days: 7, channel: 'auto' } } }) }
@@ -200,8 +200,8 @@ test('fetchReleaseNote:直连 GitHub API 只取最新那一版的说明;url 是 
   const calls = []
   const fetchImpl = async (url, init) => { calls.push([url, init && init.headers && init.headers['User-Agent']]); return jsonRes({ tag_name: 'v0.1.276', published_at: '2026-10-02T12:00:00Z', body: '## DNS\n- 地区页签\n' }) }
   const r = await fetchReleaseNote(fetchImpl, { latest: 'v0.1.276' })
-  assert.deepEqual(r, { url: 'https://github.com/liandu2024/Open-Box/releases', note: { version: 'v0.1.276', date: '2026-10-02T12:00:00Z', body: '## DNS\n- 地区页签' }, via: 'api' })
-  assert.deepEqual(calls, [['https://api.github.com/repos/liandu2024/Open-Box/releases/tags/v0.1.276', 'Open-Box']])
+  assert.deepEqual(r, { url: 'https://github.com/timeflysoon/Open-Box/releases', note: { version: 'v0.1.276', date: '2026-10-02T12:00:00Z', body: '## DNS\n- 地区页签' }, via: 'api' })
+  assert.deepEqual(calls, [['https://api.github.com/repos/timeflysoon/Open-Box/releases/tags/v0.1.276', 'Open-Box']])
 })
 
 test('fetchReleaseNote:API 不通(镜像不代理 api.github.com)退回各来源的 release-notes.md 附件,镜像回网页的跳过;都不通给出原因', async () => {
@@ -217,12 +217,12 @@ test('fetchReleaseNote:API 不通(镜像不代理 api.github.com)退回各来源
   assert.equal(r.via, 'https://m2.test/')
   assert.deepEqual(r.note, { version: 'v0.1.276', date: '', body: '## DNS\n- 地区页签' })
   assert.deepEqual(calls.slice(1), [
-    'https://github.com/liandu2024/Open-Box/releases/download/v0.1.276/release-notes.md',
-    'https://m1.test/https://github.com/liandu2024/Open-Box/releases/download/v0.1.276/release-notes.md',
-    'https://m2.test/https://github.com/liandu2024/Open-Box/releases/download/v0.1.276/release-notes.md',
+    'https://github.com/timeflysoon/Open-Box/releases/download/v0.1.276/release-notes.md',
+    'https://m1.test/https://github.com/timeflysoon/Open-Box/releases/download/v0.1.276/release-notes.md',
+    'https://m2.test/https://github.com/timeflysoon/Open-Box/releases/download/v0.1.276/release-notes.md',
   ])
   const none = await fetchReleaseNote(async () => { throw new Error('offline') }, { latest: 'v0.1.276', mirrors: [] })
-  assert.deepEqual(none, { url: 'https://github.com/liandu2024/Open-Box/releases', note: null, via: '', error: 'offline' })
+  assert.deepEqual(none, { url: 'https://github.com/timeflysoon/Open-Box/releases', note: null, via: '', error: 'offline' })
   assert.equal((await fetchReleaseNote(async () => jsonRes({}), { latest: '../x' })).note, null, '版本号写法不对不去取')
 })
 
@@ -231,7 +231,7 @@ test('GET /update/notes:按 ?latest 取最新那一版的说明;latest 写法不
   const seen = []
   const fetchImpl = async (url) => {
     seen.push(url)
-    if (url.includes('/releases/latest')) return { status: 302, headers: new Map([['location', 'https://github.com/liandu2024/Open-Box/releases/tag/v0.1.277']]), url: '' }
+    if (url.includes('/releases/latest')) return { status: 302, headers: new Map([['location', 'https://github.com/timeflysoon/Open-Box/releases/tag/v0.1.277']]), url: '' }
     const tag = /\/releases\/tags\/([^/?]+)/.exec(url)?.[1]
     return jsonRes({ tag_name: tag, body: `- ${tag} 的改动` })
   }

@@ -1,4 +1,3 @@
-import { rulesetKind } from '../system/rulesets.mjs'
 import { createPaths } from '../system/paths.mjs'
 import { prepareDnsFilter, readFilterArtifact } from '../system/dns-filter.mjs'
 import { filterForwardPlan } from '../engine/dns-filter.mjs'
@@ -14,7 +13,7 @@ import { PURE_TUN_ENTRY_REASON, bypassPlanKey, dnsmasqForwardPlan, entryModePlan
 import { emitUserGroups } from '../engine/user-groups.mjs'
 import { normalizeClientRoutes } from '../engine/client-routes.mjs'
 import { builtinTags } from '../engine/user-groups.mjs'
-import { buildConfigDetailed } from '../engine/config.mjs'
+import { buildConfigFromParts } from '../engine/client-build.mjs'
 import { applyProxyUpstreamRoutes, directResolverServers, dnsPolicyClasses } from '../engine/dns.mjs'
 import { routeProxyDnsUpstreams } from './dns-upstream-route.mjs'
 import { deployConfig, configMetaPath, applyDnsForwardNow, dnsForwardMeta, profileAsDeployed } from '../system/deploy.mjs'
@@ -350,37 +349,27 @@ export const regenerateIfPlanChanged = async ({ store, ctx, paths, selections, l
 
 export const buildCurrentConfig = (store, systemDns, { geoDir = createPaths(process.env.OPENBOX_ROOT).geoDir, rulesetDir = createPaths(process.env.OPENBOX_ROOT).rulesetDir, cacheFilePath, selections, tlsCert, localSubnets = [], directHostCidrs = [], ruleLists = {}, profilePatch, nativeBypass, inlineDirectHosts = false } = {}) => {
   const profile = profilePatch ? { ...store.getProfile(), ...profilePatch } : store.getProfile()
+  // 计算本身在 engine/client-build.mjs(App 本地分流用同一份);这里只从 store 取输入。
   // 停用的订阅的节点不进内核(api/subscriptions.mjs 的 activeNodes)
-  const nodes = activeNodes(store)
-  const clashApiSecret = store.getClashSecret()
-  const { config, dnsRuleOwners, directHosts } = buildConfigDetailed({
-    cacheFilePath,
-    // 规则集 .srs 所在目录:本机安装路径,不存档案(见 engine/config.mjs)
-    rulesetDir,
-    selections,
-    ...(tlsCert ? { tlsCert } : {}),
-    nodes,
-    userGroups: store.getGroups(),
+  const { config, failover, dnsRuleOwners, directHosts } = buildConfigFromParts({
+    profile,
+    nodes: activeNodes(store),
+    groups: store.getGroups(),
     subscriptions: store.getSubscriptions ? store.getSubscriptions() : [],
-    profile: { ...profile, clashApiSecret },
+    clashSecret: store.getClashSecret(),
+    geoDir,
+    rulesetDir,
+    cacheFilePath,
+    selections,
+    tlsCert,
     systemDns,
-    // 本机接口网段:tun 的私网排除表要把它们挖出来(见 engine/config.mjs)
     localSubnets,
-    // 节点 / 订阅域名此刻的解析结果,并进直连规则的 ip_cidr(见 system/resolve-hosts.mjs)
     directHostCidrs,
-    // 规则集链接的形状表:每条链接编成了域名 / IP 哪几份 .srs(见 system/rule-lists.mjs)
     ruleLists,
     nativeBypass,
     dnsFilter: readFilterArtifact(store),
-    // 订阅和节点站点直连的地址直接写进规则(规则页推算、手机 App);部署的配置引用规则集文件(engine/config.mjs)
     inlineDirectHosts,
   })
-  for (const entry of config.route?.rule_set || []) {
-    if (rulesetKind(entry.tag)) entry.path = `${geoDir}/${entry.tag}.srs`
-  }
-  // 故障转移的运行映射(父组 / 页签 / 有效节点 / 子组 tag / 检测参数):和配置同一次生成,写进 config.meta.json
-  // 给后台管理器和界面用
-  const { failover } = emitUserGroups(store.getGroups(), nodes, { testUrl: profile.testUrl })
   return { config, profile, failover, dnsRuleOwners, directHosts }
 }
 

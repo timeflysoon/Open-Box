@@ -10,7 +10,7 @@ import { admitDnsDirect, admitSources, bypassSources, normalizeClientRoutes } fr
 import { planNodeDns, withNodeResolver } from './node-dns.mjs'
 import { buildDnsWithResolvers, dnsFakeIpEnabled, fakeIpCachePath, ipv6InTun, ipv6ProxyMode, FAKEIP_V6 } from './dns.mjs'
 import { NODE_DIRECT_DOMAIN_TAG, NODE_DIRECT_IP_TAG, NODE_DIRECT_PLACEHOLDER, collectDirectHosts, isSharedCdnCidr, nodeDirectRuleSets } from './direct-hosts.mjs'
-import { cidrsOverlap, parseCidr, subtractCidrs } from '../system/local-subnets.mjs'
+import { cidrsOverlap, parseCidr, subtractCidrs } from './cidr.mjs'
 import { buildFilterConfig } from './dns-filter.mjs'
 import { FLIP_DIR_NAME, FLIP_NEED_FIXED, flipBypassCandidates, flipBypassTag, flipFlagMap, flipNeedTag } from './flip.mjs'
 
@@ -118,7 +118,7 @@ export const buildConfigDetailed = ({ nodes, profile, userGroups, systemDns, loc
   // 内置的直连/拒绝也从这里出(它们和节点组同在「节点管理」列表里,按那里的顺序)
   // 故障转移的内部子组也在 userGroupOutbounds 里(要进内核),但公开的出站清单(站点集出口候选、DNS 分类、
   // 旁路计划)只用 publicTags——内部子组不能漏进候选
-  const { outbounds: userGroupOutbounds, builtin, publicTags } = emitUserGroups(userGroups || [], allNodes, {
+  const { outbounds: userGroupOutbounds, builtin, publicTags, failover } = emitUserGroups(userGroups || [], allNodes, {
     testUrl: profile.testUrl,
   })
 
@@ -368,7 +368,8 @@ export const buildConfigDetailed = ({ nodes, profile, userGroups, systemDns, loc
   }
   if (endpoints.length) config.endpoints = endpoints
   // directHosts:订阅和节点站点直连两份规则集文件的内容(system/node-direct-files.mjs 写),关着时是 null
-  return { config, dnsRuleOwners, directHosts }
+  // failover:故障转移的运行映射(父组 / 页签 / 有效节点 / 子组 tag),和上面的出站同一次生成(含链式节点),写进 config.meta.json
+  return { config, dnsRuleOwners, directHosts, failover }
 }
 // 生成配置本体;dnsRuleOwners(每条 DNS 规则归哪个站点集)另带一份给部署写进元数据(见 buildConfigDetailed)
 export const buildConfig = (options) => buildConfigDetailed(options).config

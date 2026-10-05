@@ -5,6 +5,7 @@ import { normalizeGroups, emitUserGroups, GROUP_TYPES, GROUP_MODES, FAILOVER_INT
 import { parseDuration } from '../engine/duration.mjs'
 import { DNSMASQ_OUTBOUND_TAG } from '../engine/config.mjs'
 import { appliedSummary } from './subscriptions.mjs'
+import { saveNameError } from '../engine/name-guard.mjs'
 
 const isStr = (v) => typeof v === 'string' && v.trim().length > 0
 const numIn = (v, [lo, hi]) => {
@@ -164,6 +165,21 @@ export const registerGroupRoutes = (app, { store, applyNow = null } = {}) => {
         return
       }
       seen.add(g.name)
+    }
+    // 和订阅节点同名也不行(PM 2026-10-04:遇到重名不能保存;判断和 App 共用 engine/name-guard.mjs)
+    {
+      const profile = typeof store.getProfile === 'function' ? store.getProfile() || {} : {}
+      const nameError = saveNameError({
+        nodes: store.getNodes(),
+        subscriptions: typeof store.getSubscriptions === 'function' ? store.getSubscriptions() : [],
+        groups: normalized,
+        routing: profile.routing,
+        chainProxies: profile.chainProxies,
+      }, ['group', 'builtin'])
+      if (nameError) {
+        res.status(400).json({ error: nameError })
+        return
+      }
     }
 
     // 故障转移组按原始提交做严格校验(见 validateFailoverGroup)

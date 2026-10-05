@@ -4,11 +4,10 @@ import { isRuleListTag } from '../engine/rule-list.mjs'
 import { isDnsFilterRulesetTag } from '../engine/dns-filter.mjs'
 import { isFlipTag } from '../engine/flip.mjs'
 import { isNodeDirectTag } from '../engine/direct-hosts.mjs'
+import { isSafeRulesetTag, rulesetKind } from '../engine/ruleset-tags.mjs'
 import { createPaths } from './paths.mjs'
 
-const SAFE_TAG = /^[A-Za-z0-9._!@-]+$/
-export const isSafeRulesetTag = tag => typeof tag === 'string' && SAFE_TAG.test(tag) && !tag.includes('..')
-export const rulesetKind = tag => isSafeRulesetTag(tag) ? /^(geoip|geosite)-.+/.exec(tag)?.[1] || null : null
+export { isSafeRulesetTag, rulesetKind }
 
 export const rulesetPath = (paths, tag) => {
   if (!isSafeRulesetTag(tag)) throw new Error(`不合法的规则集名 ${tag}`)

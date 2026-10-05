@@ -5,6 +5,7 @@
 // 再用 toClientTemplate 改写成客户端模板。路由器自己的配置代码一行没动,路由器配置逐字不变由构造保证。
 // 模板里没有入站 / experimental / log:这些由客户端按平台补(clients/core/obclient 的 BuildFullConfig)。
 import { isFlipBypassTag, isFlipNeedTag, isFlipTag } from './flip.mjs'
+import { isNodeDirectTag } from './direct-hosts.mjs'
 
 // 客户端的 FakeIP 段:不能和路由器的 198.19.0.0/16 重叠(和 A 模式同一个段,见 clients/core/obclient)
 export const CLIENT_FAKEIP_V4 = '198.18.0.0/16'
@@ -73,6 +74,9 @@ export const toClientTemplate = (config, { selections = {}, flagState = {}, flag
     if (isFlipTag(entry.tag)) {
       entry.path = `${CLIENT_FLIP_DIR}/${entry.tag}.json`
       flags.push({ tag: entry.tag, selector: flagSelectors[entry.tag] || '', on: Boolean(flagState[entry.tag]) })
+    } else if (isNodeDirectTag(entry.tag)) {
+      // 订阅和节点站点直连的两份(source 格式 JSON):App 按节点自己写(engine/client-build.mjs 回的 ruleFiles),不从路由器下载
+      entry.path = `${CLIENT_RULESET_DIR}/${entry.tag}.json`
     } else if (entry.type === 'local') {
       entry.path = `${CLIENT_RULESET_DIR}/${entry.tag}.srs`
       ruleSets.push(entry.tag)

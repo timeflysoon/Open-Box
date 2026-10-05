@@ -14,7 +14,7 @@ const run = async ({ current = 'v0.1.265', latest = 'v0.1.266' } = {}) => {
   const store = { getProfile: () => ({ updates: { openbox: { auto: true, hour: 4, days: 1, channel: 'mirror' } } }) }
   const fetchImpl = async (url, init) => {
     assert.equal(init.method, 'HEAD')
-    return { status: 302, url, headers: new Headers({ location: `https://github.com/liandu2024/Open-Box/releases/tag/${latest}` }) }
+    return { status: 302, url, headers: new Headers({ location: `https://github.com/timeflysoon/Open-Box/releases/tag/${latest}` }) }
   }
   const logs = []
   await runScheduledTasks({ store, ctx, paths, fetchImpl, now, log: (m) => logs.push(m) })
