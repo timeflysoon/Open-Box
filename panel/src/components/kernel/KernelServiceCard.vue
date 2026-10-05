@@ -6,7 +6,7 @@
       <div class="flex flex-wrap items-center gap-3">
         <h2 class="text-base font-semibold">{{ $t('kernelServiceTitle') }}</h2>
         <a
-          href="https://github.com/liandu2024/Open-Box"
+          href="https://github.com/timeflysoon/Open-Box"
           target="_blank"
           rel="noopener noreferrer"
           class="hover:bg-base-200 ml-auto inline-flex items-center gap-2 rounded-lg px-2 py-1"
