@@ -358,15 +358,18 @@ test('POST /api/openbox/deploy 起来之后又死了（死循环）→ verify �
     { code: 0, stdout: 'running' }, // 第一眼:刚起来
     { code: 1, stdout: 'not running' }, // 等几秒再看:已经崩了
   ]
+  // 这两行是重启之后才有的(重启前的日志里没有)
+  let restarted = false
   const ctx = okCtx({
+    '/etc/init.d/openbox restart': () => { restarted = true; return { code: 0, stdout: '' } },
     '/etc/init.d/openbox status': () => statuses.shift() || { code: 1, stdout: 'not running' },
-    'logread -e sing-box': {
+    'logread -e sing-box': () => ({
       code: 0,
-      stdout: [
+      stdout: restarted ? [
         'Wed Sep  2 20:28:50 2026 daemon.err sing-box[18171]: \u001b[31mFATAL\u001b[0m[0000] start service: start dns/udp[dns-direct]: detour to an empty direct outbound makes no sense',
         'Wed Sep  2 20:29:29 2026 daemon.info procd: Instance openbox::openbox s in a crash loop',
-      ].join('\n'),
-    },
+      ].join('\n') : '',
+    }),
   })
   const { baseUrl, store, close } = await startApp(ctx)
   try {

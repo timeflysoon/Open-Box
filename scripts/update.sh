@@ -938,9 +938,10 @@ fi
 #
 # 优先用 setsid 让后台进程彻底脱离当前会话/控制终端。部分 OpenWrt 固件没有
 # 单独的 setsid 链接,但 BusyBox 仍然编译了 setsid applet,所以两种入口都要探测。
-# 极简固件连 applet 也没有时,退回 nohup + 双重后台派发:忽略 HUP/TERM,关闭标准
-# 输入输出,并让第二层子进程在派发脚本退出后继续运行。这样不会因为 rpcd 的 fs.exec
-# 请求结束而在下载中途直接失败;状态文件仍由真正的 worker 写入,页面继续按原逻辑轮询。
+# 极简固件连 applet 也没有时,退回双重后台派发:忽略 HUP/INT/TERM,关闭标准输入输出,
+# 并让第二层子进程在派发脚本退出后继续运行;有 nohup 再套一层,连 nohup 都没有的固件
+# (#406)直接起。这样不会因为 rpcd 的 fs.exec 请求结束而在下载中途直接失败;状态文件
+# 仍由真正的 worker 写入,页面继续按原逻辑轮询。
 UPDATE_LOG="${TMPDIR:-/tmp}/openbox-update.log"
 if [ "$DETACH" = "1" ]; then
   # 先在派发进程里同步截断日志,而不是指望子进程的重定向去截断:fs.exec 一返回,
@@ -997,15 +998,19 @@ if [ "$DETACH" = "1" ]; then
     OPENBOX_UPDATE_CHANNEL_OVERRIDE="$CHANNEL_OVERRIDE" OPENBOX_UPDATE_MIRROR_PREFIX="$CLI_MIRROR_PREFIX" OPENBOX_UPDATE_EXPECT="$EXPECT_VERSION" OPENBOX_UPDATE_DISPATCHED=1 \
       busybox setsid sh "$0" >"$UPDATE_LOG" 2>&1 </dev/null &
   else
-    # 没有 setsid 的极简固件:双重 fork + nohup,避免把 worker 留在 fs.exec 的前台
-    # 会话里。nohup 会忽略挂断信号,两层 subshell 都关闭输出后立即返回。
-    info "本机未提供 setsid,使用 nohup 后台派发升级任务。"
+    # 没有 setsid 的极简固件:双重 fork,避免把 worker 留在 fs.exec 的前台会话里。两层 subshell 都忽略
+    # HUP/INT/TERM(忽略状态一直继承到 worker)、关闭输出后立即返回。有 nohup 就再套一层;连 nohup 都没有的
+    # 固件(#406:面板里升级报「nohup: not found」,worker 根本没派发出去)直接起 sh,上面的忽略已经够用
+    _ob_nohup=""
+    if command -v nohup >/dev/null 2>&1; then _ob_nohup="nohup"; fi
+    info "本机未提供 setsid,改用双重后台派发升级任务。"
     (
       trap '' HUP INT TERM
       (
         trap '' HUP INT TERM
+        # shellcheck disable=SC2086
         OPENBOX_UPDATE_CHANNEL_OVERRIDE="$CHANNEL_OVERRIDE" OPENBOX_UPDATE_MIRROR_PREFIX="$CLI_MIRROR_PREFIX" OPENBOX_UPDATE_EXPECT="$EXPECT_VERSION" OPENBOX_UPDATE_DISPATCHED=1 \
-          nohup sh "$0" >"$UPDATE_LOG" 2>&1 </dev/null &
+          $_ob_nohup sh "$0" >"$UPDATE_LOG" 2>&1 </dev/null &
       ) >/dev/null 2>&1 &
     ) >/dev/null 2>&1 &
   fi

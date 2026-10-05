@@ -97,9 +97,33 @@ modB.db
   .run('config/access-password', 'controller-proxy-test-placeholder')
 const baseUrlB = await listenEphemeral(modB.server)
 
+// ---- #414:假 clash_api 的测速接口一直不回(用实例 B 的目标 header 指过去)。测速转发到点要回 504 并断开内核那头;浏览器先断了也立刻断开 ----
+const startHangingUpstream = () =>
+  new Promise((resolve, reject) => {
+    const closedAt = []
+    const httpServer = http.createServer((req, res) => {
+      if (/\/delay(\?|$)/.test(req.url)) {
+        req.on('close', () => closedAt.push(Date.now()))
+        return // 一个字节都不回
+      }
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ ok: true }))
+    })
+    httpServer.once('error', reject)
+    httpServer.listen(0, '127.0.0.1', () => {
+      resolve({
+        baseUrl: `http://127.0.0.1:${httpServer.address().port}`,
+        closedAt,
+        close: () => new Promise((r) => { httpServer.closeAllConnections?.(); httpServer.close(r) }),
+      })
+    })
+  })
+const hangingUpstream = await startHangingUpstream()
+
 after(async () => {
   await modA.shutdownServer().catch(() => {})
   await modB.shutdownServer().catch(() => {})
+  await hangingUpstream.close()
   await fakeDefaultUpstream.close()
   await fakeOverrideUpstream.close()
   await fs.rm(tempDirA, { recursive: true, force: true })
@@ -203,4 +227,35 @@ test('不带 query 的 /api/controller-ws 连接被转发到本机 clash_api,并
 
   client.close()
   await new Promise((resolve) => client.once('close', resolve))
+})
+
+const hangingTarget = { 'x-zashboard-target-base': hangingUpstream.baseUrl, 'x-zashboard-target-secret': 's' }
+
+test('#414 内核测速一直不回:转发到点回 504 并断开内核那头,别的接口照常', async (t) => {
+  modB.setControllerDelayDeadlineForTesting(600)
+  t.after(() => modB.setControllerDelayDeadlineForTesting(60_000))
+  const before = hangingUpstream.closedAt.length
+  const started = Date.now()
+  const res = await fetch(`${baseUrlB}/api/controller/group/${encodeURIComponent('美国-自动')}/delay?url=http%3A%2F%2Fcp.cloudflare.com&timeout=5000`, { headers: hangingTarget })
+  const elapsed = Date.now() - started
+  assert.equal(res.status, 504)
+  assert.match((await res.json()).message, /没有回应/)
+  assert.ok(elapsed >= 500 && elapsed < 5000, `到点才回:${elapsed}ms`)
+  for (let i = 0; i < 40 && hangingUpstream.closedAt.length === before; i++) await new Promise((r) => setTimeout(r, 25))
+  assert.equal(hangingUpstream.closedAt.length, before + 1, '内核那头的连接要断开')
+  // 不是测速的接口不受这个上限影响
+  assert.equal((await fetch(`${baseUrlB}/api/controller/version`, { headers: hangingTarget })).status, 200)
+})
+
+test('#414 浏览器那头先断了(页面关了、前端不等了):立刻断开内核那头,不等到上限', async () => {
+  const before = hangingUpstream.closedAt.length
+  const abort = new AbortController()
+  const pending = fetch(`${baseUrlB}/api/controller/proxies/HK-01/delay?url=x&timeout=5000`, { headers: hangingTarget, signal: abort.signal }).catch(() => null)
+  await new Promise((r) => setTimeout(r, 100))
+  const abortedAt = Date.now()
+  abort.abort()
+  await pending
+  for (let i = 0; i < 40 && hangingUpstream.closedAt.length === before; i++) await new Promise((r) => setTimeout(r, 10))
+  assert.equal(hangingUpstream.closedAt.length, before + 1, '内核那头的连接要断开')
+  assert.ok(hangingUpstream.closedAt[before] - abortedAt < 300, `浏览器断开后要马上断,实际 ${hangingUpstream.closedAt[before] - abortedAt}ms`)
 })

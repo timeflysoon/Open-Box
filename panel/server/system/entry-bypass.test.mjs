@@ -52,7 +52,8 @@ test('终端分流按 IP(#187):不进内核按来源地址打标记(v4 / v6 分�
   assert.ok(lines.includes(`iifname { "br-lan" } meta nfproto ipv6 ether saddr != { aa:bb:cc:00:00:04 } ${MARK}`), '没列 v6 地址:v6 只按 MAC 放进来')
   assert.ok(!text.includes('10.0.0.8'), '指定出站的不在这里')
   assert.ok(!text.includes('entry_bypass_out'), '终端规则只在 prerouting')
-  assert.equal(entryBypassNft({ clientRoutes, autoRedirect: false, lanIfaces: ['br-lan'] }), '', '纯 tun 兼容模式下不装')
+  const pureTun = entryBypassNft({ clientRoutes, autoRedirect: false, pureTun: true, lanIfaces: ['br-lan'] })
+  assert.ok(!pureTun.includes('saddr'), '纯 tun 兼容模式下终端规则不装')
   const noLan = entryBypassNft({ clientRoutes, autoRedirect: true, lanIfaces: [] })
   assert.ok(!noLan.includes('iifname'), '认不出局域网口就不装白名单,宁可不生效也不误伤 WAN 进来的')
   assert.ok(noLan.includes('ip saddr { 10.0.0.30/32 }'), '黑名单不受影响')
@@ -185,6 +186,21 @@ test('「只让这些终端进内核」名单外的终端:发往 FakeIP 占位�
   assert.equal(entryBypassNft({ clientRoutes, autoRedirect: true, lanIfaces: [], admitDnsPort: 7855 }), '')
 })
 
+
+test('纯 tun 兼容模式:回包方向只给包或上放行位,端口映射的回包不再被拉进 tun(#383);auto_redirect 下内核自己 return,不写', () => {
+  const text = entryBypassNft({ autoRedirect: false, pureTun: true })
+  assert.equal(text, [
+    '\tchain entry_bypass_in {',
+    '\t\ttype filter hook prerouting priority mangle - 10; policy accept;',
+    `\t\tct direction reply meta mark set meta mark or ${PASS_MARK}`,
+    '\t}',
+  ].join('\n'))
+  assert.ok(!text.includes('ct mark set'), '不动连接标记')
+  assert.equal(entryBypassNft({ autoRedirect: true, pureTun: true }), '', 'auto_redirect 下不写')
+  assert.equal(entryBypassNft({ autoRedirect: false }), '', '配置里没有 tun 时不写')
+  // init 脚本只收这些字符(openwrt/initd/openbox 的 openbox_entry_bypass)
+  assert.ok(!/[^A-Za-z0-9 \t\n{}.,:;!="_@/-]/.test(text))
+})
 
 test('activeBypassPorts:只用选中模式的那份名单', async () => {
   const { activeBypassPorts } = await import('./entry-bypass.mjs')

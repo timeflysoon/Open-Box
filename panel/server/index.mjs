@@ -269,9 +269,9 @@ const obCtx = createRealContext()
 // 定时任务按路由器本地时间的钟点跑:OpenWrt 上时区名和系统实际的 POSIX 串对得上,就按时区名设面板自己的 TZ
 // (固件没装 zoneinfo、有夏令时的时区也算得对;见 system/timezone.mjs)。计划任务第一次跑在一分钟后,来得及
 void syncProcessTimezoneOnStartup(obCtx, obPlatform).catch(() => {})
-startRegionDetect({ store, ctx: obCtx, paths: obPaths, log: (m) => console.log(m) })
+const regionDetect = startRegionDetect({ store, ctx: obCtx, paths: obPaths, log: (m) => console.log(m) })
 // 「路由器标识」的地区没手动选时按出口 IP 判的国家:还没判过 / 超过一周就在后台判一次(不挡启动,App 发布前不做)
-if (CLIENT_APPS_ENABLED) startEgressCountryDetect({ store, ctx: obCtx, paths: obPaths, log: (m) => console.log(m) })
+const egressCountryDetect = CLIENT_APPS_ENABLED ? startEgressCountryDetect({ store, ctx: obCtx, paths: obPaths, log: (m) => console.log(m) }) : null
 
 const parseStoredBoolean = (value) => {
   if (typeof value !== 'string') {
@@ -638,7 +638,23 @@ const syncSelectionsAfterProxySwitch = () => {
   }, 600)
 }
 
+// 内核的测速接口(/proxies/<x>/delay、/group/<x>/delay)可能挂很久:整组成员都不通时 25 秒一个字节都不回,URL 里的
+// timeout 管不住(#414)。浏览器对同一个站点只开 6 条连接,几条挂住页面上别的请求全排队,整页假死。给测速转发一个
+// 上限,到点回 504 并断开内核那头;浏览器那头先断了(页面关了、前端自己不等了)也立刻断开内核那头,不留着连接
+let CONTROLLER_DELAY_DEADLINE_MS = 60_000
+export const setControllerDelayDeadlineForTesting = (ms) => { CONTROLLER_DELAY_DEADLINE_MS = ms }
+const isControllerDelayRequest = (req) => /\/delay(\?|$)/.test(String(req.originalUrl || req.url || ''))
+
 const proxyControllerRequest = async (req, res) => {
+  const upstreamAbort = new AbortController()
+  let deadlineHit = false
+  const onClientClose = () => {
+    if (!res.writableEnded) upstreamAbort.abort()
+  }
+  res.on('close', onClientClose)
+  const deadline = isControllerDelayRequest(req)
+    ? setTimeout(() => { deadlineHit = true; upstreamAbort.abort() }, CONTROLLER_DELAY_DEADLINE_MS)
+    : null
   try {
     const { base, secret } = getProxyTarget(req)
     const upstreamUrl = buildUpstreamUrl(req, base)
@@ -679,6 +695,7 @@ const proxyControllerRequest = async (req, res) => {
           : Buffer.isBuffer(req.body) && req.body.length
             ? req.body
             : undefined,
+      signal: upstreamAbort.signal,
     })
 
     res.status(response.status)
@@ -699,9 +716,18 @@ const proxyControllerRequest = async (req, res) => {
       syncSelectionsAfterProxySwitch()
     }
   } catch (error) {
+    // 浏览器那头已经断了:没人收了,什么都不回
+    if (res.headersSent || res.destroyed || res.writableEnded) return
+    if (deadlineHit) {
+      res.status(504).json({ message: `内核测速 ${Math.round(CONTROLLER_DELAY_DEADLINE_MS / 1000)} 秒没有回应,已断开` })
+      return
+    }
     res.status(502).json({
       message: error instanceof Error ? error.message : String(error),
     })
+  } finally {
+    if (deadline) clearTimeout(deadline)
+    res.off('close', onClientClose)
   }
 }
 
@@ -1553,6 +1579,9 @@ const shutdownServer = async () => {
   }
 
   memoryWatchdog.stop()
+  // 地区判定的定时器:关库之后再跑会读到已经关掉的库
+  regionDetect.stop()
+  if (egressCountryDetect) egressCountryDetect.stop()
   // 先把攒着没写的流量增量落盘,再关库
   trafficCollector.stop()
   latencyScheduler.stop()

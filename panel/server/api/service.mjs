@@ -9,7 +9,8 @@ import { cancelPendingDeploys, runDeploy, runExclusive } from './deploy-runner.m
 // 校验 → 落盘 → DNS 接管 → 防火墙 → 启动 → 验证,失败自动回滚到直连。
 const failureDetail = (result) => result.message || `deploy failed at stage: ${result.stage}`
 
-export const registerServiceRoutes = (app, { store, ctx, paths, stopWaitMs = 8000, restartPending = null } = {}) => {
+// 停止要等多久:init 脚本给内核 15 秒收尾(procd term_timeout,到点强杀),再多留 5 秒
+export const registerServiceRoutes = (app, { store, ctx, paths, stopWaitMs = 20000, restartPending = null } = {}) => {
   const router = express.Router({ caseSensitive: true })
   router.use(express.json({ limit: '1mb' }))
 

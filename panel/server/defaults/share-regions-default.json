@@ -4,8 +4,9 @@
     {
       "id": "cn",
       "name": "中国大陆",
-      "description": "国内网站本地直连,其余回路由器",
+      "description": "中国大陆站点本地直连，其余流量走代理（回路由器）",
       "regions": ["CN"],
+      "default": true,
       "rules": [
         { "type": "geosite", "value": "cn", "action": "direct" },
         { "type": "geoip", "value": "cn", "action": "direct" },
@@ -20,11 +21,13 @@
     },
     {
       "id": "hkmo",
-      "name": "港澳",
-      "description": "AI 服务回路由器,其余本地直连",
+      "name": "香港澳门",
+      "description": "AI 服务等通过代理（回路由器）访问，其余流量本地直连",
       "regions": ["HK", "MO"],
       "rules": [
-        { "type": "geosite", "value": "category-ai-!cn", "action": "proxy" }
+        { "type": "geosite", "value": "category-ai-!cn", "action": "proxy" },
+        { "type": "geosite", "value": "bytedance-ai-!cn", "action": "proxy" },
+        { "type": "domainSuffix", "value": "muse.ai", "action": "proxy" }
       ],
       "catchAll": "direct",
       "dns": {
@@ -35,9 +38,9 @@
     {
       "id": "other",
       "name": "其他地区",
-      "description": "国内网站回路由器,其余本地直连",
-      "regions": [],
-      "default": true,
+      "description": "中国大陆（不含香港、澳门）站点走代理（回路由器），其余流量本地直连",
+      "regions": ["CN", "HK", "MO"],
+      "regionMatch": "outside",
       "rules": [
         { "type": "geosite", "value": "cn", "action": "proxy" },
         { "type": "geoip", "value": "cn", "action": "proxy" }

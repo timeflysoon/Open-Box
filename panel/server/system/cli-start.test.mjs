@@ -86,6 +86,29 @@ test('open-box start --detach:立刻返回,状态先是 running,后台跑完换�
   assert.deepEqual(JSON.parse(status), { ok: true, stage: 'running', message: '', badTags: [] })
 })
 
+test('open-box start --detach:固件连 setsid / busybox setsid / nohup 都没有也照样派到后台跑完(#406)', async (t) => {
+  const s = setup({ sleep: 1 })
+  t.after(s.cleanup)
+  const bin = path.join(s.dir, 'path')
+  fs.mkdirSync(bin)
+  for (const src of ['/usr/bin', '/bin']) {
+    for (const f of fs.readdirSync(src)) {
+      if (['setsid', 'busybox', 'nohup'].includes(f) || fs.existsSync(path.join(bin, f))) continue
+      try { fs.symlinkSync(path.join(src, f), path.join(bin, f)) } catch { /* 同名的已链过 */ }
+    }
+  }
+  const r = spawnSync('/bin/sh', [path.join(s.dir, 'open-box'), 'start', '--detach'], { encoding: 'utf8', env: { PATH: bin } })
+  assert.equal(r.status, 0, r.stderr)
+  assert.doesNotMatch(r.stderr, /not found/)
+  let status = ''
+  for (let i = 0; i < 50; i++) {
+    status = s.run('start', '--status').stdout.trim()
+    if (status !== 'running') break
+    await new Promise((resolve) => setTimeout(resolve, 100))
+  }
+  assert.deepEqual(JSON.parse(status), { ok: true, stage: 'running', message: '', badTags: [] })
+})
+
 test('LuCI 页面:内核卡片的启动 / 重启调 open-box start --detach 再轮询 --status;面板卡片照旧走 init', () => {
   const src = fs.readFileSync(LUCI, 'utf8')
   assert.match(src, /fs\.exec\(CLI_PATH, \[ 'start', '--detach' \]\)/)

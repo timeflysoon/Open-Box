@@ -205,6 +205,21 @@ const ensureQueryLogFile = async (ctx) => {
 // dnsmasq 已经按不带日志那两行的配置重启过(或者本来就没带):日志文件没人写了,拿掉
 const removeQueryLog = async (ctx) => { await ctx.remove(DNSMASQ_QUERY_LOG_PATH) }
 
+// 路由器自己有没有可用的 DNS 上游(按域名转发时,没进名单的域名交给它解析):uci 里有不限域名的 server(/#/ 也算),
+// 或者没设 noresolv、dnsmasq 读的解析文件(netifd 按 WAN / 接口 DNS 写)里有 nameserver
+const DEFAULT_RESOLV_FILE = '/tmp/resolv.conf.d/resolv.conf.auto'
+const hasOwnUpstream = async (ctx, baseline) => {
+  if (baseline.servers.some((v) => !v.startsWith('/') || v.startsWith('/#/'))) return true
+  if (baseline.noresolv === '1') return false
+  const configured = String((await ctx.exec('uci', ['-q', 'get', 'dhcp.@dnsmasq[0].resolvfile'])).stdout || '').trim()
+  const file = configured || DEFAULT_RESOLV_FILE
+  try {
+    return (await ctx.exists(file)) && /^\s*nameserver\s+\S+/m.test(String(await ctx.readFile(file)))
+  } catch {
+    return false
+  }
+}
+
 export const applyDnsTakeover = async (ctx, paths, { mode, forwardDomains = [], forward, rewriteSources = [], queryLog = false } = {}) => {
   if (mode !== 'dnsmasq') return { changed: false, actions: [], effective: { mode: 'none', domains: [], reason: '' }, queryLog: QUERY_LOG_OFF }
   // 计划(engine/routing-model.mjs + system/dns-forward.mjs 展开过的)优先;老调用方只传名单时按老语义折算
@@ -228,6 +243,9 @@ export const applyDnsTakeover = async (ctx, paths, { mode, forwardDomains = [], 
     const bad = (plan.domains || []).find((d) => !dnsmasqSafeDomain(d))
     if (bad !== undefined) plan = { mode: 'all', domains: [], reason: `域名「${bad}」写不进 dnsmasq,只能全量转发` }
     else if (!(plan.domains || []).length) plan = { mode: 'none', domains: [], reason: '转发名单是空的,按全部直连处理' }
+    // 路由器自己一个上游都没有(#412:上游 DNS 没设、又忽略了解析文件):没进名单的域名全解析不了、全 LAN 没网;用户手动加的
+    // 127.0.0.1#7853 又会被当成我们的条目摘掉。这种只能全量转发给内核
+    else if (!(await hasOwnUpstream(ctx, baseline))) plan = { mode: 'all', domains: [], reason: '路由器自己没有可用的 DNS 上游,只能全量转发给内核' }
   }
   const effective = { mode: plan.mode, domains: plan.mode === 'domains' ? plan.domains : [], reason: plan.reason || '' }
   // 查询日志只在 dnsmasq 真往内核转的时候有用(none 一个都不转)

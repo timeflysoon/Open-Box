@@ -243,6 +243,52 @@ test('内核脚本自定义 restart（）:跳过清理,否则 USE_PROCD=1 下 re
   )
 })
 
+// #386 #383 #378:procd 默认 5 秒就强杀,restart 又不等旧进程退出——新内核在旧 tun 网卡还在注销时起来,建路由失败
+// 或 auto_redirect 起不来被降级成纯 tun;面板查状态看到的还是旧进程,报「启动成功」其实没在工作
+test('内核停止给 15 秒宽限(procd term_timeout),tun 网卡名和生成器一致', async () => {
+  assert.match(core, /^OPENBOX_TERM_TIMEOUT=15$/m)
+  assert.match(core, /procd_set_param term_timeout "\$OPENBOX_TERM_TIMEOUT"/)
+  const { TUN_INTERFACE_NAME } = await import('../engine/tun-options.mjs')
+  assert.match(core, new RegExp(`^OPENBOX_TUN=${TUN_INTERFACE_NAME}$`, 'm'))
+  // Debian 单元的停止宽限一样长
+  assert.match(fs.readFileSync(path.join(repoRoot, 'debian/systemd/openbox.service'), 'utf8'), /^TimeoutStopSec=15$/m)
+})
+
+test('restart:先记下旧进程号再 stop,等旧进程真的退出、tun 网卡没了才 start', () => {
+  const body = core.match(/^restart\(\)\s*\{([^}]*)\}/m)[1]
+  const order = ['openbox_instance_pid', 'stop', 'openbox_wait_kernel_gone', 'start'].map((w) => body.search(new RegExp(`\\b${w}\\b`)))
+  assert.ok(order.every((i) => i >= 0) && order.every((i, k) => k === 0 || i > order[k - 1]), `顺序不对:${body}`)
+  assert.match(body, /openbox_wait_kernel_gone "\$_ob_old_pid"/)
+})
+
+test('openbox_wait_kernel_gone:旧进程在就等它退出,tun 网卡在就等它消失;都不在立刻返回;等不到也有上限', () => {
+  const fn = core.match(/^openbox_wait_kernel_gone\(\) \{[^]*?^\}/m)
+  assert.ok(fn, '抽不出 openbox_wait_kernel_gone')
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'openbox-wait-gone-'))
+  const proc = path.join(dir, 'proc')
+  const net = path.join(dir, 'net')
+  fs.mkdirSync(path.join(proc, '4242'), { recursive: true })
+  fs.mkdirSync(path.join(net, 'openbox-tun'), { recursive: true })
+  const body = fn[0].replaceAll('/proc/', `${proc}/`).replaceAll('/sys/class/net/', `${net}/`)
+  const run = (script) => {
+    const started = Date.now()
+    execFileSync('sh', ['-c', `OPENBOX_TERM_TIMEOUT=1\nOPENBOX_TUN=openbox-tun\n${body}\n${script}`], { encoding: 'utf8' })
+    return Date.now() - started
+  }
+  // 旧进程 0.6 秒后退出、tun 网卡 1.2 秒后消失:两样都等到才返回
+  const waited = run(`( sleep 0.6; rmdir "${proc}/4242"; sleep 0.6; rmdir "${net}/openbox-tun" ) &\nopenbox_wait_kernel_gone 4242`)
+  assert.ok(waited >= 1100, `该等到 tun 网卡消失才返回,实际 ${waited}ms`)
+  assert.ok(!fs.existsSync(path.join(net, 'openbox-tun')))
+  // 都不在:立刻返回
+  assert.ok(run('openbox_wait_kernel_gone 4242') < 500)
+  assert.ok(run('openbox_wait_kernel_gone ""') < 500)
+  // 进程一直不退:最多等 term_timeout + 3 秒(这里 1 + 3)
+  fs.mkdirSync(path.join(proc, '4343'))
+  const capped = run('openbox_wait_kernel_gone 4343')
+  assert.ok(capped >= 3500 && capped < 6000, `等待上限不对:${capped}ms`)
+  fs.rmSync(dir, { recursive: true, force: true })
+})
+
 test('面板脚本以 data/panel-port 里的端口(读不到则 2026)与 OPENBOX_ROOT 启动', () => {
   // 端口从 v0.1.217 起可改:装机可选、LuCI 页面能改,值落在 data/panel-port。
   // 没有那个文件的老机器必须继续用 2026,否则它们升级完面板就换端口了。详见 panel-port.test.mjs。

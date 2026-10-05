@@ -412,7 +412,7 @@ function waitDeploy(deadline) {
 // 版本
 // ---------------------------------------------------------------------------
 var META_PATH = '/opt/open-box/meta.json';
-var REPO = 'liandu2024/Open-Box';
+var REPO = 'timeflysoon/Open-Box';
 
 function readInstalledVersion() {
 	return fs.read(META_PATH).then(function (txt) {

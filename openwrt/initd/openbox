@@ -42,6 +42,12 @@ SINGBOX_OUTPUT_MARK=0x2024
 # 别的位(mwan3 记在连接上的线路等)原样留着,怎么走交给路由器自己的路由
 OPENBOX_PASS_MARK=0x02000000
 NFT_TABLE="inet openbox"
+# 内核正常收尾要做的事不少:删自己的 nft 表和路由、把直连应答放行的地址存档、关 tun。procd 默认只给 5 秒,
+# 到点就强杀;iStoreOS 这类机器上常常收不完(#386 日志里「close inbound/tun take too much time」和「not stopped
+# on SIGTERM, sending SIGKILL」在同一秒,正式路由器升级时也出现过)。给 15 秒,和 Debian 单元的 TimeoutStopSec 一样
+OPENBOX_TERM_TIMEOUT=15
+# 内核的 tun 网卡名(和 panel/server/engine/tun-options.mjs 的 TUN_INTERFACE_NAME 一致)
+OPENBOX_TUN=openbox-tun
 
 openbox_dnsmasq_mode() {
 	if [ -f "$CONF_META" ]; then
@@ -387,6 +393,7 @@ start_service() {
 	procd_set_param stdout 1
 	procd_set_param stderr 1
 	procd_set_param respawn 3600 5 5
+	procd_set_param term_timeout "$OPENBOX_TERM_TIMEOUT"
 	procd_set_param limits core="unlimited" nofile="65535 65535"
 	procd_close_instance
 
@@ -489,9 +496,33 @@ stop_service() {
 	openbox_cleanup
 }
 
+# procd 的 stop 只发 SIGTERM 就返回;紧接着的 start 让 procd 在旧进程一退出(或到点被强杀)时马上拉起新的。旧内核
+# 被强杀时 tun 网卡、路由还在拆,新内核建路由会失败(#386:set routes: add route 56: no route to host),或者
+# auto_redirect 起不来被面板降级成纯 tun(#383 #378);面板这时查状态看到的还是没退出的旧进程,报「启动成功」
+# 其实没在工作。所以 restart 先等旧进程真的退出、tun 网卡没了再起。$1 是 stop 之前 procd 记的旧进程号
+openbox_wait_kernel_gone() {
+	# 不支持小数的 sleep(极简 busybox)就按整秒等
+	if sleep 0.1 2>/dev/null; then _ob_tick=0.2; _ob_per=5; else _ob_tick=1; _ob_per=1; fi
+	_ob_n=0
+	if [ -n "$1" ]; then
+		while [ -d "/proc/$1" ] && [ "$_ob_n" -lt $(( (OPENBOX_TERM_TIMEOUT + 3) * _ob_per )) ]; do
+			sleep "$_ob_tick"
+			_ob_n=$((_ob_n + 1))
+		done
+	fi
+	_ob_n=0
+	while [ -e "/sys/class/net/$OPENBOX_TUN" ] && [ "$_ob_n" -lt $(( 5 * _ob_per )) ]; do
+		sleep "$_ob_tick"
+		_ob_n=$((_ob_n + 1))
+	done
+	return 0
+}
+
 restart() {
 	OPENBOX_SKIP_CLEANUP=1
+	_ob_old_pid="$(openbox_instance_pid)"
 	stop
+	openbox_wait_kernel_gone "$_ob_old_pid"
 	OPENBOX_SKIP_CLEANUP=0
 	start
 }

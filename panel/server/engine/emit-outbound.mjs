@@ -82,11 +82,16 @@ export const buildTransport = (t) => {
 // 全看机场心情。校验失败的表现是"这个节点就是连不上",用户无从判断。节点本身有密码 /
 // UUID 认证,这里放宽的是"服务器证书归谁"这一层。REALITY 例外:它本来就不靠证书链,
 // 而是用公钥验证,不需要也不该写 insecure。
+//
+// options.http1:传输层是 ws / httpupgrade——两者都是 HTTP/1.1 的 Upgrade,内核只在 alpn 为空时才给它们强制
+// http/1.1(transport/v2raywebsocket/client.go)。3x-ui 导出的 VLESS+WS+TLS 链接带 alpn=h2,http/1.1,h3(#374),
+// 服务端照单协商成 h2,ws 握手就被断开(测速「连接被断开」)。Xray 客户端的 ws 一律只发 http/1.1(v2rayN 能用
+// 就是这个原因),这里照做:写了 alpn 的一律换成只有 http/1.1
 export const buildTls = (tls, options = {}) => {
   if (!tls || !tls.enabled) return undefined
   const out = { enabled: true }
   if (tls.server_name) out.server_name = tls.server_name
-  if (Array.isArray(tls.alpn) && tls.alpn.length) out.alpn = tls.alpn
+  if (Array.isArray(tls.alpn) && tls.alpn.length) out.alpn = options.http1 ? ['http/1.1'] : tls.alpn
   if (tls.reality && tls.reality.enabled) {
     out.reality = { enabled: true }
     if (tls.reality.public_key) out.reality.public_key = tls.reality.public_key
@@ -108,7 +113,13 @@ export const buildTls = (tls, options = {}) => {
 
 const base = (node) => ({ tag: node.tag, server: node.server, server_port: node.server_port })
 const withTransport = (o, f) => { const t = buildTransport(f.transport); if (t) o.transport = t; return o }
-const withTls = (o, f, options) => { const t = buildTls(f.tls, options); if (t) o.tls = t; return o }
+const HTTP1_TRANSPORTS = new Set(['ws', 'httpupgrade'])
+// 传输层先写好(withTransport)再写 TLS:按生成出来的传输类型判断要不要把 alpn 限成 http/1.1
+const withTls = (o, f, options = {}) => {
+  const t = buildTls(f.tls, HTTP1_TRANSPORTS.has(o.transport?.type) ? { ...options, http1: true } : options)
+  if (t) o.tls = t
+  return o
+}
 const QUIC = { quic: true }
 
 const EMITTERS = {

@@ -2,7 +2,7 @@
 # 换成 Restart=always 且不限流;端口 / 堆上限在 debian/bin/openbox-panel-run 里算。PATH 最前面是 logread 替身所在目录
 [Unit]
 Description=Open-Box panel
-Documentation=https://github.com/liandu2024/Open-Box
+Documentation=https://github.com/timeflysoon/Open-Box
 After=network.target
 StartLimitIntervalSec=0
 

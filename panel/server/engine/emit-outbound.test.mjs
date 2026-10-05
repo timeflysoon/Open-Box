@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { emitOutbound } from './emit-outbound.mjs'
 import { createNode } from './node-model.mjs'
+import { parseShareLink } from './sharelink.mjs'
 
 test('shadowsocks emit', () => {
   const n = createNode({ tag: '美国-01', type: 'shadowsocks', server: 'a.com', server_port: 8388, fields: { method: 'aes-256-gcm', password: 'pw' }, source: 'clash' })
@@ -17,6 +18,25 @@ test('vmess emit 带 ws + tls', () => {
   assert.deepEqual(o.transport, { type: 'ws', path: '/vm', headers: { Host: 'cdn.com' } })
   // 证书校验一律跳过(见 emit-outbound.mjs 的说明)
   assert.deepEqual(o.tls, { enabled: true, server_name: 'a.com', insecure: true })
+})
+
+test('ws / httpupgrade + TLS:写了 alpn 的一律只留 http/1.1(#374:3x-ui 链接带 alpn=h2,http/1.1,h3,服务端协商成 h2 后 ws 握手被断);别的传输照原样', () => {
+  // 3x-ui 导出的 VLESS+WS+TLS 原样格式
+  const link = 'vless://11111111-2222-3333-4444-555555555555@vps.example.com:8443?alpn=h2%2Chttp%2F1.1%2Ch3&encryption=none&fp=chrome&host=vps.example.com&path=%2Fws&security=tls&sni=vps.example.com&type=ws#WS'
+  const ws = emitOutbound(parseShareLink(link))
+  assert.equal(ws.transport.type, 'ws')
+  assert.deepEqual(ws.tls.alpn, ['http/1.1'])
+  assert.deepEqual(ws.tls.utls, { enabled: true, fingerprint: 'chrome' })
+  const node = (transport, alpn) => createNode({ tag: 'N', type: 'vless', server: 'a.com', server_port: 443, fields: { uuid: 'u', ...(transport ? { transport } : {}), tls: { enabled: true, server_name: 'a.com', ...(alpn ? { alpn } : {}) } }, source: 'sharelink' })
+  assert.deepEqual(emitOutbound(node({ type: 'httpupgrade', path: '/u' }, ['h2'])).tls.alpn, ['http/1.1'])
+  // 没写 alpn 不补(内核自己给 ws 填 http/1.1)
+  assert.equal(emitOutbound(node({ type: 'ws', path: '/w' })).tls.alpn, undefined)
+  // grpc / http(h2)本来就要 h2;不带传输层的 TCP + TLS 照原样
+  assert.deepEqual(emitOutbound(node({ type: 'grpc', service_name: 's' }, ['h2'])).tls.alpn, ['h2'])
+  assert.deepEqual(emitOutbound(node(null, ['h2', 'http/1.1'])).tls.alpn, ['h2', 'http/1.1'])
+  // trojan / vmess 同一条路
+  const trojan = createNode({ tag: 'T', type: 'trojan', server: 'a.com', server_port: 443, fields: { password: 'pw', transport: { type: 'ws', path: '/t' }, tls: { enabled: true, alpn: ['h2', 'http/1.1'] } }, source: 'clash' })
+  assert.deepEqual(emitOutbound(trojan).tls.alpn, ['http/1.1'])
 })
 
 test('QUIC 出站（tuic / hysteria2）不写 utls:内核在这条路径上不支持,写了每次拨号直接失败', () => {

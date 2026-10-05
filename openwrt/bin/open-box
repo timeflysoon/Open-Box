@@ -21,7 +21,7 @@ ROOT=/opt/open-box
 NODE="$ROOT/node/bin/node"
 DB="$ROOT/data/openbox.sqlite"
 META="$ROOT/meta.json"
-REPO="liandu2024/Open-Box"
+REPO="timeflysoon/Open-Box"
 # 与 scripts/update.sh 的 BUILTIN_MIRRORS 保持一致
 MIRRORS="https://ghfast.top https://gh-proxy.com https://gh.llkk.cc"
 
@@ -276,7 +276,11 @@ cmd_start_detach() {
   elif command -v busybox >/dev/null 2>&1 && busybox setsid true >/dev/null 2>&1; then
     OPENBOX_DEPLOY_WORKER=1 busybox setsid sh "$0" start > "$DEPLOY_LOG" 2>&1 < /dev/null &
   else
-    ( trap '' HUP INT TERM; OPENBOX_DEPLOY_WORKER=1 nohup sh "$0" start > "$DEPLOY_LOG" 2>&1 < /dev/null & ) > /dev/null 2>&1
+    # 连 nohup 都可能没有(#406 那种固件):有就套上,没有就靠 subshell 里忽略的信号直接起
+    _ob_nohup=""
+    if command -v nohup >/dev/null 2>&1; then _ob_nohup="nohup"; fi
+    # shellcheck disable=SC2086
+    ( trap '' HUP INT TERM; OPENBOX_DEPLOY_WORKER=1 $_ob_nohup sh "$0" start > "$DEPLOY_LOG" 2>&1 < /dev/null & ) > /dev/null 2>&1
   fi
   echo "已在后台生成配置并启动内核(open-box start --status 看结果)"
 }

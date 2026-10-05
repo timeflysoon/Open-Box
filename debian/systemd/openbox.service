@@ -2,7 +2,7 @@
 # Restart=on-failure + 启动限流(一小时内最多拉 5 次);起内核前后的系统层动作在 debian/bin/openbox-ctl 里
 [Unit]
 Description=Open-Box sing-box core
-Documentation=https://github.com/liandu2024/Open-Box
+Documentation=https://github.com/timeflysoon/Open-Box
 After=network-online.target openbox-panel.service
 Wants=network-online.target
 StartLimitIntervalSec=3600

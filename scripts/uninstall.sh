@@ -261,7 +261,7 @@ if [ "$DETACH" = "0" ] && [ "$(cat "/proc/$PPID/comm" 2>/dev/null)" = "rpcd" ]; 
 fi
 
 # ---------- --detach:派生后台子进程,自己立刻返回 ----------
-# 和 update.sh 同一套做法:先把 starting 写进状态文件(页面轮询马上有东西看),再 setsid / nohup
+# 和 update.sh 同一套做法:先把 starting 写进状态文件(页面轮询马上有东西看),再 setsid / 双重 fork
 # 把真正干活的那份放到后台、脱离 fs.exec 的会话,这样 rpcd 那条 XHR 超时、连接被切断也不会打断卸载。
 # 注意自迁移副本($0 在 /opt 下的那份)的删除 trap:派发进程退出时不能删,不然把 worker 的脚本文件删了。
 if [ "$DETACH" = "1" ]; then
@@ -278,11 +278,16 @@ if [ "$DETACH" = "1" ]; then
     # shellcheck disable=SC2086
     busybox setsid sh "$0" $_detach_args >"$UNINSTALL_LOG" 2>&1 </dev/null &
   else
-    # 没有 setsid 的极简固件:双重 fork + nohup,同样不把 worker 留在前台会话里
+    # 没有 setsid 的极简固件:双重 fork、忽略挂断信号,同样不把 worker 留在前台会话里。有 nohup 就套上;
+    # 连 nohup 都没有的固件(#406)直接起 sh
+    _ob_nohup=""
+    if command -v nohup >/dev/null 2>&1; then _ob_nohup="nohup"; fi
     (
+      trap '' HUP
       (
+        trap '' HUP
         # shellcheck disable=SC2086
-        nohup sh "$0" $_detach_args >"$UNINSTALL_LOG" 2>&1 </dev/null &
+        $_ob_nohup sh "$0" $_detach_args >"$UNINSTALL_LOG" 2>&1 </dev/null &
       ) >/dev/null 2>&1 &
     ) >/dev/null 2>&1 &
   fi

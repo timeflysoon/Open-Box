@@ -117,6 +117,39 @@ test('防降级:探到的版本比装着的旧就不升;下载到的包比装着
   assert.match(update, /if \[ "\$\(openbox_node_try "\$INSTALL_ROOT" "\$\(cat "\$INSTALL_ROOT\/data\/node-preload" 2>\/dev\/null \|\| true\)"\)" = "ok" \]; then\n\s*\. "\$INSTALL_ROOT\/panel\/server\/system\/update-components\.sh"/)
 })
 
+// 一份 PATH:/usr/bin、/bin 里的命令都链进来,只缺 names 里的(模拟 #406 那种连 setsid / nohup 都没有的固件)
+const pathWithout = (names) => {
+  const dir = tmp()
+  for (const src of ['/usr/bin', '/bin']) {
+    for (const f of fs.readdirSync(src)) {
+      if (names.includes(f) || fs.existsSync(path.join(dir, f))) continue
+      try { fs.symlinkSync(path.join(src, f), path.join(dir, f)) } catch { /* 同名的已链过 */ }
+    }
+  }
+  return dir
+}
+
+test('后台派发:没有 setsid 时双重 fork,有 nohup 套上、连 nohup 都没有也照样把 worker 派出去(#406)', async () => {
+  const start = update.indexOf('    # 没有 setsid 的极简固件:双重 fork')
+  const end = update.indexOf('  info "升级已在后台启动')
+  assert.ok(start > 0 && end > start, '抽不出派发的最后一档')
+  const block = update.slice(start, end) // else 分支的正文 + 收尾的 fi
+  for (const missing of [['setsid', 'busybox'], ['setsid', 'busybox', 'nohup']]) {
+    const dir = tmp()
+    const worker = path.join(dir, 'worker.sh')
+    fs.writeFileSync(worker, `echo "ran $OPENBOX_UPDATE_DISPATCHED $OPENBOX_UPDATE_EXPECT" > "${dir}/ran"\n`)
+    const script = `set -eu\ninfo() { :; }\nCHANNEL_OVERRIDE=; CLI_MIRROR_PREFIX=; EXPECT_VERSION=v9.9.9; UPDATE_LOG="${dir}/update.log"\nif false; then :\nelse\n${block}`
+    const r = spawnSync('/bin/sh', ['-c', script, worker], { encoding: 'utf8', env: { PATH: pathWithout(missing) } })
+    assert.equal(r.status, 0, `${missing.join('/')} 都没有时派发失败:${r.stderr}`)
+    let ran = ''
+    for (let i = 0; i < 100 && !ran; i++) {
+      if (fs.existsSync(path.join(dir, 'ran'))) ran = fs.readFileSync(path.join(dir, 'ran'), 'utf8').trim()
+      else await new Promise((resolve) => setTimeout(resolve, 50))
+    }
+    assert.equal(ran, 'ran 1 v9.9.9', `缺 ${missing.join('/')} 时 worker 没跑起来;日志:${fs.existsSync(path.join(dir, 'update.log')) ? fs.readFileSync(path.join(dir, 'update.log'), 'utf8') : ''}`)
+  }
+})
+
 test('systemd 上挪不出面板的 cgroup 就拒绝后台升级,不退回 setsid(停面板时会被一起结束)', () => {
   const dispatch = update.slice(update.indexOf('systemd-run --scope --quiet true'), update.indexOf('elif command -v setsid >/dev/null 2>&1; then'))
   assert.match(dispatch, /grep -q 'openbox-panel\\\.service' \/proc\/self\/cgroup/)

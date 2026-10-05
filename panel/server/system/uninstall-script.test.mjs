@@ -122,6 +122,22 @@ test('uninstall.sh --detach(LuCI 页面走这条):立刻返回、后台接着删
   assert.match(fs.readFileSync(path.join(s.tmp, 'openbox-uninstall.log'), 'utf8'), /Open-Box 已卸载/)
 })
 
+test('uninstall.sh --detach:固件连 setsid / busybox setsid / nohup 都没有也照样派到后台删完(#406)', async () => {
+  const s = sandbox()
+  // PATH 只链 /usr/bin、/bin 里除这三样以外的命令
+  const bin = fs.mkdtempSync(path.join(os.tmpdir(), 'openbox-path-'))
+  for (const src of ['/usr/bin', '/bin']) {
+    for (const f of fs.readdirSync(src)) {
+      if (['setsid', 'busybox', 'nohup'].includes(f) || fs.existsSync(path.join(bin, f))) continue
+      try { fs.symlinkSync(path.join(src, f), path.join(bin, f)) } catch { /* 同名的已链过 */ }
+    }
+  }
+  const out = run(s, ['--detach'], { PATH: `${path.join(s.dir, 'bin')}:${bin}` })
+  assert.match(out, /卸载已在后台开始/)
+  assert.ok(await waitFor(() => status(s).stage === 'done'), `后台没跑到 done:${JSON.stringify(status(s))}`)
+  assert.ok(!fs.existsSync(path.join(s.root, 'panel')), '后台进程真的删了程序文件')
+})
+
 test('uninstall.sh:没装过就说一声退出;参数不认识就报错(两种都不留 done 进度)', () => {
   const s = sandbox()
   // 把脚本挪到安装目录外,再删掉安装目录:模拟没装过

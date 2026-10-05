@@ -357,10 +357,44 @@ test('domains 期间用户自己加了一个上游:下一次部署把它算进�
 })
 
 test('老版本留下的现场:uci 已被全量接管却没有备份 → 基线不能把 127.0.0.1#7853 和它带来的 noresolv=1 当成用户的设置', async () => {
-  const uci = statefulUci({ servers: ['127.0.0.1#7853'], noresolv: '1' })
+  // WAN 给的 DNS 在解析文件里(netifd 写的),去掉 noresolv=1 后 dnsmasq 就用它
+  const uci = statefulUci({ servers: ['127.0.0.1#7853'], noresolv: '1', files: { '/tmp/resolv.conf.d/resolv.conf.auto': '# Interface wan\nnameserver 192.168.1.1\n' } })
   await applyDnsTakeover(uci.ctx, paths, { mode: 'dnsmasq', forward: { mode: 'domains', domains: ['g.com'] } })
   assert.deepEqual(uci.state, { servers: [], noresolv: null })
   assert.match(uci.ctx.files[INSTALLED], /g\.com/)
+})
+
+// #412:按域名转发时没进名单的域名交给路由器自己解析;它一个上游都没有(上游 DNS 没设、又忽略了解析文件)就全 LAN 没网,
+// 用户手动加的 127.0.0.1#7853 又被当成我们的条目摘掉。这种按全量转发
+test('按域名转发:路由器自己没有可用上游 → 改成全量转发给内核,返回值和状态文件记实际执行的 all 和原因(#412)', async () => {
+  for (const setup of [
+    { servers: [], noresolv: '1' },                               // 忽略解析文件、一个上游都没有
+    { servers: ['127.0.0.1#7853'], noresolv: '1' },               // 用户手动加的内核地址(当成我们的条目)
+    { servers: ['/lan/', '/example.com/10.0.0.1'], noresolv: '1' }, // 只有按域名的,没有全局的
+    { servers: [], noresolv: null },                              // 没忽略解析文件,但解析文件不在
+    { servers: [], noresolv: null, files: { '/tmp/resolv.conf.d/resolv.conf.auto': '# Interface wan\n' } }, // 解析文件里没有服务器
+  ]) {
+    const uci = statefulUci(setup)
+    const r = await applyDnsTakeover(uci.ctx, paths, { mode: 'dnsmasq', forward: { mode: 'domains', domains: ['google.com'] } })
+    assert.equal(r.effective.mode, 'all', JSON.stringify(setup))
+    assert.match(r.effective.reason, /没有可用的 DNS 上游/)
+    assert.deepEqual(uci.state, { servers: ['127.0.0.1#7853'], noresolv: '1' }, JSON.stringify(setup))
+    assert.match(uci.ctx.files[STATE], /^plan=all$/m)
+  }
+})
+
+test('按域名转发:路由器自己有上游就照常只转名单——uci 里的全局上游、/#/ 写法、或解析文件里有服务器(含 uci 改过的解析文件路径)', async () => {
+  for (const setup of [
+    { servers: ['223.5.5.5'], noresolv: '1' },
+    { servers: ['/#/192.168.3.5'], noresolv: '1' },
+    { servers: [], noresolv: null, files: { '/tmp/resolv.conf.d/resolv.conf.auto': '# Interface wan\nnameserver 192.168.1.1\n' } },
+    { servers: [], noresolv: null, options: { resolvfile: '/tmp/my-resolv.conf' }, files: { '/tmp/my-resolv.conf': 'nameserver 2400:3200::1\n' } },
+  ]) {
+    const uci = statefulUci(setup)
+    const r = await applyDnsTakeover(uci.ctx, paths, { mode: 'dnsmasq', forward: { mode: 'domains', domains: ['google.com'] } })
+    assert.equal(r.effective.mode, 'domains', JSON.stringify(setup))
+    assert.match(uci.ctx.files[INSTALLED], /^server=\/google\.com\/127\.0\.0\.1#7853$/m)
+  }
 })
 
 // ---------- 第三轮 S2:用户基线的两条丢失路径 ----------

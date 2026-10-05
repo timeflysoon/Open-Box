@@ -73,17 +73,33 @@ const detachedSleep = (ms) => new Promise((resolve) => { const t = setTimeout(re
 
 // 内核起来又死了的时候,把它最后一句 FATAL 带回界面——"内核启动后未在运行"这句话
 // 本身什么都说明不了,用户还得自己去翻 logread。读不到就是空串。
-const readLastKernelFatal = async (ctx) => {
+// logread 是整份环形缓冲,以前几次(几小时前、上一次降级时)的 FATAL 都还在:只认重启之后新进程留下的。
+// mark 是重启前 kernelLogMark 记下的最后一行和出现过的进程号——那一行还在就只看它后面的,缓冲转了一圈
+// 找不到它就只看没出现过的进程号。新进程没留 FATAL 就死了(被杀、OOM)时读到空串,不会把老的那句当成这次的
+// 原因、更不会因此误降级成纯 tun
+const kernelLogLines = async (ctx) => {
   try {
     const { code, stdout } = await ctx.exec('logread', ['-e', 'sing-box'])
-    if (code !== 0 || !stdout) return ''
-    const fatal = stdout.split('\n').filter((line) => /FATAL/.test(line)).pop()
-    if (!fatal) return ''
-    // 去掉 syslog 前缀和终端色码,只留 sing-box 自己那句话
-    return fatal.replace(/\x1b\[[0-9;]*m/g, '').replace(/^.*?sing-box\[\d+\]:\s*/, '')
+    return code === 0 && stdout ? String(stdout).split('\n').filter(Boolean) : []
   } catch {
-    return ''
+    return []
   }
+}
+const logPid = (line) => (/sing-box\[(\d+)\]/.exec(line) || [])[1] || ''
+const kernelLogMark = async (ctx) => {
+  const lines = await kernelLogLines(ctx)
+  return { last: lines.length ? lines[lines.length - 1] : '', pids: new Set(lines.map(logPid).filter(Boolean)) }
+}
+const readLastKernelFatal = async (ctx, mark = null) => {
+  let lines = await kernelLogLines(ctx)
+  if (mark) {
+    const at = mark.last ? lines.lastIndexOf(mark.last) : -1
+    lines = at >= 0 ? lines.slice(at + 1) : lines.filter((line) => !mark.pids.has(logPid(line)))
+  }
+  const fatal = lines.filter((line) => /FATAL/.test(line)).pop()
+  if (!fatal) return ''
+  // 去掉 syslog 前缀和终端色码,只留 sing-box 自己那句话
+  return fatal.replace(/\x1b\[[0-9;]*m/g, '').replace(/^.*?sing-box\[\d+\]:\s*/, '')
 }
 const crashMessage = (fatal, rb) => (fatal
   ? `内核启动后崩溃,${rollbackSummary(rb)}:${fatal}`
@@ -97,6 +113,12 @@ const crashMessage = (fatal, rb) => (fatal
 // 两种原话:setup nftables(建表 / 提交规则被拒)和 missing nftables support(内核压根没有 nf_tables,老的 iptables 固件,
 // GitHub #137:sing-tun 探测 nft 时 netlink 回 invalid argument)。后者以前没匹配上,被按普通崩溃回滚直连
 export const AUTO_REDIRECT_FATAL = /auto-redirect: (setup nftables|missing nftables support)/i
+// 起内核时建 tun 网卡、路由、策略路由那一步失败:多半是上一个内核还没拆完(被 procd 到点强杀,tun 网卡还在注销
+// 新进程就起来了),隔一会儿再起一次通常就好(#386:starting TUN interface: set routes: add route 56: no route to host)
+export const TUN_START_FATAL = /inbound\/tun\[[^\]]*\]: (starting TUN interface|configure tun interface)/i
+// 这两类先原样再起一次再说:auto_redirect 那类也可能只是撞上了没拆完的旧状态,第二次就好;真起不来(缺模块之类)
+// 第二次照样失败,再按原来的办法降级纯 tun / 回滚直连
+const START_RETRY_SETTLE_MS = 2000
 export const autoRedirectFallbackWarning = (fatal) =>
   `auto_redirect（nftables 转发）起不来,已改用纯 tun 模式启动（兼容模式）:分流规则不受影响,直连目标的入口旁路改由系统路由表实现,吞吐略低。内核原话:${fatal}。常见原因:固件缺 kmod-nft-nat 等 nftables 模块,或 PassWall / OpenClash 等插件的 nftables 规则冲突——处理好之后重启内核会自动恢复 auto_redirect。旁路由请注意:纯 tun 模式不改写终端的 DNS,终端的 DNS 若不指向本机,请在 网络 → DHCP/DNS 里打开「DNS 重定向」（把终端的 DNS 请求引到本机 dnsmasq）,否则会解析不了域名。`
 
@@ -350,6 +372,7 @@ export const deployConfig = async (ctx, paths, { config, profile, userGroups, no
       const fakeIp = dnsFakeIpEnabled(profile)
       return writeEntryBypass(ctx, paths, entryBypassNft({
         ...activeBypassPorts(profile), clientRoutes: profile.clientRoutes, autoRedirect, lanIfaces, directAnswered: autoRedirect, tcpMss: tunTcpMss(profile),
+        pureTun: (config.inbounds || []).some((i) => i && i.type === 'tun'),
         terminalDns: terminalDnsNow(),
         dnsPort: DNS_INBOUND_PORT,
         dnsV6: Boolean(profile.ipv6),
@@ -424,10 +447,14 @@ export const deployConfig = async (ctx, paths, { config, profile, userGroups, no
       }
     }
 
-    // 8. 重启内核;9. 验证运行。auto_redirect 起不来的那种崩溃会降级成纯 tun 再来一轮,所以套一层循环
+    // 8. 重启内核;9. 验证运行。起 tun 撞上旧状态的先原样再起一次;auto_redirect 起不来的那种崩溃会降级成纯 tun
+    // 再来一轮,所以套一层循环
     let warning = ''
     let redirectFallbackTried = false
+    let startRetried = false
+    let logMark = null
     for (;;) {
+      logMark = await kernelLogMark(ctx)
       const restart = await restartService(ctx, paths.initd.core)
       mark('重启')
       if (!restart.ok) {
@@ -453,7 +480,12 @@ export const deployConfig = async (ctx, paths, { config, profile, userGroups, no
       }
       if (!crashed) break
 
-      const fatal = await readLastKernelFatal(ctx)
+      const fatal = await readLastKernelFatal(ctx, logMark)
+      if (!startRetried && (TUN_START_FATAL.test(fatal) || (autoRedirect && AUTO_REDIRECT_FATAL.test(fatal)))) {
+        startRetried = true
+        await ctx.sleep(START_RETRY_SETTLE_MS)
+        continue
+      }
       if (autoRedirect && !redirectFallbackTried && typeof rebuild === 'function' && AUTO_REDIRECT_FATAL.test(fatal)) {
         // nftables 那层起不来:关掉 auto_redirect 重新生成配置(排除表、DNS 改写都跟着变,
         // 不能只把字段删掉),再起一次。只试一次,再崩就按普通崩溃处理
@@ -478,7 +510,7 @@ export const deployConfig = async (ctx, paths, { config, profile, userGroups, no
         await sleep(wait)
         if (isStale() || isCancelled()) return null
         if ((await serviceStatus(ctx, paths.initd.core)).running) continue
-        const fatal = await readLastKernelFatal(ctx)
+        const fatal = await readLastKernelFatal(ctx, logMark)
         if (autoRedirect && !redirectFallbackTried && typeof rebuild === 'function' && AUTO_REDIRECT_FATAL.test(fatal)) {
           redirectFallbackTried = true
           autoRedirect = false
@@ -486,13 +518,14 @@ export const deployConfig = async (ctx, paths, { config, profile, userGroups, no
           config = rebuild({ tun: { ...(profile.tun || {}), autoRedirect: false } })
           await writeConfigAndMeta(config)
           await writeEntry()
+          const fallbackMark = await kernelLogMark(ctx)
           const restart = await restartService(ctx, paths.initd.core)
           if (restart.ok) {
             await sleep(VERIFY_SETTLE_MS)
             if ((await serviceStatus(ctx, paths.initd.core)).running) return { ok: true, stage: 'running', message: '', warning: autoRedirectFallbackWarning(fatal) }
           }
           const rb2 = await rollbackToDirect(ctx, paths)
-          return { ok: false, stage: 'verify', ...describeCrash(await readLastKernelFatal(ctx), rb2), rollback: rb2 }
+          return { ok: false, stage: 'verify', ...describeCrash(await readLastKernelFatal(ctx, fallbackMark), rb2), rollback: rb2 }
         }
         const rb = await rollbackToDirect(ctx, paths)
         return { ok: false, stage: 'verify', ...describeCrash(fatal, rb), rollback: rb }

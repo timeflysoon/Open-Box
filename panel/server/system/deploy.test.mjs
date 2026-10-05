@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createMockContext } from './context.mjs'
 import { createPaths } from './paths.mjs'
-import { deployConfig, rollbackToDirect, configMetaPath, TUN_DEVICE, AUTO_REDIRECT_FATAL } from './deploy.mjs'
+import { deployConfig, rollbackToDirect, configMetaPath, TUN_DEVICE, AUTO_REDIRECT_FATAL, TUN_START_FATAL } from './deploy.mjs'
 import { routingFingerprint } from '../engine/routing-model.mjs'
 import { dnsTakeoverBackupPath } from './dns-takeover.mjs'
 
@@ -414,17 +414,24 @@ const REDIRECT_FATAL = 'FATAL[0002] start service: post-start inbound/tun[tun-in
 const tunProfile = { ipv6: false, dns: { mode: 'dnsmasq' }, tun: { autoRedirect: true } }
 const withRedirect = { ...config, inbounds: [{ type: 'tun', tag: 'tun-in', auto_route: true, auto_redirect: true }] }
 const withoutRedirect = { ...config, inbounds: [{ type: 'tun', tag: 'tun-in', auto_route: true }] }
-// 内核状态跟着落盘的配置走:配置里还有 auto_redirect 就"起来又死",去掉就一直在跑
+// 内核状态跟着落盘的配置走:配置里还有 auto_redirect 就"起来又死"、每死一次日志里多一句新进程的 FATAL;去掉就一直在跑。
+// 日志开头是上一次部署留下的一句 FATAL:不能被当成这次的原因
+const OLD_FATAL_LINE = 'Mon Sep  7 09:00:00 2026 daemon.err sing-box[111]: \x1b[31mFATAL[0000] start service: initialize outbound/vless[old]: stale reason\x1b[0m'
 const redirectCtx = (fatal = REDIRECT_FATAL) => {
+  const log = [OLD_FATAL_LINE]
+  const redirectOn = () => {
+    const written = ctx.writes.filter((w) => w.path === paths.configPath).pop()
+    return written ? JSON.parse(written.content).inbounds[0].auto_redirect : true
+  }
   const ctx = createMockContext({
     files: { [paths.singbox]: '#!/bin/sh\n', [TUN_DEVICE]: '' },
     execResults: {
-      '/etc/init.d/openbox status': () => {
-        const written = ctx.writes.filter((w) => w.path === paths.configPath).pop()
-        const redirect = written ? JSON.parse(written.content).inbounds[0].auto_redirect : true
-        return redirect ? { code: 1, stdout: 'inactive' } : { code: 0, stdout: 'running' }
+      '/etc/init.d/openbox restart': () => {
+        if (redirectOn()) log.push(`Tue Sep  8 13:48:11 2026 daemon.err sing-box[${32332 + log.length}]: \x1b[31m${fatal}\x1b[0m`)
+        return { code: 0, stdout: '' }
       },
-      'logread -e sing-box': { code: 0, stdout: `Tue Sep  8 13:48:11 2026 daemon.err sing-box[32332]: \x1b[31m${fatal}\x1b[0m\n` },
+      '/etc/init.d/openbox status': () => (redirectOn() ? { code: 1, stdout: 'inactive' } : { code: 0, stdout: 'running' }),
+      'logread -e sing-box': () => ({ code: 0, stdout: `${log.join('\n')}\n` }),
     },
   })
   return ctx
@@ -454,8 +461,11 @@ test('auto_redirect 在 nftables 层起不来 → 关掉 auto_redirect 重新生
   assert.equal(entryMode.mode, 'blacklist')
   assert.match(entryMode.reason, /纯 tun/)
   assert.equal(JSON.parse(lastMeta.content).flip?.entryMode, undefined, '热切换那一侧纯 tun 没有 need / entryMode')
-  // 起了两次,没有回滚直连
-  assert.equal(cmds(ctx).filter((c) => c === '/etc/init.d/openbox restart').length, 2)
+  // 降级后入口文件按纯 tun 重写:回包打放行位,端口映射的回包不被拉进 tun(#383)
+  const lastEntry = ctx.writes.filter((w) => w.path === paths.entryBypassPath).pop()
+  assert.match(lastEntry.content, /ct direction reply meta mark set meta mark or 0x02000000/)
+  // 起了三次(原样重试一次、降级一次),没有回滚直连
+  assert.equal(cmds(ctx).filter((c) => c === '/etc/init.d/openbox restart').length, 3)
   assert.ok(!cmds(ctx).includes('/etc/init.d/openbox stop'))
 })
 
@@ -469,7 +479,7 @@ test('降级之后还是起不来 → 只试一次,按普通崩溃回滚直连�
   assert.equal(r.stage, 'verify')
   assert.match(r.message, /内核启动后崩溃/)
   assert.match(r.message, /netlink receive/)
-  assert.equal(cmds(ctx).filter((c) => c === '/etc/init.d/openbox restart').length, 2)
+  assert.equal(cmds(ctx).filter((c) => c === '/etc/init.d/openbox restart').length, 3)
   assert.ok(cmds(ctx).includes('/etc/init.d/openbox stop'))
 })
 
@@ -484,7 +494,8 @@ const lateCtx = (fatal = REDIRECT_FATAL) => {
         const redirect = written ? JSON.parse(written.content).inbounds[0].auto_redirect : true
         return state.crashed && redirect ? { code: 1, stdout: 'inactive' } : { code: 0, stdout: 'running' }
       },
-      'logread -e sing-box': { code: 0, stdout: `Tue Sep  8 15:18:47 2026 daemon.err sing-box[10798]: \x1b[31m${fatal}\x1b[0m\n` },
+      // 崩了才有这一句(重启前的日志里没有它)
+      'logread -e sing-box': () => ({ code: 0, stdout: `${OLD_FATAL_LINE}\n${state.crashed ? `Tue Sep  8 15:18:47 2026 daemon.err sing-box[10798]: \x1b[31m${fatal}\x1b[0m\n` : ''}` }),
     },
   })
   return { ctx, state }
@@ -538,22 +549,71 @@ test('确认在跑之后才崩、不是 auto_redirect 那类 → 回滚直连,�
 
 test('不是 auto_redirect 那类崩溃、或没开 auto_redirect、或没给 rebuild → 不降级,照旧回滚', async () => {
   const other = 'FATAL[0000] start service: initialize outbound/hysteria2[x]: bad config'
-  for (const [ctx, profile, rebuild] of [
-    [redirectCtx(other), tunProfile, () => withoutRedirect],
-    [redirectCtx(), { ...tunProfile, tun: { autoRedirect: false } }, () => withoutRedirect],
-    [redirectCtx(), tunProfile, undefined],
+  // 没给 rebuild 时 auto_redirect 那类照样先原样重试一次(撞上旧状态的第二次就好),再起不来才回滚
+  for (const [ctx, profile, rebuild, restarts] of [
+    [redirectCtx(other), tunProfile, () => withoutRedirect, 1],
+    [redirectCtx(), { ...tunProfile, tun: { autoRedirect: false } }, () => withoutRedirect, 1],
+    [redirectCtx(), tunProfile, undefined, 2],
   ]) {
     const r = await deployConfig(ctx, paths, { config: withRedirect, profile, rebuild })
     assert.equal(r.ok, false)
     assert.equal(r.stage, 'verify')
-    assert.equal(cmds(ctx).filter((c) => c === '/etc/init.d/openbox restart').length, 1)
+    assert.equal(cmds(ctx).filter((c) => c === '/etc/init.d/openbox restart').length, restarts)
     assert.ok(cmds(ctx).includes('/etc/init.d/openbox stop'))
+    assert.doesNotMatch(r.message, /stale reason/, '上一次部署留下的 FATAL 不能当成这次的原因')
   }
   assert.ok(AUTO_REDIRECT_FATAL.test(REDIRECT_FATAL))
   assert.ok(AUTO_REDIRECT_FATAL.test('FATAL[0000] start service: post-start inbound/tun[tun-in]: auto-redirect: setup nftables: flush nftables: conn.Receive: netlink receive: file exists'))
   // GitHub #137:固件没有 nf_tables 时 sing-tun 的原话不一样,同样要降级
   assert.ok(AUTO_REDIRECT_FATAL.test('FATAL[0000] start service: post-start inbound/tun[tun-in]: auto-redirect: missing nftables support: netlink receive: invalid argument'))
   assert.ok(!AUTO_REDIRECT_FATAL.test(other))
+})
+
+// #386:旧内核被 procd 到点强杀、tun 网卡还在注销新进程就起来了,建路由失败。原样再起一次就好,不回滚、不降级
+test('起 tun 撞上上一个内核没拆完的状态(set routes 失败)→ 原样再起一次,起来了就算成功', async () => {
+  const tunFatal = 'FATAL[0000] start service: post-start inbound/tun[tun-in]: starting TUN interface: set routes: add route 56: no route to host'
+  assert.ok(TUN_START_FATAL.test(tunFatal))
+  assert.ok(TUN_START_FATAL.test('FATAL[0000] start service: initialize inbound/tun[tun-in]: configure tun interface: device or resource busy'))
+  assert.ok(!TUN_START_FATAL.test(REDIRECT_FATAL))
+  const log = [OLD_FATAL_LINE]
+  let restarts = 0
+  const ctx = createMockContext({
+    files: { [paths.singbox]: '#!/bin/sh\n', [TUN_DEVICE]: '' },
+    execResults: {
+      '/etc/init.d/openbox restart': () => {
+        restarts += 1
+        if (restarts === 1) log.push(`Sat Oct  3 10:09:15 2026 daemon.err sing-box[24437]: \x1b[31m${tunFatal}\x1b[0m`)
+        return { code: 0, stdout: '' }
+      },
+      '/etc/init.d/openbox status': () => (restarts === 1 ? { code: 1, stdout: 'inactive' } : { code: 0, stdout: 'running' }),
+      'logread -e sing-box': () => ({ code: 0, stdout: `${log.join('\n')}\n` }),
+    },
+  })
+  const r = await deployConfig(ctx, paths, { config: withRedirect, profile: tunProfile, rebuild: () => withoutRedirect })
+  assert.equal(r.ok, true, r.message)
+  assert.equal(r.warning, '', '没有降级')
+  assert.equal(restarts, 2)
+  const lastConfig = ctx.writes.filter((w) => w.path === paths.configPath).pop()
+  assert.equal(JSON.parse(lastConfig.content).inbounds[0].auto_redirect, true, '配置还是 auto_redirect 那份')
+  assert.ok(!cmds(ctx).includes('/etc/init.d/openbox stop'))
+})
+
+test('新进程没留 FATAL 就死了(被杀、OOM):日志里以前的 auto_redirect FATAL 不算数,不重试不降级,原因说不清就照实说', async () => {
+  const ctx = createMockContext({
+    files: { [paths.singbox]: '#!/bin/sh\n', [TUN_DEVICE]: '' },
+    execResults: {
+      '/etc/init.d/openbox status': { code: 1, stdout: 'inactive' },
+      // 只有上一次降级时留下的那句,这次重启之后没有新行
+      'logread -e sing-box': { code: 0, stdout: `Tue Sep  8 13:48:11 2026 daemon.err sing-box[32332]: \x1b[31m${REDIRECT_FATAL}\x1b[0m\n` },
+    },
+  })
+  const patches = []
+  const r = await deployConfig(ctx, paths, { config: withRedirect, profile: tunProfile, rebuild: (patch) => { patches.push(patch); return withoutRedirect } })
+  assert.equal(r.ok, false)
+  assert.equal(r.stage, 'verify')
+  assert.deepEqual(patches, [], '不能拿老的那句去降级')
+  assert.match(r.message, /内核启动后未在运行/)
+  assert.equal(cmds(ctx).filter((c) => c === '/etc/init.d/openbox restart').length, 1)
 })
 
 test('config.meta.json 记下第一层的判定:DNS 转发计划、入口原生旁路、终端来源 DNS 规则是否生效', async () => {
@@ -588,6 +648,8 @@ test('config.meta.json 记下第一层的判定:DNS 转发计划、入口原生�
 test('部署时把走代理站点集的 geosite 解码进转发名单:元数据记实际 domains、条目数和超集说明;解不开就 all 并说明（第三轮 阶段 2）', async () => {
   const withRulesets = (json) => {
     const ctx = okCtx({ 'uci -q show dhcp.@dnsmasq[0]': { code: 0, stdout: 'dhcp.cfg=dnsmasq\n' } })
+    // 路由器自己的上游在 netifd 写的解析文件里(没有它就只能全量转发,#412)
+    ctx.files['/tmp/resolv.conf.d/resolv.conf.auto'] = '# Interface wan\nnameserver 192.168.1.1\n'
     ctx.files[`${paths.geoDir}/geosite-youtube.srs`] = 'srs'
     ctx.files[`${paths.dataDir}/tmp/geosite-youtube.dns-forward.json`] = JSON.stringify(json)
     return ctx
