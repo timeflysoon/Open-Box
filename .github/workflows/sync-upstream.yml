@@ -1,7 +1,7 @@
 name: Sync upstream
 
 # 上游 liandu2024/Open-Box 出新版本时,把它 release 包里「明文、非编译生成」的文件同步过来,
-# 仓库地址换回自己的,直接提交到目标分支。不碰 panel/(上游闭源,只能自己在老版本上完善)。
+# 仓库地址换回自己的,直接提交到目标分支。不碰 panel/ 里的编译产物(上游闭源的前端,只能自己在老版本上完善)。
 # 内核不在这里处理:release.yml 每次构建都会自动取上游 Latest 的 x64 / arm64 内核。
 
 on:
@@ -56,7 +56,7 @@ jobs:
             exit 0
           fi
 
-          # 2. 下载 app 组件(含 openwrt、debian、update.sh、uninstall.sh),校验 sha256
+          # 2. 下载 app 组件(含 openwrt、debian、panel、update.sh、uninstall.sh),校验 sha256
           base="https://github.com/$UPSTREAM_REPO/releases/download/$tag"
           curl -fsSL --retry 3 -o components.json "$base/open-box-$tag-linux-x64-components.json"
           set -- $(python3 -c 'import json,sys;a=json.load(open(sys.argv[1]))["components"]["app"];print(a["asset"],a["sha256"])' components.json)
@@ -65,21 +65,27 @@ jobs:
           echo "$sha  app.tar.gz" | sha256sum -c -
           mkdir app && tar -xzf app.tar.gz -C app
 
-          # 3. 覆盖明文文件(不含 panel/,不含编译产物 *.so;不删除你自己新增的文件)
+          # 3. 覆盖明文文件(不含编译产物 *.so 和前端 dist;不删除你自己新增的文件)
           rsync -a --exclude='*.so' app/openwrt/ openwrt/
           rsync -a app/debian/ debian/
+          # panel/server: 上游包里的明文后端,整体覆盖
+          [ -d app/panel/server ] || { echo "上游包里没有 panel/server,目录结构变了" >&2; exit 1; }
+          rsync -a app/panel/server/ panel/server/
           cp app/update.sh scripts/update.sh
           cp app/uninstall.sh scripts/uninstall.sh
           # install.sh 不在 release 包里,取上游该版本的源码
           curl -fsSL --retry 3 -o scripts/install.sh "https://raw.githubusercontent.com/$UPSTREAM_REPO/$tag/scripts/install.sh"
           chmod +x scripts/install.sh scripts/update.sh scripts/uninstall.sh
 
-          # 4. 仓库地址换回自己的
+          # 4. 仓库地址换回自己的(panel/server 里的 updater.mjs 等也要换,否则面板会去检查上游版本)
           targets="openwrt debian scripts/install.sh scripts/update.sh scripts/uninstall.sh"
-          grep -rlI "$UPSTREAM_REPO" $targets | xargs -r sed -i "s#$UPSTREAM_REPO#$OWN_REPO#g"
+          grep -rlI "$UPSTREAM_REPO" $targets panel/server | xargs -r sed -i "s#$UPSTREAM_REPO#$OWN_REPO#g"
           if grep -rnI "liandu2024" $targets; then
             echo "仍有指向上游的残留(见上),请人工处理后再同步" >&2
             exit 1
+          fi
+          if grep -rnI "liandu2024" panel/server; then
+            echo "::warning::panel/server 里还有 liandu2024 字样(见上),确认不是仓库地址后可忽略"
           fi
           for f in scripts/install.sh scripts/update.sh scripts/uninstall.sh; do sh -n "$f"; done
 
@@ -90,5 +96,5 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A
           if git diff --cached --quiet; then echo "没有变化"; exit 0; fi
-          git commit -m "sync: 上游 $tag 的明文文件(openwrt、debian、install/update/uninstall.sh),仓库地址保持 $OWN_REPO"
+          git commit -m "sync: 上游 $tag 的明文文件(openwrt、debian、panel/server、install/update/uninstall.sh),仓库地址保持 $OWN_REPO"
           git push origin "HEAD:$BASE_BRANCH"
