@@ -32,7 +32,7 @@ def build(stage, output):
         if (stage / source).is_file():
             (licenses / name).write_bytes((stage / source).read_bytes())
     layouts = {
-        'app': (meta['version'], ['panel', 'openwrt', 'meta.json', 'uninstall.sh', 'update.sh']),
+        'app': (meta['version'], ['panel', 'openwrt', 'debian', 'meta.json', 'uninstall.sh', 'update.sh']),
         'runtime': (meta['nodeVersion'], ['node']),
         'kernel': (meta['singboxVersion'], ['bin']),
         'geo': (geo['version'], [geo_dir]),

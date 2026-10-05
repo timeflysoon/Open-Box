@@ -1,6 +1,12 @@
 name: Release
 
-# 推送标签后,先从该提交的内核补丁构建双架构 sing-box,再测试和封装面板。
+# 推送标签后:取得双架构 sing-box 内核(默认直接取上游 Latest Release 里的现成内核,
+# 每次构建自动跟着上游走),再测试和封装面板。
+#
+# 可选的仓库变量(Settings → Secrets and variables → Actions → Variables):
+#   OPENBOX_KERNEL_SOURCE  upstream(默认) | build(用本仓库补丁源码自己编译,没有上游那批未公开补丁)
+#   OPENBOX_KERNEL_TAG     固定到上游某个版本(如 v0.1.283);留空 = 每次取 Latest
+#   OPENBOX_KERNEL_REPO    上游仓库,默认 liandu2024/Open-Box
 
 on:
   push:
@@ -12,6 +18,8 @@ permissions:
 
 env:
   OPENBOX_REPO: timeflysoon/Open-Box
+  OPENBOX_KERNEL_SOURCE: ${{ vars.OPENBOX_KERNEL_SOURCE || 'upstream' }}
+  OPENBOX_KERNEL_REPO: ${{ vars.OPENBOX_KERNEL_REPO || 'liandu2024/Open-Box' }}
 
 jobs:
   geodata:
@@ -29,43 +37,84 @@ jobs:
           path: geodata/
           if-no-files-found: error
 
-  kernel:
-    name: Build kernel (${{ matrix.arch }})
+  # 先把「取哪个上游版本」定下来,再让 x64 / arm64 两个任务都按这个版本取,
+  # 避免两个架构分别查 Latest 时恰好碰上上游发新版而拿到不同版本的内核。
+  kernel-tag:
+    name: Resolve upstream kernel release
     runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - id: tag
+        env:
+          PINNED_TAG: ${{ vars.OPENBOX_KERNEL_TAG }}
+        run: |
+          set -eu
+          if [ "$OPENBOX_KERNEL_SOURCE" != upstream ]; then echo "tag=" >> "$GITHUB_OUTPUT"; exit 0; fi
+          tag="$PINNED_TAG"
+          if [ -z "$tag" ]; then
+            tag=$(curl -sI --retry 3 --retry-delay 2 --connect-timeout 20 "https://github.com/$OPENBOX_KERNEL_REPO/releases/latest" \
+              | tr -d '\r' | sed -n 's/^[Ll]ocation: .*\/releases\/tag\/\(v[0-9][0-9A-Za-z._-]*\).*/\1/p' | head -n 1)
+          fi
+          case "$tag" in v[0-9]*) ;; *) echo "无法确定上游版本:「$tag」" >&2; exit 1 ;; esac
+          echo "上游内核版本:$OPENBOX_KERNEL_REPO@$tag"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+  kernel:
+    name: Kernel (${{ matrix.arch }})
+    needs: kernel-tag
+    runs-on: ubuntu-latest
+    env:
+      OPENBOX_KERNEL_TAG: ${{ needs.kernel-tag.outputs.tag }}
     strategy:
       fail-fast: false
       matrix:
         arch: [amd64, arm64]
     steps:
       - uses: actions/checkout@v4
+
+      # 默认:取上游现成的内核 + 对应源码(见 scripts/fetch-upstream-kernel.sh)
+      - name: Fetch kernel from upstream release
+        if: env.OPENBOX_KERNEL_SOURCE == 'upstream'
+        run: sh scripts/fetch-upstream-kernel.sh ${{ matrix.arch }} kernel-build
+
+      # 备选:OPENBOX_KERNEL_SOURCE=build 时从本仓库补丁源码自己编译
       - name: Read kernel tool versions
+        if: env.OPENBOX_KERNEL_SOURCE == 'build'
         id: versions
         run: |
           . scripts/singbox-tcp-dns-hotfix/versions.sh
           echo "go=$SINGBOX_GO_VERSION" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-go@v5
+        if: env.OPENBOX_KERNEL_SOURCE == 'build'
         with:
           go-version: ${{ steps.versions.outputs.go }}
           cache: false
-      - name: Build complete static kernel from repository inputs
+      - name: Build static kernel from repository inputs
+        if: env.OPENBOX_KERNEL_SOURCE == 'build'
         run: sh scripts/singbox-tcp-dns-hotfix/build.sh ${{ matrix.arch }} kernel-build
-      - uses: actions/upload-artifact@v4
-        with:
-          name: kernel-${{ matrix.arch }}
-          path: kernel-build/sing-box-*-linux-${{ matrix.arch }}-musl/
-          if-no-files-found: error
       - name: Checksum corresponding kernel source
-        if: matrix.arch == 'amd64'
+        if: env.OPENBOX_KERNEL_SOURCE == 'build'
         run: |
           cd kernel-build
           for source in *-source.tar.gz; do sha256sum "$source" > "$source.sha256"; done
+
+      # 源码包单独放一个目录:内核产物只带二进制,源码只在发布时附一份
+      - name: Separate kernel source tarball
+        run: |
+          set -eu
+          mkdir -p kernel-source
+          mv kernel-build/*-source.tar.gz kernel-build/*-source.tar.gz.sha256 kernel-source/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kernel-${{ matrix.arch }}
+          path: kernel-build/
+          if-no-files-found: error
       - uses: actions/upload-artifact@v4
         if: matrix.arch == 'amd64'
         with:
           name: kernel-source
-          path: |
-            kernel-build/*-source.tar.gz
-            kernel-build/*-source.tar.gz.sha256
+          path: kernel-source/
           if-no-files-found: error
 
   build:
@@ -99,27 +148,15 @@ jobs:
         working-directory: panel
         run: corepack pnpm install --frozen-lockfile
 
-      - name: Read kernel version
-        id: kernel-version
-        run: |
-          . scripts/singbox-tcp-dns-hotfix/versions.sh
-          echo "version=$SINGBOX_VERSION" >> "$GITHUB_OUTPUT"
       - uses: actions/download-artifact@v4
         with:
           name: kernel-${{ matrix.kernel }}
-          path: kernel-download
-      - name: Normalize kernel bundle path
-        run: |
-          set -eu
-          source_dir=$(dirname "$(find kernel-download -type f -name BUILD-INFO.json -print -quit)")
-          target_dir="kernel-build/sing-box-${{ steps.kernel-version.outputs.version }}-linux-${{ matrix.kernel }}-musl"
-          mkdir -p "$target_dir"
-          cp "$source_dir"/* "$target_dir"/
+          path: kernel-build
       - uses: actions/download-artifact@v4
         with:
           name: kernel-amd64
           path: runner-kernel
-      - name: Use this run's source-built kernel for config verification
+      - name: Use this run's kernel for config verification
         run: |
           mkdir -p panel/.tools
           runner_kernel=$(find runner-kernel -type f -name sing-box -print -quit)
@@ -155,6 +192,7 @@ jobs:
         env:
           OPENBOX_VERSION: ${{ github.ref_name }}
           OPENBOX_KERNEL_BUILD_DIR: ${{ github.workspace }}/kernel-build
+          OPENBOX_KERNEL_SOURCE: ${{ env.OPENBOX_KERNEL_SOURCE }}
           OPENBOX_GEO_BUNDLE_DIR: ${{ github.workspace }}/geodata
         run: bash scripts/build-release.sh ${{ matrix.arch }} dist-release
 
@@ -180,7 +218,7 @@ jobs:
 
   release:
     name: Publish GitHub Release
-    needs: build
+    needs: [build, kernel-tag]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -210,11 +248,16 @@ jobs:
         run: |
           set -eu
           NODE_VERSION=$(grep -m1 '^NODE_VERSION=' scripts/build-release.sh | sed -E 's/^NODE_VERSION="([^"]+)"/\1/')
-          . scripts/singbox-tcp-dns-hotfix/versions.sh
+          SINGBOX_VERSION=$(python3 -c "import json;print(json.load(open('dist-release/open-box-linux-x64-components.json'))['components']['kernel']['version'])")
+          KERNEL_TAG="${{ needs.kernel-tag.outputs.tag }}"
           {
             echo "## Open-Box ${{ github.ref_name }}"
             echo ""
-            echo "- sing-box 内核版本:\`$SINGBOX_VERSION\`(从本次仓库源码补丁构建，精简功能集，纯 Go 静态链接)"
+            if [ "$OPENBOX_KERNEL_SOURCE" = upstream ]; then
+              echo "- sing-box 内核版本:\`$SINGBOX_VERSION\`(取自 \`$OPENBOX_KERNEL_REPO\` 的 \`$KERNEL_TAG\` Release;对应源码见本 Release 附件 \`sing-box-$SINGBOX_VERSION-source.tar.gz\`)"
+            else
+              echo "- sing-box 内核版本:\`$SINGBOX_VERSION\`(从本仓库源码补丁构建，精简功能集，纯 Go 静态链接)"
+            fi
             echo "- Node 运行时版本:\`$NODE_VERSION\`(musl 构建,glibc 版本在 OpenWrt 上无法运行)"
             echo ""
             echo "- 完整安装包包含 sing-box 内核与全部 GeoSite / GeoIP 数据，首次启动无需另行下载 Geo 数据。"

@@ -224,14 +224,51 @@ fi
 
 log "打包 open-box $VERSION,目标 linux-$ARCH(sing-box 架构名: $SINGBOX_ARCH)"
 
-# 内核只从当前仓库的源码补丁构建。CI 可传入同一轮已构建的目录以复用测试产物;
-# 版本、架构、补丁/构建脚本和二进制哈希都必须匹配,没有旧 Release 下载兜底。
+# 内核来源(OPENBOX_KERNEL_SOURCE):
+#   upstream(默认)= 取上游 Latest Release 里现成的内核(scripts/fetch-upstream-kernel.sh)。
+#                   上游内核带着一批未公开的补丁(直连应答放行、出站热替换等),面板的部分功能依赖它。
+#   build         = 从本仓库补丁源码自己编译(scripts/singbox-tcp-dns-hotfix/build.sh),没有那批补丁。
+# CI 可传入同一轮已准备好的目录(OPENBOX_KERNEL_BUILD_DIR)以复用,里面须有且仅有本架构的一个内核包。
+KERNEL_SOURCE=${OPENBOX_KERNEL_SOURCE:-upstream}
 KERNEL_BUILD_DIR=${OPENBOX_KERNEL_BUILD_DIR:-"$CACHE_DIR/kernel-build"}
 if [ -z "${OPENBOX_KERNEL_BUILD_DIR:-}" ]; then
-  sh "$SCRIPT_DIR/singbox-tcp-dns-hotfix/build.sh" "$SINGBOX_ARCH" "$KERNEL_BUILD_DIR"
+  case "$KERNEL_SOURCE" in
+    upstream) sh "$SCRIPT_DIR/fetch-upstream-kernel.sh" "$SINGBOX_ARCH" "$KERNEL_BUILD_DIR" ;;
+    build) sh "$SCRIPT_DIR/singbox-tcp-dns-hotfix/build.sh" "$SINGBOX_ARCH" "$KERNEL_BUILD_DIR" ;;
+    *) echo "ERROR: OPENBOX_KERNEL_SOURCE 只能是 upstream 或 build,收到:$KERNEL_SOURCE" >&2; exit 1 ;;
+  esac
 fi
-KERNEL_BUNDLE="$KERNEL_BUILD_DIR/sing-box-$SINGBOX_VERSION-linux-$SINGBOX_ARCH-musl"
-python3 "$SCRIPT_DIR/singbox-tcp-dns-hotfix/manifest.py" verify "$KERNEL_BUNDLE" "$SINGBOX_ARCH" "$SINGBOX_VERSION"
+KERNEL_BUNDLE=""
+_kb_count=0
+for _kb in "$KERNEL_BUILD_DIR"/sing-box-*-linux-"$SINGBOX_ARCH"-musl; do
+  [ -d "$_kb" ] || continue
+  KERNEL_BUNDLE=$_kb
+  _kb_count=$((_kb_count + 1))
+done
+if [ "$_kb_count" -ne 1 ]; then
+  echo "ERROR: $KERNEL_BUILD_DIR 里应有且仅有一个 linux-$SINGBOX_ARCH 内核包,实际 $_kb_count 个" >&2
+  exit 1
+fi
+# meta.json 里的 singboxVersion 以内核包自己记录的版本为准(上游版本变了,这里自动跟着变)
+SINGBOX_VERSION=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["version"])' "$KERNEL_BUNDLE/BUILD-INFO.json")
+[ -n "$SINGBOX_VERSION" ] || { echo "ERROR: 读不到内核版本" >&2; exit 1; }
+if python3 -c 'import json,sys;sys.exit(0 if "build_inputs" in json.load(open(sys.argv[1])) else 1)' "$KERNEL_BUNDLE/BUILD-INFO.json"; then
+  # 本仓库自己编译的内核:补丁/构建脚本的哈希必须与当前检出一致
+  python3 "$SCRIPT_DIR/singbox-tcp-dns-hotfix/manifest.py" verify "$KERNEL_BUNDLE" "$SINGBOX_ARCH" "$SINGBOX_VERSION"
+else
+  # 上游内核:二进制哈希、架构、版本要与它自带的 BUILD-INFO 记录一致(下载时已核对过发布清单)
+  python3 - "$KERNEL_BUNDLE" "$SINGBOX_ARCH" "$SINGBOX_VERSION" <<'PY'
+import hashlib, json, sys
+from pathlib import Path
+bundle, arch, version = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+info = json.loads((bundle / 'BUILD-INFO.json').read_text())
+assert info['version'] == version and info['arch'] == arch, 'Kernel version/architecture mismatch'
+assert info['binary_sha256'] == hashlib.sha256((bundle / 'sing-box').read_bytes()).hexdigest(), 'Kernel binary checksum mismatch'
+assert (bundle / 'LICENSE').is_file(), 'Missing kernel license'
+print(f'Verified upstream kernel: {version} {arch} {info["binary_sha256"]}')
+PY
+fi
+log "内核:$SINGBOX_VERSION(来源 $KERNEL_SOURCE)"
 
 STAGE=$(mktemp -d "${TMPDIR:-/tmp}/open-box-release.XXXXXX")
 trap 'rm -rf "$STAGE"' EXIT INT TERM
@@ -348,8 +385,8 @@ if [ -n "$BAD_NEEDED" ]; then
 fi
 log "DT_NEEDED 校验通过($ARCH): $(printf '%s' "$NODE_NEEDED" | tr '\n' ' ')"
 
-# ---- 6. 封装本次从仓库源码补丁构建的内核 ----
-log "封装本地构建的 sing-box..."
+# ---- 6. 封装内核 ----
+log "封装 sing-box $SINGBOX_VERSION..."
 cp "$KERNEL_BUNDLE/sing-box" "$STAGE/bin/sing-box"
 chmod +x "$STAGE/bin/sing-box"
 cp "$KERNEL_BUNDLE/LICENSE" "$STAGE/bin/sing-box.LICENSE"
@@ -372,9 +409,20 @@ log "sing-box 静态链接校验通过($ARCH)。"
 log "拷贝 openwrt/ init 与 LuCI 文件..."
 cp -R "$ROOT/openwrt/initd" "$STAGE/openwrt/initd"
 cp -R "$ROOT/openwrt/luci" "$STAGE/openwrt/luci"
-# openwrt/bin: open-box 命令行、compat/node 启动包装、libobmadvise 兼容库(缺 madvise 的内核需要)
+# 命令行 open-box 和随包 Node 的启动包装(install.sh / update.sh 会把它们铺到系统里)
 cp -R "$ROOT/openwrt/bin" "$STAGE/openwrt/bin"
 chmod +x "$STAGE/openwrt/bin/open-box" "$STAGE/openwrt/bin/compat/node"
+# 缺 madvise 系统调用的固件用的兼容库,随内核一起从上游取回(没有就算了,只影响那类固件)
+if ls "$KERNEL_BUILD_DIR"/compat/libobmadvise-*.so >/dev/null 2>&1; then
+  cp "$KERNEL_BUILD_DIR"/compat/libobmadvise-*.so "$STAGE/openwrt/bin/compat/"
+else
+  log "警告: 没有 libobmadvise-*.so 兼容库,缺 madvise 的固件将无法运行随包 Node"
+fi
+
+# ---- 8a. Debian / Ubuntu 的 systemd 单元与包装脚本 ----
+log "拷贝 debian/ ..."
+cp -R "$ROOT/debian" "$STAGE/debian"
+chmod +x "$STAGE/debian/bin/"* "$STAGE/debian/shim/"*
 
 # ---- 8b. 卸载脚本 ----
 # 随产物一起铺到 /opt/open-box/uninstall.sh:LuCI 兜底页要能在「面板已经坏了、
@@ -423,7 +471,7 @@ if tar --version 2>/dev/null | grep -qi bsdtar; then
 elif tar --version 2>/dev/null | grep -qi "gnu tar"; then
   TAR_NO_XATTR="--no-xattrs"
 fi
-(cd "$STAGE" && tar $TAR_NO_XATTR -czf "$VERSIONED_PATH" node panel bin openwrt meta.json uninstall.sh update.sh)
+(cd "$STAGE" && tar $TAR_NO_XATTR -czf "$VERSIONED_PATH" node panel bin openwrt debian meta.json uninstall.sh update.sh)
 cp "$VERSIONED_PATH" "$STABLE_PATH"
 
 # ---- 11. sha256(分别对两个文件名各算一份,sha256sum -c 依赖文件名匹配)----
