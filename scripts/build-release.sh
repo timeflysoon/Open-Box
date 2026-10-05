@@ -136,6 +136,40 @@ sha256_of() {
   fi
 }
 
+# 去掉 ELF 里的调试信息和符号表。官方 musl Node 带着 debug_info / .symtab 发布,不去掉会让安装包
+# 多出约 17MB(未压缩;同一份 Node 去符号后与上游发布包的 node 只差几十字节)。
+# 不同架构要用能读该架构 ELF 的 strip:CI(ubuntu x86_64)上 arm64 需要 aarch64-linux-gnu-strip
+# (apt 包 binutils-aarch64-linux-gnu,见 release.yml)。CI 里去不掉就直接失败,本地试跑只警告。
+strip_elf() {
+  _se_file="$1"
+  _se_label="$2"
+  _se_before=$(wc -c < "$_se_file" | tr -d ' ')
+  case "$ARCH" in
+    arm64) _se_tools="aarch64-linux-gnu-strip llvm-strip strip" ;;
+    *) _se_tools="strip llvm-strip x86_64-linux-gnu-strip" ;;
+  esac
+  for _se_tool in $_se_tools; do
+    command -v "$_se_tool" >/dev/null 2>&1 || continue
+    cp "$_se_file" "$_se_file.stripping"
+    if "$_se_tool" --strip-unneeded "$_se_file.stripping" >/dev/null 2>&1; then
+      _se_after=$(wc -c < "$_se_file.stripping" | tr -d ' ')
+      if [ "$_se_after" -lt "$_se_before" ]; then
+        mv "$_se_file.stripping" "$_se_file"
+        chmod +x "$_se_file"
+        log "已去符号 $_se_label ($_se_tool): $_se_before -> $_se_after 字节"
+        return 0
+      fi
+    fi
+    rm -f "$_se_file.stripping"
+  done
+  if [ -n "${CI:-}" ]; then
+    echo "ERROR: 无法对 $_se_label 去符号(找不到能处理 $ARCH ELF 的 strip),拒绝发布体积异常的安装包" >&2
+    exit 1
+  fi
+  log "警告: 未能对 $_se_label 去符号,安装包会多出约 17MB(本地试跑可忽略)"
+  return 0
+}
+
 # 下载前先用 Range 请求探活(比 HEAD 更可靠:GitHub/S3 的预签名下载链接常常只对
 # GET 方法签名,HEAD 会被拒绝而 GET 能成功);探活失败或下载失败都直接非零退出,
 # 不留半成品。命中本地缓存(.build-cache/)时跳过网络请求,但——无论是缓存命中
@@ -246,6 +280,7 @@ fi
 mkdir -p "$STAGE/node/bin"
 cp "$NODE_INNER_DIR/bin/node" "$STAGE/node/bin/node"
 chmod +x "$STAGE/node/bin/node"
+strip_elf "$STAGE/node/bin/node" "node ($ARCH)"
 cp "$NODE_INNER_DIR/LICENSE" "$STAGE/node/LICENSE"
 rm -rf "$NODE_EXTRACT_DIR"
 

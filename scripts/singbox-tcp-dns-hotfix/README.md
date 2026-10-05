@@ -1,6 +1,6 @@
 # sing-box 1.14.0 Open-Box 兼容补丁
 
-这是 Open-Box 的兼容补丁，不是 sing-box 官方版本；不更改 Open-Box 的 DNS 协议、规则顺序、解析器地址、策略出口、FakeIP 或旁路配置。完整发布构建保留上游全部默认功能（包括 Naive），采用 CGO 和静态 musl 链接。
+这是 Open-Box 的兼容补丁，不是 sing-box 官方版本；不更改 Open-Box 的 DNS 协议、规则顺序、解析器地址、策略出口、FakeIP 或旁路配置。默认发布构建为精简功能集（不含 Naive / Tailscale / Cloudflared / OpenVPN 等面板用不到的模块），纯 Go 静态链接（CGO=0），无需 clang / musl 工具链；设置 `OPENBOX_KERNEL_FULL=1` 可构建保留上游全部默认功能（包括 Naive）的完整版，采用 CGO 和静态 musl 链接，体积约大一倍。
 
 ## 已复现的问题
 
