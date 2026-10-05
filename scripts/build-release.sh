@@ -372,6 +372,9 @@ log "sing-box 静态链接校验通过($ARCH)。"
 log "拷贝 openwrt/ init 与 LuCI 文件..."
 cp -R "$ROOT/openwrt/initd" "$STAGE/openwrt/initd"
 cp -R "$ROOT/openwrt/luci" "$STAGE/openwrt/luci"
+# openwrt/bin: open-box 命令行、compat/node 启动包装、libobmadvise 兼容库(缺 madvise 的内核需要)
+cp -R "$ROOT/openwrt/bin" "$STAGE/openwrt/bin"
+chmod +x "$STAGE/openwrt/bin/open-box" "$STAGE/openwrt/bin/compat/node"
 
 # ---- 8b. 卸载脚本 ----
 # 随产物一起铺到 /opt/open-box/uninstall.sh:LuCI 兜底页要能在「面板已经坏了、
