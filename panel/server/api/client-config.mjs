@@ -169,7 +169,7 @@ export const buildClientBundle = async ({ store, ctx, paths, fetchImpl = globalT
   const background = panelBackground(store)
   const view = {
     ...(await clientView({ store, profile, outboundTags, failover: built.failover, hasRuleset })),
-    server: await serverInfoFor(store, readVersion),
+    server: serverInfoFor(store),
     background: panelBackgroundMeta(background),
   }
 

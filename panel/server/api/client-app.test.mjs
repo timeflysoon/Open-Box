@@ -16,14 +16,14 @@ import { createMockContext } from '../system/context.mjs'
 import { createPaths } from '../system/paths.mjs'
 import { listStatePath } from '../system/rule-lists.mjs'
 
-const setup = async ({ readVersion = async () => '0.1.280', detectCountry, ctx = null, paths = null, publicCtx = null, publicPaths = null } = {}) => {
+const setup = async ({ detectCountry, ctx = null, paths = null, publicCtx = null, publicPaths = null } = {}) => {
   const map = new Map()
   const store = createStore({ get: (k) => map.get(k) ?? null, set: (k, v) => map.set(k, v), del: (k) => map.delete(k) })
   const geoDir = fs.mkdtempSync(path.join(os.tmpdir(), 'openbox-geo-'))
   fs.writeFileSync(path.join(geoDir, 'geosite-cn.srs'), Buffer.from('SRS-test'))
   const app = express()
-  registerPublicClientRoutes(app, { store, geoDir, readVersion, ctx: publicCtx, paths: publicPaths })
-  registerClientAppRoutes(app, { store, ctx, paths, readVersion, ...(detectCountry ? { detectCountry } : {}) })
+  registerPublicClientRoutes(app, { store, geoDir, ctx: publicCtx, paths: publicPaths })
+  registerClientAppRoutes(app, { store, ctx, paths, ...(detectCountry ? { detectCountry } : {}) })
   const server = app.listen(0)
   await new Promise((resolve) => server.once('listening', resolve))
   return {
@@ -75,8 +75,8 @@ test('regions 顺带回共享网络服务器的 ID / 名字(按共享网络页�
     const id = routerId(store)
     const before = await (await fetch(`${base}/client/v1/${id}/regions`)).json()
     assert.deepEqual(before.nodes, [])
-    // 什么都没设:名称是「Open-Box v版本号」,没判过出口国家就没有地区,没有图标
-    assert.deepEqual(before.server, { name: 'Open-Box v0.1.280', icon: '', iconSvg: '', region: '', regionSvg: '', regionAuto: true })
+    // 什么都没设:名称是「Open-Box」(不带版本号),没判过出口国家就没有地区,没有图标
+    assert.deepEqual(before.server, { name: 'Open-Box', icon: '', iconSvg: '', region: '', regionSvg: '', regionAuto: true })
     store.setProfile({ servers: [
       { id: 'home', enabled: true, name: 'HOME', protocol: 'shadowsocks', port: 8388, method: 'aes-256-gcm', password: 'secret-1' },
       { id: 'off', enabled: false, name: 'OFF', protocol: 'shadowsocks', port: 8389, method: 'aes-256-gcm', password: 'secret-2' },
@@ -150,7 +150,7 @@ test('info 带服务器信息的现值、默认名称和出口国家;egress-coun
   try {
     const info = await (await fetch(`${base}/api/openbox/client-app/info`)).json()
     assert.deepEqual(info.serverInfo, {})
-    assert.deepEqual(info.serverInfoDefaults, { name: 'Open-Box v0.1.280' })
+    assert.deepEqual(info.serverInfoDefaults, { name: 'Open-Box' })
     assert.equal(info.egressCountry, null)
     const detected = await (await fetch(`${base}/api/openbox/client-app/egress-country`, { method: 'POST' })).json()
     assert.deepEqual(detected, { ip: '8.8.8.8', country: 'US', at: 2 })

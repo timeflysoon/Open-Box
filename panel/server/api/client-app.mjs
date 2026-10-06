@@ -25,7 +25,7 @@ import { fileURLToPath } from 'node:url'
 import express from 'express'
 import { iconsFor, normalizeIconCode } from '../engine/icon-index.mjs'
 import { ruleListIpTag } from '../engine/rule-list.mjs'
-import { serverInfoView, defaultServerName } from '../engine/server-info.mjs'
+import { serverInfoView, DEFAULT_SERVER_NAME } from '../engine/server-info.mjs'
 import { enabledServers } from '../engine/servers.mjs'
 import { DEFAULT_SHARE_REGIONS, collectShareRegionRuleUrls, effectiveShareRegions, shareRegionsForClient, shareRegionsVersion } from '../engine/share-regions.mjs'
 import { readLocalAddresses } from '../system/local-subnets.mjs'
@@ -56,20 +56,19 @@ export const routerId = (store) => {
   return id
 }
 
-// App 里显示的路由器标识(共享网络节点、本地分流配置的卡片都用它):名称空的换成「Open-Box v版本号」,地区没手动选的用出口 IP
+// App 里显示的路由器标识(共享网络节点、本地分流配置的卡片都用它):名称空的换成「Open-Box」,地区没手动选的用出口 IP
 // 判出来的国家;图标 SVG 按代码从随包的图标索引现取(国旗也在内),取不到才用保存时存下的
-export const serverInfoFor = async (store, readVersion) => {
+export const serverInfoFor = (store) => {
   const profile = store.getProfile() || {}
   const detected = readEgressCountry(store)
   return serverInfoView({
     serverInfo: profile.serverInfo,
-    version: await readVersion().catch(() => ''),
     detectedRegion: detected ? detected.country : '',
     iconSvgFor: (code) => iconsFor([code])[normalizeIconCode(code)] || '',
   })
 }
 
-export const registerPublicClientRoutes = (app, { store, ctx = null, paths = null, geoDir = DEFAULT_GEO_DIR, readVersion = async () => '' } = {}) => {
+export const registerPublicClientRoutes = (app, { store, ctx = null, paths = null, geoDir = DEFAULT_GEO_DIR } = {}) => {
   const known = (req, res) => {
     res.setHeader('Cache-Control', 'no-store')
     if (req.params.routerId === routerId(store)) return true
@@ -94,7 +93,7 @@ export const registerPublicClientRoutes = (app, { store, ctx = null, paths = nul
     const text = (v) => (typeof v === 'string' ? v : '')
     const nodes = enabledServers(profile.servers).map((s) => ({ id: s.id, name: text(s.name) }))
     // 面板背景(用户 2026-10-05「背景也要同步 android app 中」):和 server 一样不算进 version,App 按它自己的 version 换图
-    res.json({ version: shareRegionsVersion(groups), groups, nodes, server: await serverInfoFor(store, readVersion), background: panelBackgroundMeta(panelBackground(store)) })
+    res.json({ version: shareRegionsVersion(groups), groups, nodes, server: serverInfoFor(store), background: panelBackgroundMeta(panelBackground(store)) })
   })
   app.get('/client/v1/:routerId/background', (req, res) => {
     if (known(req, res)) sendPanelBackground(res, panelBackground(store))
@@ -125,7 +124,7 @@ export const lanAddresses = async (ctx, platform) => {
   return [...new Set([...list.filter((a) => !a.includes(':')), ...list.filter((a) => a.includes(':'))])]
 }
 
-export const registerClientAppRoutes = (app, { store, ctx = null, paths = null, platform = 'openwrt', readVersion = async () => '', detectCountry = detectEgressCountry } = {}) => {
+export const registerClientAppRoutes = (app, { store, ctx = null, paths = null, platform = 'openwrt', detectCountry = detectEgressCountry } = {}) => {
   const router = express.Router()
   router.get('/client-app/info', async (_req, res) => {
     const profile = store.getProfile()
@@ -139,7 +138,7 @@ export const registerClientAppRoutes = (app, { store, ctx = null, paths = null, 
       defaultShareRegions: DEFAULT_SHARE_REGIONS,
       // 路由器标识:存着的原样(空的就是用默认值)、默认名称、按出口 IP 判出的国家({ ip, country, at },没判过是 null)
       serverInfo: profile.serverInfo && typeof profile.serverInfo === 'object' ? profile.serverInfo : {},
-      serverInfoDefaults: { name: defaultServerName(await readVersion().catch(() => '')) },
+      serverInfoDefaults: { name: DEFAULT_SERVER_NAME },
       egressCountry: readEgressCountry(store),
     })
   })
