@@ -274,10 +274,10 @@ jobs:
             echo ""
             echo '```bash'
             echo "# 直连版"
-            echo "curl -fsSL https://raw.githubusercontent.com/${OPENBOX_REPO}/main/scripts/install.sh | sh"
+            echo "curl -fsSL https://raw.githubusercontent.com/${OPENBOX_REPO}/catch-up-upstream/scripts/install.sh | sh"
             echo ""
             echo "# 镜像加速版(把 <镜像前缀> 换成你信任的加速站点域名)"
-            echo "curl -fsSL https://<镜像前缀>/https://raw.githubusercontent.com/${OPENBOX_REPO}/main/scripts/install.sh | sh -s -- --mirror <镜像前缀>"
+            echo "curl -fsSL https://<镜像前缀>/https://raw.githubusercontent.com/${OPENBOX_REPO}/catch-up-upstream/scripts/install.sh | sh -s -- --mirror <镜像前缀>"
             echo '```'
             echo ""
             echo "完整安装 / 升级 / 卸载说明见仓库根目录 README。"
@@ -295,3 +295,27 @@ jobs:
             dist-release/*.tar.gz
             dist-release/*.sha256
             dist-release/*components.json
+
+      # 安卓客户端:取上游已签名的 APK,原样附到本 Release。
+      # 先找内核所取的那个上游版本;它没带 APK 就往前找最近带 APK 的版本;都没有只警告,不让发布失败。
+      - name: Attach Android APK from upstream
+        if: env.OPENBOX_KERNEL_SOURCE == 'upstream'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM_TAG: ${{ needs.kernel-tag.outputs.tag }}
+        run: |
+          set -eu
+          mkdir -p apk
+          name=""; found_tag=""
+          for t in "$UPSTREAM_TAG" $(gh release list -R "$OPENBOX_KERNEL_REPO" --limit 15 --json tagName -q '.[].tagName'); do
+            n=$(gh release view "$t" -R "$OPENBOX_KERNEL_REPO" --json assets -q '.assets[].name' | grep -E '^open-box-android-.*\.apk$' | head -n 1 || true)
+            if [ -n "$n" ]; then name=$n; found_tag=$t; break; fi
+          done
+          if [ -z "$name" ]; then
+            echo "::warning::上游最近的 Release 里都没有安卓 APK,本次不附带"
+            exit 0
+          fi
+          echo "安卓 APK:$name(取自上游 $found_tag)"
+          curl -fsSL --retry 3 -o "apk/$name" "https://github.com/$OPENBOX_KERNEL_REPO/releases/download/$found_tag/$name"
+          test -s "apk/$name"
+          gh release upload "${{ github.ref_name }}" "apk/$name" --clobber -R "$GITHUB_REPOSITORY"
