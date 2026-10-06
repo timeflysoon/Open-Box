@@ -1,7 +1,7 @@
 name: Sync upstream
 
-# 上游 liandu2024/Open-Box 出新版本时,把它 release 包里「明文、非编译生成」的文件同步过来,
-# 仓库地址换回自己的,直接提交到目标分支。不碰 panel/ 里的编译产物(上游闭源的前端,只能自己在老版本上完善)。
+# 上游 liandu2024/Open-Box 出新版本时,把它 release 包里的文件同步过来(含编译后的前端和 *.so),
+# 仓库地址换回自己的,直接提交到目标分支。
 # 内核不在这里处理:release.yml 每次构建都会自动取上游 Latest 的 x64 / arm64 内核。
 
 on:
@@ -34,7 +34,7 @@ jobs:
         with:
           ref: ${{ env.BASE_BRANCH }}
 
-      - name: Sync plaintext files from upstream release
+      - name: Sync files from upstream release
         env:
           INPUT_TAG: ${{ inputs.tag }}
           FORCE: ${{ inputs.force }}
@@ -65,27 +65,28 @@ jobs:
           echo "$sha  app.tar.gz" | sha256sum -c -
           mkdir app && tar -xzf app.tar.gz -C app
 
-          # 3. 覆盖明文文件(不含编译产物 *.so 和前端 dist;不删除你自己新增的文件)
-          rsync -a --exclude='*.so' app/openwrt/ openwrt/
+          # 3. 覆盖(不删除你自己新增的文件)
+          rsync -a app/openwrt/ openwrt/
           rsync -a app/debian/ debian/
-          # panel/server: 上游包里的明文后端,整体覆盖
+          # panel/: 整个面板(明文后端 + 编译后的前端)整体覆盖;不动依赖清单,不带 node_modules
           [ -d app/panel/server ] || { echo "上游包里没有 panel/server,目录结构变了" >&2; exit 1; }
-          rsync -a app/panel/server/ panel/server/
+          rsync -a --exclude='node_modules' --exclude='/package.json' --exclude='/pnpm-lock.yaml' app/panel/ panel/
           cp app/update.sh scripts/update.sh
           cp app/uninstall.sh scripts/uninstall.sh
           # install.sh 不在 release 包里,取上游该版本的源码
           curl -fsSL --retry 3 -o scripts/install.sh "https://raw.githubusercontent.com/$UPSTREAM_REPO/$tag/scripts/install.sh"
           chmod +x scripts/install.sh scripts/update.sh scripts/uninstall.sh
 
-          # 4. 仓库地址换回自己的(panel/server 里的 updater.mjs 等也要换,否则面板会去检查上游版本)
+          # 4. 仓库地址换回自己的(panel 里的 updater.mjs 和前端文件也要换,否则面板会去检查上游版本)
           targets="openwrt debian scripts/install.sh scripts/update.sh scripts/uninstall.sh"
-          grep -rlI "$UPSTREAM_REPO" $targets panel/server | xargs -r sed -i "s#$UPSTREAM_REPO#$OWN_REPO#g"
+          grep -rlI "$UPSTREAM_REPO" $targets panel | xargs -r sed -i "s#$UPSTREAM_REPO#$OWN_REPO#g"
           if grep -rnI "liandu2024" $targets; then
             echo "仍有指向上游的残留(见上),请人工处理后再同步" >&2
             exit 1
           fi
-          if grep -rnI "liandu2024" panel/server; then
-            echo "::warning::panel/server 里还有 liandu2024 字样(见上),确认不是仓库地址后可忽略"
+          if grep -rqI "liandu2024" panel; then
+            echo "::warning::panel 里还有 liandu2024 字样,确认不是仓库地址后可忽略"
+            grep -rnI "liandu2024" panel | cut -c1-200 | head -20
           fi
           for f in scripts/install.sh scripts/update.sh scripts/uninstall.sh; do sh -n "$f"; done
 
@@ -95,6 +96,8 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A
+          # 前端 dist 可能被 .gitignore 忽略,强制加入 panel 下的文件
+          git add -f panel
           if git diff --cached --quiet; then echo "没有变化"; exit 0; fi
-          git commit -m "sync: 上游 $tag 的明文文件(openwrt、debian、panel/server、install/update/uninstall.sh),仓库地址保持 $OWN_REPO"
+          git commit -m "sync: 上游 $tag(openwrt、debian、panel、install/update/uninstall.sh),仓库地址保持 $OWN_REPO"
           git push origin "HEAD:$BASE_BRANCH"
