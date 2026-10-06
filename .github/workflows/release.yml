@@ -313,26 +313,33 @@ jobs:
             dist-release/*.sha256
             dist-release/*components.json
 
-      # 安卓客户端:取上游已签名的 APK,原样附到本 Release。
-      # 先找内核所取的那个上游版本;它没带 APK 就往前找最近带 APK 的版本;都没有只警告,不让发布失败。
-      - name: Attach Android APK from upstream
+      # 客户端(安卓 APK / macOS DMG):取上游已签名的成品,原样附到本 Release。
+      # 客户端版本和面板版本不同步,也不是每个上游版本都带:每种客户端各自从内核所取的那个上游版本开始,
+      # 往前找最近带它的版本;找不到只警告,不让发布失败。
+      - name: Attach client apps (Android / macOS) from upstream
         if: env.OPENBOX_KERNEL_SOURCE == 'upstream'
         env:
           GH_TOKEN: ${{ github.token }}
           UPSTREAM_TAG: ${{ needs.kernel-tag.outputs.tag }}
         run: |
           set -eu
-          mkdir -p apk
-          name=""; found_tag=""
-          for t in "$UPSTREAM_TAG" $(gh release list -R "$OPENBOX_KERNEL_REPO" --limit 15 --json tagName -q '.[].tagName'); do
-            n=$(gh release view "$t" -R "$OPENBOX_KERNEL_REPO" --json assets -q '.assets[].name' | grep -E '^open-box-android-.*\.apk$' | head -n 1 || true)
-            if [ -n "$n" ]; then name=$n; found_tag=$t; break; fi
+          mkdir -p clients
+          tags="$UPSTREAM_TAG $(gh release list -R "$OPENBOX_KERNEL_REPO" --limit 15 --json tagName -q '.[].tagName')"
+          for kind in android macos; do
+            found_tag=""; names=""
+            for t in $tags; do
+              names=$(gh release view "$t" -R "$OPENBOX_KERNEL_REPO" --json assets -q '.assets[].name' \
+                | grep -E "^open-box-${kind}-.*\.(apk|dmg)(\.sha256)?$" || true)
+              if [ -n "$names" ]; then found_tag=$t; break; fi
+            done
+            if [ -z "$found_tag" ]; then
+              echo "::warning::上游最近的 Release 里都没有 $kind 客户端,本次不附带"
+              continue
+            fi
+            for name in $names; do
+              echo "客户端:$name(取自上游 $found_tag)"
+              curl -fsSL --retry 3 -o "clients/$name" "https://github.com/$OPENBOX_KERNEL_REPO/releases/download/$found_tag/$name"
+              test -s "clients/$name"
+              gh release upload "${{ env.RELEASE_TAG }}" "clients/$name" --clobber -R "$GITHUB_REPOSITORY"
+            done
           done
-          if [ -z "$name" ]; then
-            echo "::warning::上游最近的 Release 里都没有安卓 APK,本次不附带"
-            exit 0
-          fi
-          echo "安卓 APK:$name(取自上游 $found_tag)"
-          curl -fsSL --retry 3 -o "apk/$name" "https://github.com/$OPENBOX_KERNEL_REPO/releases/download/$found_tag/$name"
-          test -s "apk/$name"
-          gh release upload "${{ env.RELEASE_TAG }}" "apk/$name" --clobber -R "$GITHUB_REPOSITORY"
