@@ -36,7 +36,7 @@ test('seedDefaultStorage:全新安装写入默认值和背景;已有 config/* �
 test('随包的默认值文件本身合法:有主题等关键项,背景是 data:image', () => {
   const { entries, background } = loadStorageDefaults()
   assert.equal(entries['config/theme-mode'], 'light')
-  assert.ok(entries['config/global-radius'])
+  assert.equal(entries['config/corner-radius'], '26', '全局圆角默认照 iOS 27 的卡片圆角')
   assert.ok(!Object.keys(entries).some((k) => k.startsWith('config/access-')))
   assert.ok(background.startsWith('data:image/'))
 })
