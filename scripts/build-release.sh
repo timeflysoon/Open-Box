@@ -276,8 +276,8 @@ trap 'rm -rf "$STAGE"' EXIT INT TERM
 mkdir -p "$STAGE/node/lib" "$STAGE/panel" "$STAGE/bin" "$STAGE/openwrt"
 
 # ---- 1. 构建前端 ----
-log "构建面板前端 (vite build)..."
-(cd "$PANEL_DIR" && corepack pnpm run build)
+log "使用仓库里的面板前端 dist(取自上游,不自己编译)..."
+[ -f "$PANEL_DIR/dist/index.html" ] || { echo "ERROR: $PANEL_DIR/dist/index.html 不存在,请先运行 Sync upstream" >&2; exit 1; }
 cp -R "$PANEL_DIR/dist" "$STAGE/panel/dist"
 
 # ---- 2. pnpm deploy 出自包含 server ----
