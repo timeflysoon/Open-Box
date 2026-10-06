@@ -125,6 +125,34 @@ test('应用失败时启动不谎报成功,原因原样带出去', async () => {
   }
 })
 
+// 冲突守护(system/conflict-guard.mjs)自动停了内核:状态接口带 conflictAutoStopped,右上角提示说清是自动停的
+test('GET status:内核被冲突守护自动停掉、那个工具还在跑 → conflictAutoStopped;内核在跑 / 没有冲突 / 不是自动停的都是 false', async () => {
+  const status = async ({ kernelRunning, conflict = true, deployState }) => {
+    const ctx = createMockContext({
+      files: conflict ? { '/etc/init.d/passwall': '#!' } : {},
+      execResults: {
+        '/etc/init.d/openbox status': kernelRunning ? { code: 0, stdout: 'running' } : { code: 1, stdout: 'inactive' },
+        '/etc/init.d/passwall status': { code: 0, stdout: 'running' },
+      },
+    })
+    const store = memStore()
+    if (deployState) store.setDeployState(deployState)
+    const { baseUrl, close } = await startApp(ctx, store)
+    try {
+      return await (await fetch(`${baseUrl}/api/openbox/service/status`)).json()
+    } finally {
+      await close()
+    }
+  }
+  const auto = { stage: 'conflict', message: '已自动停止 Open-Box 内核', at: 1, badTags: [], autoStopped: true }
+  const stopped = await status({ kernelRunning: false, deployState: auto })
+  assert.deepEqual(stopped.conflicts.map((c) => c.id), ['passwall'])
+  assert.equal(stopped.conflictAutoStopped, true)
+  assert.equal((await status({ kernelRunning: true, deployState: auto })).conflictAutoStopped, false)
+  assert.equal((await status({ kernelRunning: false, conflict: false, deployState: auto })).conflictAutoStopped, false)
+  assert.equal((await status({ kernelRunning: false, deployState: { stage: 'conflict', message: 'x', at: 1, badTags: [] } })).conflictAutoStopped, false)
+})
+
 test('POST /api/openbox/service/core/stop → {ok,code,stderr}', async () => {
   const ctx = okCtx({ '/etc/init.d/openbox status': { code: 1, stdout: 'inactive' } })
   const { baseUrl, close } = await startApp(ctx)

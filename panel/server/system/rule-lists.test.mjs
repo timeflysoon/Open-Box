@@ -272,3 +272,42 @@ test('立即更新(#155):没到重下时间也重拉重编、时间记成现在;
   const fresh = createMockContext({ files: { [paths.singbox]: 'x' } })
   assert.equal((await refreshRuleList(fresh, paths, URL_A, { fetchImpl: okFetch('a.com\n1.2.3.0/24\n') })).shapeChanged, false)
 })
+
+// 地区分流(给手机用的)里的规则集链接:部署时和站点集的一起编,拉不到不让部署失败;单独补的时候站点集那些条目原样留着
+const URL_B = 'https://example.com/list/region.list'
+const TAG_B = listTagForUrl(URL_B)
+test('extra 里 optional 的链接拉不到、本地也没有:记进 failed,部署照常;站点集的照编', async () => {
+  const ctx = createMockContext({ files: { [paths.singbox]: 'x' } })
+  const fetchImpl = async (url) => (String(url) === URL_B ? { ok: false, status: 502 } : okFetch('a.com\n')())
+  const r = await ensureRuleLists(ctx, paths, routing([URL_A]), { fetchImpl, now: () => 1000, extra: [{ url: URL_B, tag: TAG_B, optional: true }] })
+  assert.equal(r.ok, true)
+  assert.deepEqual(r.updated, [TAG_A])
+  assert.deepEqual(r.failed.map((f) => f.tag), [TAG_B])
+  const state = JSON.parse(ctx.writes.find((w) => w.path === listStatePath(paths)).content)
+  assert.deepEqual(Object.keys(state), [TAG_A])
+})
+
+test('同一个链接站点集也引用:按站点集的算(拉不到又没有旧的,部署照样停下)', async () => {
+  const ctx = createMockContext({ files: { [paths.singbox]: 'x' } })
+  const r = await ensureRuleLists(ctx, paths, routing([URL_A]), {
+    fetchImpl: async () => ({ ok: false, status: 502 }),
+    extra: [{ url: URL_A, tag: TAG_A, optional: true }],
+  })
+  assert.equal(r.ok, false)
+})
+
+test('keepOthers:只补地区分流那几条,状态里站点集的条目原样留着;什么都没变就不写状态文件', async () => {
+  const kept = { [TAG_A]: { url: URL_A, at: 1000, split: 2, counts: { domain_suffix: 3 } } }
+  const ctx = createMockContext({ files: { [paths.singbox]: 'x', [listStatePath(paths)]: JSON.stringify(kept) } })
+  const r = await ensureRuleLists(ctx, paths, null, { fetchImpl: okFetch('b.com\n'), now: () => 2000, extra: [{ url: URL_B, tag: TAG_B, optional: true }], keepOthers: true })
+  assert.deepEqual(r.updated, [TAG_B])
+  const state = JSON.parse(ctx.writes.find((w) => w.path === listStatePath(paths)).content)
+  assert.deepEqual(Object.keys(state).sort(), [TAG_A, TAG_B].sort())
+  assert.deepEqual(state[TAG_A], kept[TAG_A])
+
+  // 再来一次:没到 24 小时、文件都在 → 不拉、不写
+  const writesBefore = ctx.writes.length
+  const again = await ensureRuleLists(ctx, paths, null, { fetchImpl: async () => { throw new Error('不该拉') }, now: () => 3000, extra: [{ url: URL_B, tag: TAG_B, optional: true }], keepOthers: true })
+  assert.deepEqual(again.updated, [])
+  assert.equal(ctx.writes.length, writesBefore, '状态没变,不写闪存')
+})

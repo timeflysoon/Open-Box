@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -8,15 +9,20 @@ import { loadIconIndex } from '../engine/icon-index.mjs'
 import { createStore } from '../store/openbox-store.mjs'
 import { ROUTER_ID_KEY, lanAddresses, registerClientAppRoutes, registerPublicClientRoutes, routerId } from './client-app.mjs'
 import { EGRESS_COUNTRY_KEY } from '../system/router-region.mjs'
+import { BACKGROUND_IMAGE_KEY } from '../system/seed-defaults.mjs'
 import { DEFAULT_SHARE_REGIONS, shareRegionsVersion } from '../engine/share-regions.mjs'
+import { listTagForUrl, ruleListIpTag } from '../engine/rule-list.mjs'
+import { createMockContext } from '../system/context.mjs'
+import { createPaths } from '../system/paths.mjs'
+import { listStatePath } from '../system/rule-lists.mjs'
 
-const setup = async ({ readVersion = async () => '0.1.280', detectCountry, ctx = null, paths = null } = {}) => {
+const setup = async ({ readVersion = async () => '0.1.280', detectCountry, ctx = null, paths = null, publicCtx = null, publicPaths = null } = {}) => {
   const map = new Map()
   const store = createStore({ get: (k) => map.get(k) ?? null, set: (k, v) => map.set(k, v), del: (k) => map.delete(k) })
   const geoDir = fs.mkdtempSync(path.join(os.tmpdir(), 'openbox-geo-'))
   fs.writeFileSync(path.join(geoDir, 'geosite-cn.srs'), Buffer.from('SRS-test'))
   const app = express()
-  registerPublicClientRoutes(app, { store, geoDir, readVersion })
+  registerPublicClientRoutes(app, { store, geoDir, readVersion, ctx: publicCtx, paths: publicPaths })
   registerClientAppRoutes(app, { store, ctx, paths, readVersion, ...(detectCountry ? { detectCountry } : {}) })
   const server = app.listen(0)
   await new Promise((resolve) => server.once('listening', resolve))
@@ -99,6 +105,39 @@ test('regions 顺带回共享网络服务器的 ID / 名字(按共享网络页�
   } finally { await close() }
 })
 
+test('regions 带面板背景的元数据(不算进地区分流的 version);background 接口回上传的图,网址 302 跳过去,没设 404', async () => {
+  const { store, map, base, close } = await setup()
+  try {
+    const id = routerId(store)
+    assert.equal((await (await fetch(`${base}/client/v1/${id}/regions`)).json()).background, null)
+    assert.equal((await fetch(`${base}/client/v1/${id}/background`)).status, 404)
+
+    const png = Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex')
+    map.set('config/custom-background-image', 'local-image-1788361724032')
+    map.set(BACKGROUND_IMAGE_KEY, `data:image/png;base64,${png.toString('base64')}`)
+    map.set('config/dashboard-transparent', '84')
+    map.set('config/blur-intensity', '16')
+    const version = createHash('sha256').update(png).digest('hex').slice(0, 16)
+    const regions = await (await fetch(`${base}/client/v1/${id}/regions`)).json()
+    assert.deepEqual(regions.background, { version, transparent: 84, blur: 16 })
+    assert.equal(regions.version, shareRegionsVersion(DEFAULT_SHARE_REGIONS))
+
+    const image = await fetch(`${base}/client/v1/${id}/background`)
+    assert.equal(image.status, 200)
+    assert.equal(image.headers.get('content-type'), 'image/png')
+    assert.equal(image.headers.get('x-openbox-background-version'), version)
+    assert.equal(image.headers.get('cache-control'), 'no-store')
+    assert.deepEqual(Buffer.from(await image.arrayBuffer()), png)
+    assert.equal((await fetch(`${base}/client/v1/${'f'.repeat(32)}/background`)).status, 404)
+
+    // 面板填的是网址:App 跟着 302 自己去下(和浏览器一样),路由器不替它取
+    map.set('config/custom-background-image', 'https://example.com/bg.jpg')
+    const moved = await fetch(`${base}/client/v1/${id}/background`, { redirect: 'manual' })
+    assert.equal(moved.status, 302)
+    assert.match(moved.headers.get('location'), /^https:\/\/example\.com\/bg\.jpg\?v=\d{4}-\d{2}-\d{2}$/)
+  } finally { await close() }
+})
+
 test('info 带服务器信息的现值、默认名称和出口国家;egress-country 按出口 IP 判一次', async () => {
   const calls = []
   const detectCountry = async ({ store }) => {
@@ -163,4 +202,60 @@ test('LAN addresses come from the LAN interfaces, IPv4 first', async () => {
   assert.deepEqual(await lanAddresses(null, 'openwrt'), [])
   // 读地址失败就是空,不让接口出错
   assert.deepEqual(await lanAddresses({ exec: async () => { throw new Error('no ip') } }, 'openwrt'), [])
+})
+
+// 地区分流和目标分流对齐(用户 2026-10-05):域名关键词、规则集链接只发给带 rules=2 的新 App;规则集链接带路由器编好的几份,
+// 下载走 geodata/<list-xxx>,只放行现在引用到的
+test('regions:老 App 拿不到新类型的规则;rules=2 拿到全部,规则集链接带编好的几份(sha256 是文件字节);geodata 只放行引用到的 list-', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'openbox-share-lists-'))
+  const paths = createPaths(root)
+  fs.mkdirSync(paths.rulesetDir, { recursive: true })
+  const compiled = 'https://lists.example.com/ai.list'
+  const pending = 'https://lists.example.com/new.list'
+  const tag = listTagForUrl(compiled)
+  fs.writeFileSync(path.join(paths.rulesetDir, `${tag}.srs`), Buffer.from('SRS-domains'))
+  fs.writeFileSync(path.join(paths.rulesetDir, `${ruleListIpTag(tag)}.srs`), Buffer.from('SRS-ips'))
+  // 站点集的名单:磁盘上有,但地区组没引用,不能经这个接口拿走
+  const other = listTagForUrl('https://lists.example.com/routing-only.list')
+  fs.writeFileSync(path.join(paths.rulesetDir, `${other}.srs`), Buffer.from('SRS-other'))
+  const state = { [tag]: { url: compiled, at: 1, counts: { domain_suffix: 3, ip_cidr: 2 }, split: 2 } }
+  const ctx = createMockContext({ files: { [listStatePath(paths)]: JSON.stringify(state) } })
+  const { store, base, close } = await setup({ publicCtx: ctx, publicPaths: paths })
+  try {
+    const id = routerId(store)
+    const groups = structuredClone(DEFAULT_SHARE_REGIONS)
+    groups[2].rules = [
+      { type: 'domainKeyword', value: 'openai', action: 'proxy' },
+      { type: 'ruleUrl', value: compiled, action: 'proxy' },
+      { type: 'ruleUrl', value: pending, action: 'proxy' },
+      ...groups[2].rules,
+    ]
+    store.setProfile({ shareRegions: groups })
+    const legacy = await (await fetch(`${base}/client/v1/${id}/regions`)).json()
+    assert.deepEqual(legacy.groups[2].rules.map((r) => r.type), ['geosite', 'geoip'], '老 App:新类型的规则删掉')
+    assert.equal(legacy.version, shareRegionsVersion(legacy.groups))
+
+    const fresh = await (await fetch(`${base}/client/v1/${id}/regions?rules=2`)).json()
+    const rules = fresh.groups[2].rules
+    assert.deepEqual(rules.map((r) => r.type), ['domainKeyword', 'ruleUrl', 'ruleUrl', 'geosite', 'geoip'])
+    const sha = (text) => createHash('sha256').update(text).digest('hex')
+    assert.deepEqual(rules[1].sets, [
+      { tag, kind: 'domain', sha256: sha('SRS-domains') },
+      { tag: ruleListIpTag(tag), kind: 'ip', sha256: sha('SRS-ips') },
+    ])
+    assert.deepEqual(rules[2].sets, [], '还没编好的:空的,App 当这条不生效')
+    assert.notEqual(fresh.version, legacy.version)
+
+    const srs = await fetch(`${base}/client/v1/${id}/geodata/${ruleListIpTag(tag)}.srs`)
+    assert.equal(srs.status, 200)
+    assert.equal(Buffer.from(await srs.arrayBuffer()).toString(), 'SRS-ips')
+    assert.equal((await fetch(`${base}/client/v1/${id}/geodata/${other}.srs`)).status, 404, '没被地区组引用的不给')
+    assert.equal((await fetch(`${base}/client/v1/${id}/geodata/${listTagForUrl(pending)}.srs`)).status, 404, '还没编出来的 404')
+    // 删掉这条规则之后,原来编好的也不再给
+    store.setProfile({ shareRegions: DEFAULT_SHARE_REGIONS })
+    assert.equal((await fetch(`${base}/client/v1/${id}/geodata/${tag}.srs`)).status, 404)
+  } finally {
+    await close()
+    fs.rmSync(root, { recursive: true, force: true })
+  }
 })

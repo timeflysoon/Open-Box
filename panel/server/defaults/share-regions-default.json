@@ -8,6 +8,11 @@
       "regions": ["CN"],
       "default": true,
       "rules": [
+        { "type": "domainSuffix", "value": "browserleaks.com", "action": "proxy" },
+        { "type": "domainSuffix", "value": "browserleaks.org", "action": "proxy" },
+        { "type": "domainSuffix", "value": "browserleaks.net", "action": "proxy" },
+        { "type": "domainSuffix", "value": "googleapis.cn", "action": "proxy" },
+        { "type": "domainSuffix", "value": "google.cn", "action": "proxy" },
         { "type": "geosite", "value": "cn", "action": "direct" },
         { "type": "geoip", "value": "cn", "action": "direct" },
         { "type": "domainSuffix", "value": "cn", "action": "direct" },

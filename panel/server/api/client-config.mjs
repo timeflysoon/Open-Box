@@ -13,6 +13,8 @@
 // 公开路由(挂在鉴权守卫之前,和 /client/v1 的 A 模式接口同一个前缀):
 //   GET /client/v1/:routerId/config/:token                 加密的 bundle
 //   GET /client/v1/:routerId/config/:token/rule-set/:tag   bundle 里列的 .srs(不加密,App 按 sha256 校验)
+//   GET /client/v1/:routerId/config/:token/background      面板背景图(bundle 的 view.background 有 version,变了 App 才来下;
+//                                                          上传的图回字节,面板填的是网址 302 跳过去,没设背景 404,见 system/panel-background.mjs)
 // 登录后的:
 //   GET /api/openbox/client-config(这个码 + 最后同步时间)、GET /api/openbox/client-config/file
 import { createCipheriv, createHash, randomBytes, timingSafeEqual } from 'node:crypto'
@@ -22,6 +24,7 @@ import express from 'express'
 import { clientProfilePatch } from '../engine/client-config.mjs'
 import { iconsFor } from '../engine/icon-index.mjs'
 import { normalizeRouting } from '../engine/routing-model.mjs'
+import { panelBackground, panelBackgroundMeta, sendPanelBackground } from '../system/panel-background.mjs'
 import { panelPort } from '../system/panel-port.mjs'
 import { readRuleListShapes } from '../system/rule-lists.mjs'
 import { isSafeRulesetTag, rulesetKind, rulesetPath } from '../system/rulesets.mjs'
@@ -161,7 +164,14 @@ export const buildClientBundle = async ({ store, ctx, paths, fetchImpl = globalT
   const outboundTags = new Set((built.config.outbounds || []).map((o) => o.tag))
   const hasRuleset = (tag) => fs.promises.access(fileOf(tag)).then(() => true, () => false)
   // 路由器标识(设置 · 客户端,用户 2026-10-04):App 里本地分流配置卡片的图标、名称、地区
-  const view = { ...(await clientView({ store, profile, outboundTags, failover: built.failover, hasRuleset })), server: await serverInfoFor(store, readVersion) }
+  // 面板背景(用户 2026-10-05「背景也要同步 android app 中,不要写死」):元数据进 view 算指纹,图本身另走接口下;
+  // 导出文件(withData)把上传的图也带上,但不算进指纹——version 已经跟着图片字节走
+  const background = panelBackground(store)
+  const view = {
+    ...(await clientView({ store, profile, outboundTags, failover: built.failover, hasRuleset })),
+    server: await serverInfoFor(store, readVersion),
+    background: panelBackgroundMeta(background),
+  }
 
   // 规则集:内核配置引用的,加上域名穿透要在手机上解的(只在站点集里、没进分流规则的也要有);模板引用的在前
   const drillParts = view.policies.flatMap((p) => (p.drill.rulesets || []).flatMap((r) => r.parts))
@@ -172,7 +182,9 @@ export const buildClientBundle = async ({ store, ctx, paths, fetchImpl = globalT
     ruleSets.push({ tag, sha256: sha256(bytes), size: bytes.length, ...(withData && !rulesetKind(tag) ? { data: bytes.toString('base64') } : {}) })
   }
   // ruleFiles:订阅和节点站点直连那两份规则集文件的内容(路由器用 source.nodes 算的);App 不在手机上重算时就用它起内核
-  const body = { config: built.config, flags: built.flags, ruleFiles: built.ruleFiles, directTag: built.directTag, view, source }
+  // failover:故障转移组的定义(和 config.meta.json 那份同一次生成),App 在手机上自动切页签用(OpenBoxEngine.failover*,
+  // 用户 2026-10-05「对齐路由器版」)。直接随包发:App 不用自己重算,引擎版本对不上、自检没过时也照样能切
+  const body = { config: built.config, flags: built.flags, ruleFiles: built.ruleFiles, directTag: built.directTag, failover: built.failover, view, source }
   const addresses = await lanAddresses(ctx, paths.platform)
   return {
     format: 'open-box-client',
@@ -190,6 +202,7 @@ export const buildClientBundle = async ({ store, ctx, paths, fetchImpl = globalT
     },
     kernel: await readKernelVersion(ctx, paths),
     ...body,
+    ...(withData && background?.image ? { view: { ...view, background: panelBackgroundMeta(background, { withData }) } } : {}),
     ruleSets,
   }
 }
@@ -221,6 +234,9 @@ export const registerPublicClientConfigRoutes = (app, { store, ctx, paths, fetch
     if (!fs.existsSync(file)) return res.status(404).json({ error: 'not found' })
     res.type('application/octet-stream')
     res.sendFile(file)
+  })
+  app.get('/client/v1/:routerId/config/:token/background', (req, res) => {
+    if (device(req, res)) sendPanelBackground(res, panelBackground(store))
   })
 }
 

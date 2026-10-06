@@ -108,6 +108,12 @@ export const runScheduledTasks = async ({ store, ctx, paths, fetchImpl = globalT
   }
 
   if (changed) await writeJsonFile(ctx, paths.scheduleStatePath, state)
+
+  // 地区分流里的规则集链接(给手机用的,system/share-region-lists.mjs):每小时看一眼,到了 24 小时的重拉重编。
+  // 部署时也会一起编;这里管的是内核长时间不重启、手机还要拿到更新的名单
+  if (typeof deps.refreshShareRegionLists === 'function' && now.getMinutes() === 17) {
+    try { await deps.refreshShareRegionLists() } catch (err) { log(`[schedule] share-region rule lists: ${err instanceof Error ? err.message : err}`) }
+  }
 }
 
 export const startScheduler = (deps, { intervalMs = 60_000 } = {}) => {

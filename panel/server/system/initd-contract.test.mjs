@@ -5,6 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
+import { CONFLICT_SERVICES } from './conflicts.mjs'
 import { createPaths } from './paths.mjs'
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..')
@@ -735,4 +736,83 @@ test('内核自身流量的标记要有一条"终止查找"的策略路由(GitHu
   const cleanup = core.slice(core.indexOf('openbox_cleanup() {'), core.indexOf('openbox_cleanup() {') + 200)
   assert.match(cleanup, /openbox_clear_mark_rule/, '停止时要撤掉')
   assert.match(core, /while ip rule del pref \$OPENBOX_MARK_RULE_PREF/, '清理要循环删干净(可能有历史残留)')
+})
+
+// ---- 别的代理工具在跑就不起内核(GitHub #426;用户 2026-10-05:检测到其他代理工具就禁止启动,并明确提示) ----
+const conflictFns = ['openbox_conflict_running', 'openbox_conflicts', 'openbox_refuse_if_conflict'].map((name) => {
+  const fn = core.match(new RegExp(`^${name}\\(\\) \\{[^]*?^\\}`, 'm'))
+  assert.ok(fn, `抽不出 ${name}`)
+  return fn[0]
+}).join('\n')
+
+test('init 脚本的冲突名单和面板(conflicts.mjs)一模一样:同样的插件、同样的显示名、同样的运行目录', () => {
+  const rows = [...core.matchAll(/^\topenbox_conflict_running (\S+) '([^']+)' && _ob_c="\$\{_ob_c:\+\$\{_ob_c\}、\}([^"]+)"$/gm)]
+    .map((m) => ({ id: m[1], label: m[3], ere: m[2].replace(/\[(\w)\]/g, '$1') }))
+  assert.deepEqual(rows, CONFLICT_SERVICES.map((svc) => ({
+    id: svc.id,
+    label: svc.label,
+    ere: svc.process.source.replaceAll('\\/', '/').replaceAll('(?:', '('),
+  })))
+})
+
+const runConflicts = ({ installed = [], processes = [], vanishOnSleep = false } = {}) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'openbox-conflict-'))
+  const proc = path.join(dir, 'proc')
+  const initd = path.join(dir, 'initd')
+  fs.mkdirSync(initd, { recursive: true })
+  for (const name of installed) fs.writeFileSync(path.join(initd, name), '#!/bin/sh\n')
+  processes.forEach((args, i) => {
+    fs.mkdirSync(path.join(proc, String(1000 + i)), { recursive: true })
+    fs.writeFileSync(path.join(proc, String(1000 + i), 'cmdline'), `${args.join('\0')}\0`)
+  })
+  const body = conflictFns.replaceAll('/proc/', `${proc}/`).replaceAll('/etc/init.d/', `${initd}/`)
+  const harness = `
+LOG='${dir}/log'; : > "$LOG"
+sleep() { echo "sleep $*" >> "$LOG"; ${vanishOnSleep ? `rm -rf '${proc}'/*;` : ''} }
+logger() { echo "logger $*" >> "$LOG"; }
+openbox_cleanup() { echo cleanup >> "$LOG"; }
+${body}
+echo "found=$(openbox_conflicts)"
+openbox_refuse_if_conflict 2>"${dir}/stderr"; echo "rc=$?"
+echo "log=$(tr '\\n' '|' < "$LOG")"
+echo "stderr=$(cat "${dir}/stderr")"
+`
+  const out = execFileSync('sh', ['-c', harness], { encoding: 'utf8' })
+  fs.rmSync(dir, { recursive: true, force: true })
+  const field = (k) => (out.match(new RegExp(`^${k}=(.*)$`, 'm')) || [])[1]
+  return { found: field('found'), rc: Number(field('rc')), log: field('log'), stderr: field('stderr') }
+}
+
+test('openbox_conflicts:装着、并且有进程带着它的运行目录才算;Open-Box 自己、只装没跑、插件的脚本目录都不算', () => {
+  const passwall = ['/tmp/etc/passwall/bin/sing-box', 'run', '-c', '/tmp/etc/passwall/haproxy_2001.json']
+  const openbox = ['/opt/open-box/bin/sing-box', 'run', '-c', '/opt/open-box/etc/config.json']
+  assert.equal(runConflicts({ installed: ['passwall', 'openclash'], processes: [openbox, passwall] }).found, 'PassWall')
+  assert.equal(runConflicts({ installed: ['openclash', 'passwall'], processes: [passwall, ['/etc/openclash/clash', '-d', '/etc/openclash']] }).found, 'OpenClash、PassWall')
+  assert.equal(runConflicts({ processes: [passwall] }).found, '', '没装 PassWall(init 脚本不在)不算')
+  assert.equal(runConflicts({ installed: ['passwall'], processes: [openbox] }).found, '')
+  assert.equal(runConflicts({ installed: ['passwall'], processes: [['/usr/bin/lua', '/usr/share/passwall/subscribe.lua', 'start']] }).found, '', '关着时定时任务跑的脚本不算')
+  assert.equal(runConflicts({ installed: ['passwall2'], processes: [['/tmp/etc/passwall2/bin/xray', 'run']] }).found, 'PassWall2')
+  assert.equal(runConflicts({ installed: ['homeproxy'], processes: [['/usr/bin/sing-box', 'run', '--config', '/var/run/homeproxy/sing-box-c.json']] }).found, 'HomeProxy')
+})
+
+test('openbox_refuse_if_conflict:隔 2 秒还在才拒绝——撤掉接管、明确提示、返回 1;一闪而过的不算;没有冲突什么都不做', () => {
+  const passwall = ['/tmp/etc/passwall/bin/xray', 'run', '-c', '/tmp/etc/passwall/TCP.json']
+  const refused = runConflicts({ installed: ['passwall'], processes: [passwall] })
+  assert.equal(refused.rc, 1)
+  assert.match(refused.log, /^sleep 2\|logger -t openbox 检测到 PassWall 正在运行。同一台路由器上不能同时运行两个代理工具,会互相冲突,Open-Box 不启动内核。请先停用 PassWall\(关掉它的主开关或卸载\)再启动。\|cleanup\|$/)
+  assert.match(refused.stderr, /^openbox: 检测到 PassWall 正在运行/)
+  const transient = runConflicts({ installed: ['passwall'], processes: [passwall], vanishOnSleep: true })
+  assert.equal(transient.rc, 0)
+  assert.equal(transient.log, 'sleep 2|', '第二眼没了:不拒绝、不撤接管')
+  const clean = runConflicts({ installed: ['passwall'] })
+  assert.equal(clean.rc, 0)
+  assert.equal(clean.log, '', '没有冲突:不等、不撤')
+})
+
+test('起内核前先查冲突:排在 DNS 接管和 procd 拉起内核之前,查到就 return', () => {
+  const start = core.match(/^start_service\(\) \{[^]*?^\}/m)[0]
+  const at = (w) => start.indexOf(w)
+  assert.ok(start.includes('openbox_refuse_if_conflict || return 1'), start)
+  assert.ok(at('openbox_refuse_if_conflict') < at('openbox_apply_takeover') && at('openbox_apply_takeover') < at('procd_open_instance'), start)
+  assert.ok(at('openbox_refuse_if_conflict') < at('openbox_clean_stale_nft'), '还没确定要起内核,先别动 nft 表')
 })

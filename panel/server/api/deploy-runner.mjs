@@ -20,6 +20,7 @@ import { deployConfig, configMetaPath, applyDnsForwardNow, dnsForwardMeta, profi
 import { applyFlipDiff, clearFlipStateCache, flipTargetState, writeFlipFiles } from '../system/flip-files.mjs'
 import { writeNodeDirectSets } from '../system/node-direct-files.mjs'
 import { ensureRuleLists } from '../system/rule-lists.mjs'
+import { shareRegionRuleUrls } from '../system/share-region-lists.mjs'
 import { dropRuleSetIndex } from '../system/ruleset-index.mjs'
 import { ruleListIpTag } from '../engine/rule-list.mjs'
 import { resolveNativeBypass } from '../system/native-bypass.mjs'
@@ -530,7 +531,8 @@ const runDeployInner = async ({ store, ctx, paths, fetchImpl = globalThis.fetch,
     // 规则集链接要排在生成配置之前:拉回来才知道每条名单编成了域名 / IP 哪几份 .srs,
     // 路由规则和 DNS 规则要凭这个决定引用哪几份(见 engine/routing-model.mjs)。
     // 这一步只往 rulesetDir 里写文件,失败原地返回,不动系统。
-    const ruleLists = await ensureRuleLists(ctx, paths, (store.getProfile() || {}).routing, { fetchImpl, log: (m) => console.log(m) })
+    // 地区分流(给手机用的)里的规则集链接一起编:状态文件只写一份,分开编会互相冲掉;它们拉不到不让这次部署失败
+    const ruleLists = await ensureRuleLists(ctx, paths, (store.getProfile() || {}).routing, { fetchImpl, log: (m) => console.log(m), extra: shareRegionRuleUrls(store.getProfile()) })
     // 这次重拉重编过的名单,规则页推算用的索引立刻作废(不然还要照旧内容算 10 分钟)
     dropRuleSetIndex((ruleLists.updated || []).flatMap((tag) => [tag, ruleListIpTag(tag)]))
     if (!ruleLists.ok) {

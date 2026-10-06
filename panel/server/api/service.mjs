@@ -9,7 +9,45 @@ import { cancelPendingDeploys, runDeploy, runExclusive } from './deploy-runner.m
 // 校验 → 落盘 → DNS 接管 → 防火墙 → 启动 → 验证,失败自动回滚到直连。
 const failureDetail = (result) => result.message || `deploy failed at stage: ${result.stage}`
 
+// 停止内核:面板的「停止」按钮和冲突守护(system/conflict-guard.mjs,别的代理工具也在跑时自动停)共用。
 // 停止要等多久:init 脚本给内核 15 秒收尾(procd term_timeout,到点强杀),再多留 5 秒
+export const stopKernel = async ({ store, ctx, paths, stopWaitMs = 20000 }) => {
+  // 停止和部署走同一条队列、同一把锁,并把正在跑 / 排队中的部署标成取消:以前停止绕过队列
+  // 直接动系统,停止已经报成功,排在前面的旧部署(还在下规则集、跑 sing-box check)随后照样
+  // 把内核拉起来、把自启打开——最终状态和用户最后一个动作对不上。
+  cancelPendingDeploys()
+  return runExclusive(store, async () => {
+    // 停止内核时一并关闭开机自启:部署成功会把自启打开,若「停止」不关掉它,
+    // 坏配置把网搞断时用户停了内核,一重启 procd 又会把它拉起来、网又断——
+    // 那样的「停止」在真正需要它的场景里是无效的。
+    // 注意这个动作只能放在调用侧:init 脚本的 restart 内部就是 stop + start,
+    // 若把 disable 塞进 stop_service,每次重启(含部署流程里的那次)都会顺手
+    // 关掉自启。
+    let r = await stopService(ctx, paths.initd.core)
+    if (r.ok) {
+      // init 脚本的 stop 是异步收尾,等内核真的退出再回复,否则面板马上刷新状态还是「运行中」,
+      // 用户得点两遍(正式路由器上实测)。等不到就如实报失败。
+      const waited = await waitForServiceState(ctx, paths.initd.core, false, { timeoutMs: stopWaitMs })
+      if (!waited.reached) {
+        r = { ok: false, code: 1, stderr: `内核在 ${Math.round(stopWaitMs / 1000)} 秒内没有退出（${waited.status.raw.trim() || 'running'}）` }
+      }
+    }
+    if (r.ok) {
+      const disabled = await disableService(ctx, paths.initd.core)
+      if (!disabled.ok) {
+        // 内核确实停了,只是自启没关掉——如实告诉调用方,不要谎报完全成功。
+        r = {
+          ...r,
+          stderr: [r.stderr, `disable autostart failed: ${disabled.stderr || disabled.code}`]
+            .filter(Boolean)
+            .join('\n'),
+        }
+      }
+    }
+    return r
+  })
+}
+
 export const registerServiceRoutes = (app, { store, ctx, paths, stopWaitMs = 20000, restartPending = null } = {}) => {
   const router = express.Router({ caseSensitive: true })
   router.use(express.json({ limit: '1mb' }))
@@ -31,7 +69,10 @@ export const registerServiceRoutes = (app, { store, ctx, paths, stopWaitMs = 200
       try { pendingRestart = await restartPending.get() } catch { /* 算不出来就不提示 */ }
     }
     // platform:'openwrt' / 'systemd'(Debian / Ubuntu)。界面按它隐藏只有 OpenWrt 才有的东西(dnsmasq 分流、LuCI 之类)
-    res.json({ core: { ...core, autostart, uptimeSeconds }, panel, conflicts, platform: paths.platform || 'openwrt', pendingRestart: { pending: Boolean(pendingRestart.pending), reasons: pendingRestart.reasons || [] } })
+    // 内核是被冲突守护自动停掉的(别的代理工具还在跑):右上角提示要说清是自动停的
+    const deployState = typeof store.getDeployState === 'function' ? store.getDeployState() : null
+    const conflictAutoStopped = Boolean(!core.running && conflicts.length && deployState && deployState.stage === 'conflict' && deployState.autoStopped)
+    res.json({ core: { ...core, autostart, uptimeSeconds }, panel, conflicts, conflictAutoStopped, platform: paths.platform || 'openwrt', pendingRestart: { pending: Boolean(pendingRestart.pending), reasons: pendingRestart.reasons || [] } })
   })
 
   // POST /api/openbox/service/core/:action
@@ -55,40 +96,7 @@ export const registerServiceRoutes = (app, { store, ctx, paths, stopWaitMs = 200
         ? { ok: true, code: 0, stderr: '', durationMs, ...(deployed.warning ? { warning: deployed.warning } : {}) }
         : { ok: false, code: 1, stderr: failureDetail(deployed), durationMs }
     } else if (action === 'stop') {
-      // 停止和部署走同一条队列、同一把锁,并把正在跑 / 排队中的部署标成取消:以前停止绕过队列
-      // 直接动系统,停止已经报成功,排在前面的旧部署(还在下规则集、跑 sing-box check)随后照样
-      // 把内核拉起来、把自启打开——最终状态和用户最后一个动作对不上。
-      cancelPendingDeploys()
-      result = await runExclusive(store, async () => {
-        // 停止内核时一并关闭开机自启:部署成功会把自启打开,若「停止」不关掉它,
-        // 坏配置把网搞断时用户停了内核,一重启 procd 又会把它拉起来、网又断——
-        // 那样的「停止」在真正需要它的场景里是无效的。
-        // 注意这个动作只能放在调用侧:init 脚本的 restart 内部就是 stop + start,
-        // 若把 disable 塞进 stop_service,每次重启(含部署流程里的那次)都会顺手
-        // 关掉自启。
-        let r = await stopService(ctx, paths.initd.core)
-        if (r.ok) {
-          // init 脚本的 stop 是异步收尾,等内核真的退出再回复,否则面板马上刷新状态还是「运行中」,
-          // 用户得点两遍(正式路由器上实测)。等不到就如实报失败。
-          const waited = await waitForServiceState(ctx, paths.initd.core, false, { timeoutMs: stopWaitMs })
-          if (!waited.reached) {
-            r = { ok: false, code: 1, stderr: `内核在 ${Math.round(stopWaitMs / 1000)} 秒内没有退出（${waited.status.raw.trim() || 'running'}）` }
-          }
-        }
-        if (r.ok) {
-          const disabled = await disableService(ctx, paths.initd.core)
-          if (!disabled.ok) {
-            // 内核确实停了,只是自启没关掉——如实告诉调用方,不要谎报完全成功。
-            r = {
-              ...r,
-              stderr: [r.stderr, `disable autostart failed: ${disabled.stderr || disabled.code}`]
-                .filter(Boolean)
-                .join('\n'),
-            }
-          }
-        }
-        return r
-      })
+      result = await stopKernel({ store, ctx, paths, stopWaitMs })
     } else if (action === 'enable') {
       result = await enableService(ctx, paths.initd.core)
     } else if (action === 'disable') {

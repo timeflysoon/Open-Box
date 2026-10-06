@@ -473,7 +473,8 @@ export const chainNameClash = ({ chainProxies, nodes, groups, policies }) => {
 }
 
 // applyNow:链式代理 / 测速地址 / 站点集这些落在出站上的改动,存完在线换进内核再回复(api/hot-apply.mjs)
-export const registerProfileRoutes = (app, { store, applyNow = null } = {}) => {
+// onShareRegionsSaved:存了地区分流之后在后台把里面的规则集链接编好(system/share-region-lists.mjs),不等它
+export const registerProfileRoutes = (app, { store, applyNow = null, onShareRegionsSaved = null } = {}) => {
   const router = express.Router({ caseSensitive: true })
   router.use(express.json({ limit: '1mb' }))
 
@@ -537,6 +538,7 @@ export const registerProfileRoutes = (app, { store, applyNow = null } = {}) => {
     // App 里节点的图标、名称统一在「路由器标识」里设(用户 2026-10-04),共享服务器自己不再带图标:老数据里的一起丢掉
     if (Array.isArray(patch.servers)) patch.servers = patch.servers.map((server) => Object.fromEntries(Object.entries(server).filter(([key]) => key !== 'icon' && key !== 'iconSvg')))
     const profile = store.setProfile(patch)
+    if ('shareRegions' in patch && typeof onShareRegionsSaved === 'function') onShareRegionsSaved()
     // 用户自己选了地区:后台按出口 IP 自动判的那一次就不做了(system/router-region.mjs)
     if (patch.dns && typeof patch.dns === 'object' && 'region' in patch.dns) cancelRegionDetect(store)
     let applied

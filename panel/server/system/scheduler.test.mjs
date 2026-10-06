@@ -31,3 +31,15 @@ test('定时自动更新:已是最新就不启动升级', async () => {
   const { calls } = await run({ current: 'v0.1.266', latest: 'v0.1.266' })
   assert.equal(calls.length, 0)
 })
+
+// 地区分流里的规则集链接:每小时第 17 分补一次(没到 24 小时的 ensureRuleLists 自己会跳过),别的分钟不碰
+test('地区分流的规则集链接:每小时第 17 分补一次,别的分钟不碰', async () => {
+  const ctx = createMockContext({ files: {} })
+  const store = { getProfile: () => ({}) }
+  let refreshed = 0
+  const tick = (minute) => runScheduledTasks({ store, ctx, paths, fetchImpl: async () => ({ status: 404 }), now: new Date(2026, 9, 5, 9, minute), refreshShareRegionLists: async () => { refreshed += 1 } })
+  await tick(16)
+  await tick(17)
+  await tick(18)
+  assert.equal(refreshed, 1)
+})

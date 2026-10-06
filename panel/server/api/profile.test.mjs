@@ -606,3 +606,22 @@ test('PUT /api/openbox/profile:路由器在中国大陆时代理 DNS 不能用�
     await close()
   }
 })
+
+// 地区分流里的规则集链接:存了就在后台编(onShareRegionsSaved,不等它);没碰地区分流的保存不触发
+test('PUT /api/openbox/profile:存了地区分流才触发 onShareRegionsSaved', async () => {
+  const store = memStore()
+  let calls = 0
+  const app = express()
+  registerProfileRoutes(app, { store, onShareRegionsSaved: () => { calls += 1 } })
+  const server = app.listen(0)
+  await new Promise((resolve) => server.once('listening', resolve))
+  const baseUrl = `http://127.0.0.1:${server.address().port}`
+  try {
+    assert.equal((await putJson(baseUrl, '/api/openbox/profile', { ipv6: false })).status, 200)
+    assert.equal(calls, 0)
+    assert.equal((await putJson(baseUrl, '/api/openbox/profile', { shareRegions: [] })).status, 200)
+    assert.equal(calls, 1)
+  } finally {
+    await new Promise((resolve) => server.close(resolve))
+  }
+})

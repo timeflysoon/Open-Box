@@ -14,6 +14,10 @@ import { detectDnsHolders } from '../system/conflicts.mjs'
 // 节点和订阅的地址只留占位。节点的主机名还会出现在直连规则的域名表和日志里("lookup xxx"),
 // 所以先从出站里收齐主机名,再把它们在整个包里逐个替换,不只靠字段名。
 
+// sing-box 进程:进程号、常驻内存、命令行。直接读 /proc——procps 版的 `ps w` 只列挂在终端上的进程(开发路由器、Debian 上
+// 一行都拿不到);先用一个 grep 挑出命令行里有 sing-box 的,不给每个进程起一次 tr。写成 [s] 免得匹配到这条命令自己
+export const KERNEL_PROCESS_SCRIPT = 'for f in $(grep -l "[s]ing-box" /proc/[0-9]*/cmdline 2>/dev/null); do p=${f%/cmdline}; echo "${p#/proc/} $(sed -n "s/^VmRSS:[[:space:]]*//p" "$p/status" 2>/dev/null) $(tr "\\000" " " < "$f" 2>/dev/null)"; done'
+
 const SECRET_KEY = /^(password|passwd|uuid|secret|token|private_key|public_key|pre_shared_key|psk|key|auth|auth_str|obfs_password|short_id|certificate|certificate_path|key_path)$/i
 const HOST_KEY = /^(server|server_name|sni|host|hosts)$/i
 const URL_KEY = /^(url|link|ruleUrls|urls)$/i
@@ -141,7 +145,7 @@ export const buildDiagnostics = async ({ store, ctx, paths, now = () => new Date
     run(ctx, 'cat', ['/proc/meminfo']),
     run(ctx, 'df', ['-k', installRoot]),
     run(ctx, paths.initd.core, ['status']),
-    run(ctx, 'sh', ['-c', 'ps w | grep "[s]ing-box"']),
+    run(ctx, 'sh', ['-c', KERNEL_PROCESS_SCRIPT]),
     run(ctx, 'nft', ['list', 'tables']),
     run(ctx, 'logread', ['-e', 'sing-box']),
     run(ctx, 'sh', ['-c', 'logread | grep -iE "open-box|openbox|node\\["']),

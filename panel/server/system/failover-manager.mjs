@@ -29,14 +29,20 @@
 //
 // 自动选择是运行状态,不回写用户的页签顺序;只把「当前在哪个页签」按稳定页签 id 存进
 // openbox/failover-state,重启 / 重新部署后据此恢复关联,但健康一定重新检测过才动手。
+//
+// 判断(测哪些节点、页签健康、切不切、下一轮隔多久)在 engine/failover-core.mjs,App 的故障转移用同一份
+// (client-engine 的 OpenBoxEngine.failover*);这里只管读写内核、落盘和调度。
 import { CLASH_API_BASE } from '../api/penetration.mjs'
+import {
+  RECHECK_DELAY_MS, assessLane, decideRound, finishRound, initFailoverState, laneObservation, laneRole, needsLatestHistory,
+  needsSwitch, nextRoundDelay, persistedOf, recordProbes, roundPlan,
+} from '../engine/failover-core.mjs'
 import { kernelTestUrl } from '../engine/test-url.mjs'
 import { configMetaPath } from './deploy.mjs'
 import { processUptime } from './service.mjs'
 
+export { RECHECK_DELAY_MS, laneRole }
 export const FAILOVER_STATE_KEY = 'openbox/failover-state'
-// 当前页签不通之后多久复查一次(用户 2026-09-30 定的规则:不通 → 10 秒后再测一次 → 仍不通才换页签)
-export const RECHECK_DELAY_MS = 10_000
 
 const withTimeout = async (fetchImpl, url, init, timeoutMs) => {
   const controller = new AbortController()
@@ -64,9 +70,6 @@ const mapLimit = async (items, limit, fn) => {
   return out
 }
 
-export const laneRole = (index) => (index === 0 ? 'primary' : `backup-${index}`)
-const sameOrder = (a, b) => Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((x, i) => x === b[i])
-
 export const createFailoverManager = ({
   store, ctx, paths, history = null, fetchImpl = globalThis.fetch, now = () => Date.now(),
   probeCoordinator = null, tickMs = 5000, probeConcurrency = 4, log = () => {},
@@ -88,9 +91,7 @@ export const createFailoverManager = ({
   const persist = () => {
     if (!store.setRaw) return
     const groups = {}
-    for (const g of states.values()) {
-      groups[g.id] = { laneId: g.currentLaneId, at: g.currentSince, lastSwitch: g.lastSwitch, laneOrder: g.laneOrder, reorder: g.reorder }
-    }
+    for (const g of states.values()) groups[g.id] = persistedOf(g)
     try { store.setRaw(FAILOVER_STATE_KEY, JSON.stringify({ groups })) } catch (err) { log(`[failover] 状态写不进去:${errText(err)}`) }
   }
 
@@ -105,11 +106,7 @@ export const createFailoverManager = ({
   let paused = '' // '' | 'config' | 'kernel'
   const states = new Map() // groupId → state
 
-  const freshLane = (lane) => ({
-    id: lane.id, name: lane.name || '', index: lane.index, mode: lane.mode, ref: lane.ref, subTag: lane.subTag,
-    members: [...(lane.members || [])], valid: [...(lane.valid || [])],
-    health: lane.mode === 'empty' ? 'down' : 'unknown', failStreak: 0, upSince: null, kernelNow: null, confirmed: null,
-  })
+  // 版本变了重建每个组的状态(engine/failover-core.mjs 的 initFailoverState:关联提示、页签顺序变了记「按新顺序重选」的待办)
   const loadMap = (meta) => {
     const persisted = loadPersisted()
     const list = Array.isArray(meta?.failover) ? meta.failover : []
@@ -117,39 +114,9 @@ export const createFailoverManager = ({
     for (const def of list) {
       if (!def || typeof def !== 'object' || !def.id || !def.tag) continue
       keep.add(def.id)
-      const prev = states.get(def.id)
-      const saved = persisted[def.id]
-      const lanes = (Array.isArray(def.lanes) ? def.lanes : []).map((l) => {
-        const fresh = freshLane(l)
-        // 同一页签 id 的节点探测结果不带过版本:配置一变,节点参数可能变了,健康重新测
-        return fresh
-      })
-      const laneIds = new Set(lanes.map((l) => l.id))
-      const hintLane = prev?.currentLaneId && laneIds.has(prev.currentLaneId) ? prev.currentLaneId
-        : saved?.laneId && laneIds.has(saved.laneId) ? saved.laneId : null
-      // 页签顺序(稳定 id 的先后)和上一次已经应用的顺序比:变了就是用户改了主备优先级,记一条待办,
-      // 下一轮按新顺序重选(runRound 的决策);上次的待办没办完就带过来。老的落盘记录没有顺序信息
-      // (这个功能之前存下的):不知道用户有没有改过,记一次「按当前顺序校正」的待办,只校正到当前
-      // 页签就是新顺序里第一个通过的为止,不把停在备用上的强行挪回主用(那是「恢复后切回」开关的事)
-      const order = lanes.map((l) => l.id)
-      const prevOrder = Array.isArray(prev?.laneOrder) ? prev.laneOrder : Array.isArray(saved?.laneOrder) ? saved.laneOrder : null
-      const carried = prev?.reorder ?? saved?.reorder ?? null
-      let reorder = carried && typeof carried === 'object' ? { since: carried.since, reason: carried.reason, evaluated: Boolean(carried.evaluated) } : null
-      if (prevOrder && !sameOrder(prevOrder, order)) {
-        reorder = { since: now(), reason: 'priority-changed', evaluated: false }
-        log(`[failover] ${def.tag}:页签顺序从 ${prevOrder.join('/')} 改成 ${order.join('/')},下一轮按新顺序重选`)
-      } else if (!prevOrder && saved && !reorder) {
-        reorder = { since: now(), reason: 'order-unknown', evaluated: false }
-      }
-      states.set(def.id, {
-        id: def.id, tag: def.tag, rejectTag: def.rejectTag || '', settings: def.settings || {},
-        lanes, laneOrder: order, reorder,
-        // 关联提示:上个版本 / 上次重启前在哪个页签。只是提示——健康没重新核过之前不据此宣布任何事
-        currentLaneId: hintLane, currentSince: prev?.currentSince ?? saved?.at ?? null,
-        lastSwitch: prev?.lastSwitch ?? saved?.lastSwitch ?? null,
-        status: 'pending', paused: '', lastRoundAt: 0, nextRoundAt: 0, lastRoundId: 0, lastRoundResult: '',
-        primaryUpSince: null, nodes: {}, inFlight: false, lastError: '',
-      })
+      const { state, logs } = initFailoverState(def, { prev: states.get(def.id) || null, saved: persisted[def.id] || null, now: now() })
+      for (const line of logs) log(line)
+      states.set(def.id, state)
     }
     for (const id of [...states.keys()]) if (!keep.has(id)) states.delete(id)
     persist()
@@ -243,71 +210,35 @@ export const createFailoverManager = ({
     return back.now
   }
 
-  const laneById = (state, id) => state.lanes.find((l) => l.id === id) || null
-  // 内核此刻的选择对应哪个页签:先信记录的当前页签(它的引用就是 now 时),否则按顺序找第一个引用等于 now 的
-  const laneForNow = (state, kernelNow) => {
-    if (!kernelNow || kernelNow === state.rejectTag) return null
-    const hinted = state.currentLaneId ? laneById(state, state.currentLaneId) : null
-    if (hinted && hinted.ref === kernelNow) return hinted
-    return state.lanes.find((l) => l.ref === kernelNow) || null
-  }
-
-  // 复查看哪几个节点:外层 selector 此刻选的那个页签(当前页签)。手动选择的页签只看用户选中的那个节点,
-  // 别的看全部有效节点;兜底拒绝 / 认不出当前页签 / 空页签都不复查
-  const recheckTargets = (state, proxies) => {
-    const parentNow = proxies[state.tag] && typeof proxies[state.tag].now === 'string' ? proxies[state.tag].now : ''
-    const lane = laneForNow(state, parentNow)
-    if (!lane || lane.mode === 'empty') return []
-    if (lane.mode === 'selector') {
-      const picked = proxies[lane.subTag] && typeof proxies[lane.subTag].now === 'string' ? proxies[lane.subTag].now : ''
-      return picked && lane.valid.includes(picked) ? [picked] : []
-    }
-    return [...lane.valid]
-  }
-
-  // 跑一轮:探测 → 页签健康 → 决策 → 切换。返回摘要给日志 / 测试看
+  // 跑一轮:探测 → 页签健康 → 决策 → 切换。判断都在 engine/failover-core.mjs,这里按顺序读写内核。返回摘要给日志 / 测试看
   const runRound = async (state, proxies, kernelStartedAt) => {
     const roundVersion = version
     const roundId = ++state.lastRoundId
-    const s = state.settings || {}
-    const url = kernelTestUrl(s.testUrl || '')
-    const timeoutMs = Number(s.timeoutMs) || 5000
-    const restorePrimary = s.restorePrimary !== false
-    const holdMs = Math.max(0, Number(s.recoveryHoldMs) || 0)
     const startedAt = now()
-    // 这轮开始前内核对这个组的看法
-    const parent = proxies[state.tag]
-    if (!parent || !Array.isArray(parent.all)) return { skipped: 'parent-missing' }
-    const expectedRefs = state.lanes.map((l) => l.ref).filter(Boolean)
-    if (expectedRefs.some((r) => !parent.all.includes(r) || !proxies[r])) return { skipped: 'kernel-mismatch' }
-    if (state.rejectTag && !parent.all.includes(state.rejectTag)) return { skipped: 'kernel-mismatch' }
+    // 这轮开始前内核对这个组的看法:父组和页签引用都在才动手,并给出这轮要测的节点(复查轮强制重测当前页签的)
+    const plan = roundPlan(state, proxies)
+    if (plan.skip) return { skipped: plan.skip }
+    const { url, timeoutMs, recheckRound } = plan
+    const ownInterval = plan.intervalMs
 
     // 1. 节点探测(去重、有界并发)
-    const tags = [...new Set(state.lanes.flatMap((l) => l.valid))]
     const results = new Map()
-    const ownInterval = Number(s.intervalMs) || 300_000
     const probeInterval = (tag) => (probeCoordinator ? probeCoordinator.intervalFor(probeCoordinator.keyOf(tag, url), ownInterval) : ownInterval)
-    // 复查轮(上一轮当前页签确认失败,RECHECK_DELAY_MS 之后):当前页签的节点强制重测,不复用上一轮的失败;
-    // 别的页签照常复用间隔内的结果——复查只针对正在用的页签,不多测别处
-    const recheckRound = Boolean(state.recheckPending)
-    const forced = new Set(recheckRound ? recheckTargets(state, proxies) : [])
-    if (url && tags.length) {
+    if (plan.probes.length) {
       const at = now()
-      const list = await mapLimit(tags, probeConcurrency, async (tag) => {
-        const force = forced.has(tag)
-        // 复查:这个节点上一轮那次失败的完成时刻(内核回的 time);没有就用上一轮开始的时刻
-        const since = force ? (state.nodes[tag] && state.nodes[tag].ok === false && Number.isFinite(state.nodes[tag].at) ? state.nodes[tag].at : state.lastRoundAt || 0) : 0
+      const list = await mapLimit(plan.probes, probeConcurrency, async ({ tag, force, since }) => {
         const run = () => probeNode(tag, url, timeoutMs, probeInterval(tag), force, since)
         const r = probeCoordinator
           ? await probeCoordinator.request(force ? { tag, url, intervalMs: probeInterval(tag), run, force: true } : { tag, url, intervalMs: ownInterval, run })
           : await run()
         return r || { ok: null, at, reason: 'no-result' }
       })
-      list.forEach((r, i) => results.set(tags[i], r))
+      list.forEach((r, i) => results.set(plan.probes[i].tag, r))
     }
     const stale = () => stopped || version !== roundVersion || states.get(state.id) !== state
     if (stale()) return { skipped: 'stale' }
-    for (const [tag, r] of results) state.nodes[tag] = { ...r, round: roundId }
+    const byTag = Object.fromEntries(results)
+    recordProbes(state, byTag, roundId)
     // 探测结果进公共延迟历史(失败的记一笔超时,通过的内核自己已经记了,scheduler 同步时会看到)
     if (history) {
       try {
@@ -317,186 +248,54 @@ export const createFailoverManager = ({
       } catch { /* 历史记不上不影响决策 */ }
     }
 
-    // 2. 页签健康(先确认内核还在)
+    // 2. 页签健康(先确认内核还在)。要读内核的页签:手动选择的读子组 now;多节点页签有节点通过就让内核按已有结果
+    //    重选(reselect_only)再读 now,选中的不在通过的节点里时再读它的最新历史(更新的通过也算确认)
     try { await fetchProxies() } catch { return { skipped: 'kernel' } }
     if (stale()) return { skipped: 'stale' }
     for (const lane of state.lanes) {
-      lane.kernelNow = null
-      lane.confirmed = null
-      if (lane.mode === 'empty') { lane.health = 'down'; continue }
-      if (!url) { lane.health = 'unknown'; continue }
-      const rs = lane.valid.map((t) => results.get(t))
-      const okNodes = lane.valid.filter((t, i) => rs[i] && rs[i].ok === true)
-      const allFailed = rs.length > 0 && rs.every((r) => r && r.ok === false)
-      if (lane.mode === 'single') {
-        lane.health = okNodes.length ? 'up' : allFailed ? 'down' : 'unknown'
-        continue
-      }
-      // 手动选择的页签(内部 selector,GitHub #188):不让内核重选,就看用户选中的那个节点这轮通没通过
-      if (lane.mode === 'selector') {
+      const need = laneObservation(lane, byTag, url)
+      let observed = null
+      if (need) {
+        if (need.reselect) {
+          await retestSub(lane.subTag, url, timeoutMs, lane.valid.length)
+          if (stale()) return { skipped: 'stale' }
+        }
         let sub = null
         try { sub = await fetchProxy(lane.subTag) } catch { /* 读不到就按未确认 */ }
-        if (stale()) return { skipped: 'stale' }
+        if (!need.reselect && stale()) return { skipped: 'stale' }
         const kernelNow = sub && typeof sub.now === 'string' ? sub.now : ''
-        lane.kernelNow = kernelNow || null
-        const r = kernelNow ? results.get(kernelNow) : null
-        lane.confirmed = Boolean(kernelNow)
-        lane.health = r && r.ok === true ? 'up' : r && r.ok === false ? 'down' : 'unknown'
-        continue
+        observed = { now: kernelNow, latest: null }
+        if (need.reselect && needsLatestHistory(lane, byTag, kernelNow)) {
+          let p = null
+          try { p = await fetchProxy(kernelNow) } catch { /* 读不到就不算更新的通过 */ }
+          const h = p && Array.isArray(p.history) ? p.history[p.history.length - 1] : null
+          observed.latest = h ? { time: h.time, delay: h.delay } : null
+        }
       }
-      // 多节点页签:有通过的节点就让内核重选,再确认它实际选中的是通过的节点
-      if (!okNodes.length) { lane.health = allFailed ? 'down' : 'unknown'; continue }
-      await retestSub(lane.subTag, url, timeoutMs, lane.valid.length)
-      if (stale()) return { skipped: 'stale' }
-      let sub = null
-      try { sub = await fetchProxy(lane.subTag) } catch { /* 读不到就按未确认 */ }
-      const kernelNow = sub && typeof sub.now === 'string' ? sub.now : ''
-      lane.kernelNow = kernelNow || null
-      // 并发的手动测速等显式操作可能让节点恢复;有本轮开始之后的新鲜结果也算确认。内核(1.14.1-openbox-tcp14 起)
-      // 对正在用的节点也是「不通 → 10 秒后复查」:这一轮拿到的是它的失败,内核复查通过后留着它、记了一笔更新的通过——
-      // 比这一轮的失败还新的通过同样算确认,不然要一直「未确认」到这个节点的失败结果过期
-      const kernelFresh = await (async () => {
-        if (!kernelNow || okNodes.includes(kernelNow)) return false
-        let p = null
-        try { p = await fetchProxy(kernelNow) } catch { return false }
-        const h = p && Array.isArray(p.history) ? p.history[p.history.length - 1] : null
-        const t = h ? Date.parse(h.time) : NaN
-        if (!h || !Number.isFinite(t) || !(Number(h.delay) > 0)) return false
-        const seen = results.get(kernelNow)
-        return t >= startedAt - 1000 || Boolean(seen && seen.ok === false && Number.isFinite(seen.at) && t > seen.at)
-      })()
-      lane.confirmed = Boolean(kernelNow && (okNodes.includes(kernelNow) || kernelFresh))
-      lane.health = lane.confirmed ? 'up' : 'unknown'
-      if (!lane.confirmed) log(`[failover] ${state.tag} 页签 ${laneRole(lane.index)} 有节点通过但内核实际选中的是 ${kernelNow || '(空)'},这轮算未确认`)
+      const line = assessLane(lane, byTag, observed, { url, startedAt, tag: state.tag })
+      if (line) log(line)
     }
 
-    // 3. 决策
+    // 3. 决策 → 切换(PUT 父组,再读回 now 确认)
     let parentNow = ''
     try { parentNow = String((await fetchProxy(state.tag))?.now || '') } catch { return { skipped: 'kernel' } }
     if (stale()) return { skipped: 'stale' }
-    const current = laneForNow(state, parentNow)
-    if (current && current.id !== state.currentLaneId) {
-      state.currentLaneId = current.id
-      state.currentSince = state.currentSince || now()
-    }
-    if (!current) state.currentLaneId = null
     const at = now()
-    for (const lane of state.lanes) {
-      // upSince 是「连续通过」的起点:失败和未知都打断它(未知 = 这轮没测出结果,不能算作还在连续通过;
-      // 按顺序重选等 recoveryHoldMs 就靠它计时)。未知不算失败:不增加失败轮数、不触发任何切换
-      if (lane.health === 'up') lane.upSince = lane.upSince || at
-      else lane.upSince = null
-      if (lane.health === 'down') lane.failStreak += 1
-      else if (lane.health === 'up') lane.failStreak = 0
-    }
-    const primary = state.lanes[0] || null
-    if (primary && primary.health === 'up') state.primaryUpSince = state.primaryUpSince || at
-    else state.primaryUpSince = null
-
-    const firstUp = (exceptId) => state.lanes.find((l) => l.health === 'up' && l.id !== exceptId) || null
-    const anyUnknown = state.lanes.some((l) => l.health === 'unknown')
-    let target = null
-    let reason = ''
-    // 按新顺序重选的待办(见 loadMap):新顺序里第一个通过的页签就是该用的;它上面还有未知的页签先不动
-    // (等那些页签确认了再说)。用户刚改完顺序、第一次能判断时立刻挪,目标是主用也一样——用户把某个页签排到
-    // 第一位就是要用它,不受「恢复后切回」开关和等待时间约束;之后(比如目标当时是失败的、后来才恢复)才按
-    // 恢复的规则来:目标是主用走「恢复后切回」(开关 + 等待,关着回切这次重排就算落定),目标是备用和主用恢复
-    // 一样等它连续通过满 recoveryHoldMs 再挪,免得刚恢复就来回切。
-    // 落定:当前页签就是新顺序里第一个通过的,且它上面没有别的页签(或只有空页签);上面还有确认失败的
-    // 页签时待办保留——那是用户明确表达的优先级,它恢复了要挪过去(备用之间平时不这么做)。「校正」
-    // (order-unknown)不是用户的动作,当前就是第一个通过的就直接落定
-    const unknownAbove = (lane) => state.lanes.some((l) => l.health === 'unknown' && l.index < lane.index)
-    const settleReorder = (why) => {
-      if (!state.reorder) return
-      log(`[failover] ${state.tag}:按页签顺序重选已落定（${why}）`)
-      state.reorder = null
-    }
-    // 当前页签就是新顺序里第一个通过的:落定(或记为已判断)。决策前和切换后各看一次,切到位就当轮落定
-    const settleIfDone = () => {
-      if (!state.reorder) return
-      const cur = state.currentLaneId ? laneById(state, state.currentLaneId) : null
-      if (!cur || cur.health !== 'up') return
-      const preferred = state.lanes.find((l) => l.health === 'up') || null
-      if (!preferred || preferred.id !== cur.id || unknownAbove(preferred)) return
-      const nothingAbove = state.lanes.every((l) => l.index >= cur.index || l.mode === 'empty')
-      if (nothingAbove || state.reorder.reason !== 'priority-changed') settleReorder(`当前已是顺序里第一个通过的页签 ${laneRole(cur.index)}`)
-      else state.reorder.evaluated = true
-    }
-    let reorderMove = false
-    if (current && state.reorder) {
-      const preferred = state.lanes.find((l) => l.health === 'up') || null
-      if (preferred && !unknownAbove(preferred)) {
-        if (preferred.id === current.id) {
-          settleIfDone()
-        } else if (!state.reorder.evaluated && state.reorder.reason === 'priority-changed') {
-          target = preferred; reason = 'priority-changed'; reorderMove = true
-        } else if (preferred.index === 0) {
-          if (!restorePrimary) settleReorder('目标是主用而「恢复后切回」关着')
-          else state.reorder.evaluated = true
-        } else if (!state.reorder.evaluated || (preferred.upSince !== null && at - preferred.upSince >= holdMs)) {
-          target = preferred; reason = 'priority-changed'; reorderMove = true
-        } else {
-          state.reorder.evaluated = true
-        }
-      }
-    }
-    if (target) {
-      /* 按新顺序重选已经定了目标 */
-    } else if (current) {
-      if (current.health === 'up') {
-        if (restorePrimary && primary && current.id !== primary.id && primary.health === 'up' && state.primaryUpSince !== null && at - state.primaryUpSince >= holdMs) {
-          target = primary; reason = 'restore-primary'
-        }
-      } else if (current.health === 'down' && recheckRound) {
-        // 复查仍不通:换页签
-        const next = firstUp(current.id)
-        if (next) { target = next; reason = 'lane-failed' } else if (!anyUnknown && state.rejectTag) { target = { id: null, ref: state.rejectTag }; reason = 'all-failed' }
-      }
-    } else {
-      const next = firstUp(null)
-      if (next) { target = next; reason = parentNow === state.rejectTag ? 'recovered' : 'initial' } else if (!anyUnknown && state.rejectTag && parentNow !== state.rejectTag) { target = { id: null, ref: state.rejectTag }; reason = 'all-failed' }
-    }
-
-    let switched = null
-    if (target && target.ref && target.ref !== parentNow) {
+    const decided = decideRound(state, { parentNow, recheckRound, at })
+    for (const line of decided.logs) log(line)
+    let outcome = null
+    if (needsSwitch(decided.decision, parentNow)) {
       try {
-        const nowRef = await switchTo(state, target.ref)
+        const nowRef = await switchTo(state, decided.decision.target.ref)
         if (stale()) return { skipped: 'stale' }
-        const from = current ? { laneId: current.id, ref: parentNow } : { laneId: null, ref: parentNow }
-        state.currentLaneId = target.id
-        state.currentSince = at
-        state.lastSwitch = { at, from, to: { laneId: target.id, ref: nowRef }, reason }
-        state.lastError = ''
-        switched = { from: from.ref, to: nowRef, reason }
-        if (reorderMove && state.reorder) state.reorder.evaluated = true
-        log(`[failover] ${state.tag}:${from.ref || '(空)'} → ${nowRef}（${reason}）`)
+        outcome = { now: nowRef }
       } catch (err) {
-        // 切换失败:保留实际状态,下一轮再试(按顺序重选的待办也原样留着,不算已经判断过)
-        state.lastError = `切换失败:${errText(err)}`
-        log(`[failover] ${state.tag} 切换到 ${target.ref} 失败:${errText(err)}`)
+        outcome = { error: errText(err) }
       }
-    } else if (target && target.id && target.ref === parentNow && target.id !== state.currentLaneId) {
-      // 目标页签引用的出站和内核当前选的是同一个(两个页签都只挂同一个节点):不用切,只把关联挪过去
-      state.currentLaneId = target.id
-      state.currentSince = at
-      if (reorderMove && state.reorder) state.reorder.evaluated = true
-      log(`[failover] ${state.tag}:关联改到页签 ${laneRole(target.index)},出站不变（${reason}）`)
     }
-    // 当前页签不通(第一次)→ RECHECK_DELAY_MS 后复查(runTick 按 recheck 排下一轮)。复查通过回到正常周期;复查仍不通就换
-    // 页签,新页签从正常周期开始。没换成(候选都还未知、切换被拒)或复查本身没测出结果(未知)的,继续每 RECHECK_DELAY_MS
-    // 复查一次,不在坏页签上干等一个完整周期
-    const moved = Boolean(switched) || Boolean(target && target.id && target.ref === parentNow)
-    state.recheckPending = Boolean(current && !moved && (current.health === 'down' || (recheckRound && current.health === 'unknown')))
-    settleIfDone()
-    // 4. 状态
-    const cur = state.currentLaneId ? laneById(state, state.currentLaneId) : null
-    const kernelSel = switched ? switched.to : parentNow
-    state.kernelNow = kernelSel
-    state.status = kernelSel === state.rejectTag || !cur ? 'reject'
-      : cur.health === 'up' ? (cur.index === 0 ? 'ok' : 'backup')
-        : cur.health === 'down' ? 'failing' : 'unknown'
-    state.lastRoundAt = startedAt
-    state.lastRoundResult = switched ? `${switched.reason}` : 'kept'
+    // 4. 收尾:状态、复查、摘要
+    const finished = finishRound(state, decided.decision, { parentNow, at, startedAt, outcome })
+    for (const line of finished.logs) log(line)
     persist()
     if (history && kernelStartedAt !== undefined) {
       try {
@@ -507,9 +306,7 @@ export const createFailoverManager = ({
         history.recordFromProxies(await fetchProxies(), { kernelStartedAt, at: now(), groupIntervals })
       } catch { /* 忽略 */ }
     }
-    // 有页签这轮没能确认内核的选择(内核刚启动、子组自己的首轮检测还没跑完):不等整个 interval,很快再看一次
-    const unconfirmed = state.lanes.some((l) => l.confirmed === false)
-    return { switched, unconfirmed, recheck: state.recheckPending, status: state.status, lanes: state.lanes.map((l) => [l.id, l.health]) }
+    return finished.result
   }
 
   const runTick = async () => {
@@ -547,21 +344,20 @@ export const createFailoverManager = ({
     const results = {}
     await Promise.all(due.map(async (g) => {
       g.inFlight = true
-      const intervalMs = Math.max(5000, Number(g.settings?.intervalMs) || 300_000)
       try {
         const r = await runRound(g, proxies, kernelStartedAt)
         results[g.tag] = r
         if (r && r.skipped) {
           g.paused = r.skipped === 'kernel-mismatch' || r.skipped === 'parent-missing' ? 'kernel-mismatch' : r.skipped === 'kernel' ? 'kernel' : ''
           // 内核和映射对不上(部署到一半)/ 内核刚倒:很快再看;作废的轮次由新版本自己安排
-          if (r.skipped !== 'stale') g.nextRoundAt = now() + Math.min(10_000, intervalMs)
+          if (r.skipped !== 'stale') g.nextRoundAt = now() + nextRoundDelay(g, { skip: r.skipped })
         } else {
           g.paused = ''
-          g.nextRoundAt = now() + (r && r.recheck ? Math.min(RECHECK_DELAY_MS, intervalMs) : r && r.unconfirmed ? Math.min(10_000, intervalMs) : intervalMs)
+          g.nextRoundAt = now() + nextRoundDelay(g, { result: r })
         }
       } catch (err) {
         g.lastError = errText(err)
-        g.nextRoundAt = now() + Math.min(10_000, intervalMs)
+        g.nextRoundAt = now() + nextRoundDelay(g, { skip: 'error' })
         log(`[failover] ${g.tag} 这轮出错:${errText(err)}`)
       } finally {
         g.inFlight = false

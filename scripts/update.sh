@@ -231,7 +231,7 @@ openbox_node_smoke() {
   fi
   echo "$_ob_out" | head -n 5
   # 动态链接器报缺符号 = 固件的 musl C 库太老(OpenWrt 21.02 及更早是 1.1.x,没有 pthread_getname_np 等),
-  # 随包 Node 要 musl 1.2.3 以上;顺手把系统的版本号打出来,调用处据此提示升级固件
+  # 随包 Node 要 musl 1.2.4 以上(见 openbox-musl-check 块);顺手把系统的版本号打出来,调用处据此提示升级固件
   case "$_ob_out" in
     *"symbol not found"*)
       for _ob_ld in /lib/ld-musl-*.so.1; do
@@ -1196,11 +1196,41 @@ echo "$$" > "$UPDATE_LOCK/pid" 2>/dev/null || true
 [ "${OPENBOX_UPDATE_DISPATCHED:-0}" = "1" ] || rm -f "$CANCEL_FLAG" 2>/dev/null || true
 write_status starting "" "" ""
 
+# ---- openbox-musl-check:start ----
+# 随包 Node 的运行库(libgcc_s / libstdc++,取自 Alpine)用了 DT_RELR 重定位,musl 1.2.4 起才支持:更老的 musl 加载时
+# 不做这类重定位,随包 Node 一跑就段错误(#429 #341:iStoreOS 22.03 / OpenWrt 22.03 是 musl 1.2.3);1.1.x(OpenWrt 21.02
+# 及更早)更是缺符号。用户定:这类固件不迁就,提示升级到 iStoreOS 24 / OpenWrt 24 以上,在下载之前就拦下。
+# 系统 musl 的版本号由动态链接器自己报(直接执行它会打 "Version 1.2.3");读不到 / 认不出就不拦,交给后面的 Node 冒烟测试
+openbox_musl_version() {
+  for _ob_ld in ${OPENBOX_MUSL_LOADERS:-/lib/ld-musl-*.so.1}; do
+    [ -x "$_ob_ld" ] || continue
+    "$_ob_ld" 2>&1 | sed -n 's/^Version \([0-9][0-9.]*\).*/\1/p' | head -n 1
+    return 0
+  done
+}
+openbox_musl_too_old() {
+  _ob_mv=$(openbox_musl_version)
+  case "$_ob_mv" in [0-9]*.[0-9]*) ;; *) return 1 ;; esac
+  _ob_m1=$(echo "$_ob_mv" | cut -d. -f1)
+  _ob_m2=$(echo "$_ob_mv" | cut -d. -f2)
+  _ob_m3=$(echo "$_ob_mv" | cut -d. -f3)
+  _ob_m3=${_ob_m3:-0}
+  case "$_ob_m1$_ob_m2$_ob_m3" in *[!0-9]*) return 1 ;; esac
+  if [ "$_ob_m1" -ne 1 ]; then [ "$_ob_m1" -lt 1 ]; return; fi
+  if [ "$_ob_m2" -ne 2 ]; then [ "$_ob_m2" -lt 2 ]; return; fi
+  [ "$_ob_m3" -lt 4 ]
+}
+openbox_old_firmware_message() {
+  echo "固件太老:系统的 musl C 库是 $(openbox_musl_version),Open-Box 要 1.2.4 以上(iStoreOS 22.03、OpenWrt 22.03 及更早的固件都不行)。请升级到 iStoreOS 24 / OpenWrt 24 以上。"
+}
+# ---- openbox-musl-check:end ----
+
 # 从这里起的失败都算"升的过程中出的事",带上环境信息;上面的参数错误 / --probe 不用
 ENV_REPORT_ON=1
 info "预检..."
 check_root
 detect_platform
+[ "$PLATFORM" = "systemd" ] || ! openbox_musl_too_old || die "$(openbox_old_firmware_message)现有安装未改动。"
 check_installed
 map_arch
 cleanup_stale_stage_dirs
@@ -1728,7 +1758,8 @@ info "检查新版本的 Node 能否运行..."
 if ! _ob_node_err=$(openbox_node_smoke "$STAGE_DIR"); then
   warn "新版本随包的 Node 在这台设备上起不来:"
   [ -n "$_ob_node_err" ] && printf '%s\n' "$_ob_node_err" >&2
-  case "$_ob_node_err" in *"symbol not found"*) die "固件太老,请升级到 OpenWrt 24 以上。现有安装未改动。" ;; esac
+  case "$_ob_node_err" in *"symbol not found"*) die "$(openbox_old_firmware_message)现有安装未改动。" ;; esac
+  openbox_musl_too_old && die "$(openbox_old_firmware_message)现有安装未改动。"
   die "新版本的面板在这台设备上跑不起来,升级中止,现有安装未改动。请把上面几行连同 uname -a、cat /etc/openwrt_release、head -3 /proc/meminfo 的输出发到 GitHub issue。"
 fi
 

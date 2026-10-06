@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createMockContext } from './context.mjs'
 import { createPaths } from './paths.mjs'
-import { deployConfig, rollbackToDirect, configMetaPath, TUN_DEVICE, AUTO_REDIRECT_FATAL, TUN_START_FATAL } from './deploy.mjs'
+import { deployConfig, rollbackToDirect, configMetaPath, TUN_DEVICE, AUTO_REDIRECT_FATAL, TRANSIENT_REDIRECT_FATAL, TUN_START_FATAL } from './deploy.mjs'
 import { routingFingerprint } from '../engine/routing-model.mjs'
 import { dnsTakeoverBackupPath } from './dns-takeover.mjs'
 
@@ -19,7 +19,7 @@ const okCtx = (over = {}) => createMockContext({
   },
 })
 
-test('冲突时不改系统', async () => {
+test('冲突时不改系统,明确说是哪个代理工具、为什么不启动、要先停用它', async () => {
   const ctx = createMockContext({
     files: { '/etc/init.d/openclash': '#!' },
     execResults: { '/etc/init.d/openclash status': { code: 0, stdout: 'running' } },
@@ -27,7 +27,7 @@ test('冲突时不改系统', async () => {
   const r = await deployConfig(ctx, paths, { config, profile })
   assert.equal(r.ok, false)
   assert.equal(r.stage, 'conflict')
-  assert.match(r.message, /OpenClash/)
+  assert.match(r.message, /^检测到 OpenClash 正在运行。同一台路由器上不能同时运行两个代理工具,会互相冲突,Open-Box 不启动内核。请先停用 OpenClash/)
   assert.equal(ctx.writes.length, 0)                      // 未写任何配置
   assert.ok(!cmds(ctx).some((c) => c.includes('openbox restart')))
 })
@@ -483,6 +483,47 @@ test('降级之后还是起不来 → 只试一次,按普通崩溃回滚直连�
   assert.ok(cmds(ctx).includes('/etc/init.d/openbox stop'))
 })
 
+// iStoreOS 用户 2026-10-05:升级时内核连着两次 flush nftables 撞上 ENOBUFS(确认塞满接收缓冲区),两次就降级成纯 tun,
+// 旁路由的手机上不了外网。这一类是临时的:原样多起几次、间隔拉长,都不行才降级
+const ENOBUFS_FATAL = 'FATAL[0001] start service: post-start inbound/tun[tun-in]: auto-redirect: setup nftables: flush nftables: netlink receive: recvmsg: no buffer space available'
+
+test('auto_redirect 撞上 ENOBUFS → 原样隔 2 / 5 / 10 秒再起三次,都不行才降级', async () => {
+  const ctx = redirectCtx(ENOBUFS_FATAL)
+  const sleeps = []
+  ctx.sleep = async (ms) => { sleeps.push(ms) }
+  const r = await deployConfig(ctx, paths, { config: withRedirect, profile: tunProfile, rebuild: () => withoutRedirect })
+  assert.equal(r.ok, true, r.message)
+  assert.match(r.warning, /no buffer space available/)
+  // 第一次 + 原样三次 + 降级一次;不再多走一遍普通的「原样再起一次」
+  assert.equal(cmds(ctx).filter((c) => c === '/etc/init.d/openbox restart').length, 5)
+  for (const ms of [2000, 5000, 10000]) assert.ok(sleeps.includes(ms), `要等过 ${ms} 毫秒再起`)
+})
+
+test('auto_redirect 撞上 ENOBUFS 一次、原样再起就好了 → 不降级,配置还是 auto_redirect', async () => {
+  let restarts = 0
+  const log = [OLD_FATAL_LINE]
+  const ctx = createMockContext({
+    files: { [paths.singbox]: '#!/bin/sh\n', [TUN_DEVICE]: '' },
+    execResults: {
+      '/etc/init.d/openbox restart': () => {
+        restarts += 1
+        if (restarts === 1) log.push(`Mon Oct  5 23:30:38 2026 daemon.err sing-box[18688]: \x1b[31m${ENOBUFS_FATAL}\x1b[0m`)
+        return { code: 0, stdout: '' }
+      },
+      '/etc/init.d/openbox status': () => (restarts === 1 ? { code: 1, stdout: 'inactive' } : { code: 0, stdout: 'running' }),
+      'logread -e sing-box': () => ({ code: 0, stdout: `${log.join('\n')}\n` }),
+    },
+  })
+  const rebuilt = []
+  const r = await deployConfig(ctx, paths, { config: withRedirect, profile: tunProfile, rebuild: (patch) => { rebuilt.push(patch); return withoutRedirect } })
+  assert.equal(r.ok, true, r.message)
+  assert.equal(r.warning, '')
+  assert.deepEqual(rebuilt, [], '没有降级')
+  assert.equal(restarts, 2)
+  const lastConfig = ctx.writes.filter((w) => w.path === paths.configPath).pop()
+  assert.equal(JSON.parse(lastConfig.content).inbounds[0].auto_redirect, true)
+})
+
 // 确认在跑之后才崩(GitHub #4:nft 那步排在 DNS 解析后面,第 5 秒才 FATAL):两眼确认时活着,后台再看时死了
 const lateCtx = (fatal = REDIRECT_FATAL) => {
   const state = { crashed: false }
@@ -521,6 +562,37 @@ test('确认在跑之后才崩、且是 auto_redirect 那类 → 后台盯到后
   assert.equal(JSON.parse(lastConfig.content).inbounds[0].auto_redirect, undefined)
   assert.equal(cmds(ctx).filter((c) => c === '/etc/init.d/openbox restart').length, 2)
   assert.ok(!cmds(ctx).includes('/etc/init.d/openbox stop'))
+})
+
+// GitHub #426:装着 PassWall / OpenClash 的路由器上,起 auto_redirect 要 fw4 reload,每次都重跑它们的规则,nft 那一步拖到第 89 秒
+// 才 FATAL;procd 又立刻把内核拉起来,后台看状态一直是「在跑」。按日志里新进程的 FATAL 认出来,照样降级纯 tun;
+// 旧进程(重启前就在日志里的进程号)被停时晚到的 FATAL 不算
+test('auto_redirect 拖到一分多钟才 FATAL、procd 又拉起来了(状态一直在跑)→ 按新进程的 FATAL 认出来降级;旧进程的不算(#426)', async () => {
+  const lines = [OLD_FATAL_LINE]
+  const ctx = createMockContext({
+    files: { [paths.singbox]: '#!/bin/sh\n', [TUN_DEVICE]: '' },
+    execResults: {
+      '/etc/init.d/openbox status': { code: 0, stdout: 'running' },
+      'logread -e sing-box': () => ({ code: 0, stdout: lines.join('\n') }),
+    },
+  })
+  const r = await deployConfig(ctx, paths, { config: withRedirect, profile: tunProfile, rebuild: () => withoutRedirect })
+  assert.equal(r.ok, true, r.message)
+  const sleeps = []
+  const late = await r.lateCrashWatch({
+    sleep: async (ms) => {
+      sleeps.push(ms)
+      if (sleeps.length === 2) lines.push('Mon Oct  5 13:44:59 2026 daemon.err sing-box[111]: FATAL[0051] start service: post-start inbound/tun[tun-in]: auto-redirect: setup nftables: flush nftables: netlink receive: recvmsg: no buffer space available')
+      if (sleeps.length === 3) lines.push('Mon Oct  5 13:46:30 2026 daemon.err sing-box[23812]: FATAL[0089] start service: post-start inbound/tun[tun-in]: auto-redirect: setup nftables: flush nftables: netlink receive: recvmsg: no buffer space available')
+    },
+  })
+  assert.equal(late.ok, true)
+  assert.match(late.warning, /auto_redirect/)
+  assert.match(late.warning, /no buffer space available/)
+  assert.deepEqual(sleeps.slice(0, 3), [6000, 6000, 20000], '第二眼时只有旧进程的 FATAL,不降级;第三眼新进程的才算')
+  const lastConfig = ctx.writes.filter((w) => w.path === paths.configPath).pop()
+  assert.equal(JSON.parse(lastConfig.content).inbounds[0].auto_redirect, undefined)
+  assert.equal(cmds(ctx).filter((c) => c === '/etc/init.d/openbox restart').length, 2)
 })
 
 test('确认在跑之后才崩、不是 auto_redirect 那类 → 回滚直连,带内核原话;一直在跑 / 又有新部署时后台什么都不做', async () => {
@@ -567,6 +639,9 @@ test('不是 auto_redirect 那类崩溃、或没开 auto_redirect、或没给 re
   // GitHub #137:固件没有 nf_tables 时 sing-tun 的原话不一样,同样要降级
   assert.ok(AUTO_REDIRECT_FATAL.test('FATAL[0000] start service: post-start inbound/tun[tun-in]: auto-redirect: missing nftables support: netlink receive: invalid argument'))
   assert.ok(!AUTO_REDIRECT_FATAL.test(other))
+  // 临时性的那一类只认缓冲区塞满 / 分不到内存;缺模块、规则冲突不算
+  assert.ok(TRANSIENT_REDIRECT_FATAL.test(ENOBUFS_FATAL))
+  assert.ok(!TRANSIENT_REDIRECT_FATAL.test(REDIRECT_FATAL))
 })
 
 // #386:旧内核被 procd 到点强杀、tun 网卡还在注销新进程就起来了,建路由失败。原样再起一次就好,不回滚、不降级

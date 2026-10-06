@@ -152,12 +152,12 @@ test('die 时排空 stdin 必须有时间上限:stdin 是"开着但不来数据"
 test('"请用另一个脚本"的提示必须给出能照抄的完整命令(用户照着敲 install.sh 只会得到 not found)', () => {
   assert.match(
     SCRIPTS['update.sh'],
-    /未检测到现有 Open-Box 安装[\s\S]{0,200}curl -fsSL https:\/\/raw\.githubusercontent\.com\/timeflysoon\/Open-Box\/main\/scripts\/install\.sh/,
+    /未检测到现有 Open-Box 安装[\s\S]{0,200}curl -fsSL https:\/\/raw\.githubusercontent\.com\/liandu2024\/Open-Box\/main\/scripts\/install\.sh/,
     'update.sh 在没装过时要给出完整的安装命令',
   )
   assert.match(
     SCRIPTS['install.sh'],
-    /已存在且包含完整安装[\s\S]{0,260}curl -fsSL https:\/\/raw\.githubusercontent\.com\/timeflysoon\/Open-Box\/main\/scripts\/update\.sh/,
+    /已存在且包含完整安装[\s\S]{0,260}curl -fsSL https:\/\/raw\.githubusercontent\.com\/liandu2024\/Open-Box\/main\/scripts\/update\.sh/,
     'install.sh 在已装过时要给出完整的升级命令',
   )
 })
@@ -227,4 +227,45 @@ test('shell 脚本里 $变量 后面不能直接跟非 ASCII 字符(要写 ${变
     })
   }
   assert.deepEqual(bad, [])
+})
+
+// ---------- 固件 musl 版本(#429 #341,用户 2026-10-06:iStoreOS 22.03 这类不迁就,提示升级到 iStoreOS 24 以上)----------
+// 随包 Node 的运行库带 DT_RELR,musl 1.2.4 起才支持;1.2.3 上一跑就段错误。安装 / 升级在下载之前就按版本拦下
+test('musl 版本检查块:install / update 两份逐字一致,预检里在下载之前调用,冒烟失败时也按版本给同一句提示', () => {
+  const copies = ['install.sh', 'update.sh'].map((f) => {
+    const got = block(SCRIPTS[f], 'openbox-musl-check')
+    assert.ok(got, `${f} 里找不到 openbox-musl-check 块`)
+    return got
+  })
+  assert.equal(copies[1], copies[0], 'install.sh 与 update.sh 里的 musl 版本检查块不一致')
+  assert.match(SCRIPTS['install.sh'], /^detect_platform\n\[ "\$PLATFORM" = "systemd" \] \|\| ! openbox_musl_too_old \|\| die "\$\(openbox_old_firmware_message\)"$/m)
+  assert.match(SCRIPTS['update.sh'], /^detect_platform\n\[ "\$PLATFORM" = "systemd" \] \|\| ! openbox_musl_too_old \|\| die "\$\(openbox_old_firmware_message\)现有安装未改动。"$/m)
+  // 预检在下载发布包之前
+  assert.ok(SCRIPTS['install.sh'].indexOf('|| ! openbox_musl_too_old ||') < SCRIPTS['install.sh'].indexOf('info "下载发布包:$ASSET"'))
+  for (const f of ['install.sh', 'update.sh']) {
+    assert.match(SCRIPTS[f], /^ {2}openbox_musl_too_old && die "\$\(openbox_old_firmware_message\)(现有安装未改动。)?"$/m, `${f} 冒烟失败时要按版本提示`)
+    assert.doesNotMatch(SCRIPTS[f], /固件太老,请升级到 OpenWrt 24 以上/, `${f} 还有老的提示`)
+  }
+})
+
+test('musl 版本检查块:1.2.3 及更老算太老,1.2.4 起放行;读不到 / 认不出不拦', () => {
+  const code = block(SCRIPTS['install.sh'], 'openbox-musl-check')
+  const run = (loaderOutput) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'openbox-musl-'))
+    const loader = path.join(dir, 'ld-musl-x86_64.so.1')
+    // 直接执行 musl 的动态链接器时它打的就是这个样子(退出码 1)
+    if (loaderOutput !== null) fs.writeFileSync(loader, `#!/bin/sh\nprintf '%b\\n' ${JSON.stringify(loaderOutput)} >&2\nexit 1\n`, { mode: 0o755 })
+    const harness = `${code}\nif openbox_musl_too_old; then echo OLD; else echo OK; fi\nopenbox_old_firmware_message\n`
+    const r = spawnSync('sh', ['-c', harness], { encoding: 'utf8', env: { ...process.env, OPENBOX_MUSL_LOADERS: path.join(dir, 'ld-musl-*.so.1') } })
+    return r.stdout
+  }
+  const musl = (v) => `musl libc (x86_64)\nVersion ${v}\nDynamic Program Loader\nUsage: ld-musl [options] [--] pathname [args]`
+  assert.match(run(musl('1.2.3')), /^OLD$/m)
+  assert.match(run(musl('1.2.3')), /系统的 musl C 库是 1\.2\.3.*请升级到 iStoreOS 24 \/ OpenWrt 24 以上/)
+  assert.match(run(musl('1.1.24')), /^OLD$/m)
+  assert.match(run(musl('1.2.4')), /^OK$/m)
+  assert.match(run(musl('1.2.5_git20240512')), /^OK$/m)
+  assert.match(run(musl('1.3')), /^OK$/m)
+  assert.match(run('something else'), /^OK$/m, '认不出版本号不拦')
+  assert.match(run(null), /^OK$/m, '找不到 musl 动态链接器(不是 musl 系统)不拦')
 })

@@ -209,17 +209,24 @@ const resplitLegacy = async (ctx, paths, tag) => {
 // 返回的 lists 是形状表 { [tag]: { domain, ip } }:每条链接编成了哪几份 .srs,生成配置时
 // 路由规则 / DNS 规则凭它决定引用哪几份(见 engine/routing-model.mjs)。只有老版式、
 // 又拉不动的那种才会缺形状——生成配置时就按老样子引用一份。
+// extra:站点集之外还要编的链接(地区分流的,engine/share-regions.mjs 的 collectShareRegionRuleUrls),{ url, tag, optional }:
+// optional 的拉不动、本地又没有,只记进 failed,不让这次部署失败(地区分流只给手机用)。同一个链接站点集也引用时按站点集的算。
+// keepOthers:状态文件里别的链接原样留着(只补地区分流那几条时用;部署时不留,状态里只剩这次引用到的)。
+// 状态没变就不写文件(定时补地区分流的链接,不该每次都写一遍闪存)
 export const ensureRuleLists = async (
   ctx,
   paths,
   routing,
-  { fetchImpl = globalThis.fetch, now = () => Date.now(), log = () => {} } = {},
+  { fetchImpl = globalThis.fetch, now = () => Date.now(), log = () => {}, extra = [], keepOthers = false } = {},
 ) => {
-  const wanted = collectRuleListUrls(routing)
-  if (!wanted.length) return { ok: true, updated: [], failed: [], lists: {} }
+  const wanted = routing ? collectRuleListUrls(routing) : []
+  for (const item of extra) {
+    if (item && item.url && item.tag && !wanted.some((w) => w.tag === item.tag)) wanted.push(item)
+  }
+  if (!wanted.length && !keepOthers) return { ok: true, updated: [], failed: [], lists: {} }
 
   const state = await readState(ctx, paths)
-  const next = {}
+  const next = keepOthers ? { ...state } : {}
   const updated = []
   const failed = []
   const errText = (error) => (error instanceof Error ? error.message : String(error))
@@ -252,6 +259,10 @@ export const ensureRuleLists = async (
     } catch (error) {
       const message = errText(error)
       failed.push({ tag: item.tag, url: item.url, message })
+      if (!exists && item.optional) {
+        log(`[rule-list] ${item.url} 拉取失败（${message}）,本地也没有,先不用它`)
+        continue
+      }
       if (!exists) {
         return { ok: false, updated, failed, message: `规则集链接拉取失败:${item.url} —— ${message}` }
       }
@@ -270,7 +281,7 @@ export const ensureRuleLists = async (
       log(`[rule-list] ${item.url} 拉取失败（${message}）,沿用本地已有的那份`)
     }
   }
-  await ctx.writeFile(listStatePath(paths), JSON.stringify(next, null, 2))
+  if (JSON.stringify(next) !== JSON.stringify(state)) await ctx.writeFile(listStatePath(paths), JSON.stringify(next, null, 2))
   return { ok: true, updated, failed, lists: shapesOf(next) }
 }
 

@@ -1,6 +1,6 @@
 import { filterForwardPlan, filterKey, filterSettings } from '../engine/dns-filter.mjs'
 import { tunTcpMss } from '../engine/tun-options.mjs'
-import { detectConflicts } from './conflicts.mjs'
+import { conflictMessage, detectConflicts } from './conflicts.mjs'
 import { validateConfigObject, attributeBadNodes, describeConfigError } from './validate.mjs'
 import { restartService, stopService, serviceStatus } from './service.mjs'
 import { applyDnsTakeover, restoreDnsTakeover, dnsTakeoverBackupPath } from './dns-takeover.mjs'
@@ -69,6 +69,10 @@ const VERIFY_SETTLE_MS = 3000
 // 确认在跑之后再在后台看两眼:post-start 排在 DNS 解析之后,节点域名解析超时时 nft 那步会拖到第 5 秒才
 // 跑(GitHub #4 的 FATAL[0005]),两眼确认时进程还活着。默认用真定时器且不拖住进程退出;测试注入自己的 sleep
 const LATE_WATCH_MS = [6000, 6000]
+// auto_redirect 开着时多看几眼、看得更久:nft 那一步在 fw4 规则多的路由器上能拖一分多钟(GitHub #426:装着 PassWall / OpenClash,
+// 起 auto_redirect 要 fw4 reload,每次都重跑它们的规则,89 秒才 FATAL),而且 procd 会把崩溃的内核立刻拉起来、状态还是「在跑」——
+// 这时按日志里这次重启之后新进程的 FATAL 认
+const LATE_WATCH_REDIRECT_MS = [6000, 6000, 20000, 30000, 45000]
 const detachedSleep = (ms) => new Promise((resolve) => { const t = setTimeout(resolve, ms); if (typeof t.unref === 'function') t.unref() })
 
 // 内核起来又死了的时候,把它最后一句 FATAL 带回界面——"内核启动后未在运行"这句话
@@ -90,11 +94,13 @@ const kernelLogMark = async (ctx) => {
   const lines = await kernelLogLines(ctx)
   return { last: lines.length ? lines[lines.length - 1] : '', pids: new Set(lines.map(logPid).filter(Boolean)) }
 }
-const readLastKernelFatal = async (ctx, mark = null) => {
+// newPidsOnly:只看重启前没出现过的进程号——旧内核被停掉时晚到的 FATAL(收尾时 nft 那步失败之类)记在 mark 后面,也不算
+const readLastKernelFatal = async (ctx, mark = null, { newPidsOnly = false } = {}) => {
   let lines = await kernelLogLines(ctx)
   if (mark) {
     const at = mark.last ? lines.lastIndexOf(mark.last) : -1
     lines = at >= 0 ? lines.slice(at + 1) : lines.filter((line) => !mark.pids.has(logPid(line)))
+    if (newPidsOnly) lines = lines.filter((line) => !mark.pids.has(logPid(line)))
   }
   const fatal = lines.filter((line) => /FATAL/.test(line)).pop()
   if (!fatal) return ''
@@ -119,6 +125,12 @@ export const TUN_START_FATAL = /inbound\/tun\[[^\]]*\]: (starting TUN interface|
 // 这两类先原样再起一次再说:auto_redirect 那类也可能只是撞上了没拆完的旧状态,第二次就好;真起不来(缺模块之类)
 // 第二次照样失败,再按原来的办法降级纯 tun / 回滚直连
 const START_RETRY_SETTLE_MS = 2000
+// auto_redirect 那类里的临时性错误:内核把 nft 规则整批提交、读确认时接收缓冲区塞满(ENOBUFS:no buffer space available),
+// 或者一时分配不到内存(cannot allocate memory)。不是缺模块、也不是规则冲突,隔一会儿原样再起多半就好。iStoreOS 用户
+// 2026-10-05:升级时连着两次撞上就降级成纯 tun,旁路由的手机 DNS 不经本机、上不了外网,要手动再重启一次内核。tcp17 起
+// 内核按批大小放大了接收缓冲区,这里兜底:这一类原样多起几次、间隔拉长,都不行才降级
+export const TRANSIENT_REDIRECT_FATAL = /no buffer space available|cannot allocate memory/i
+const TRANSIENT_RETRY_SETTLE_MS = [2000, 5000, 10000]
 export const autoRedirectFallbackWarning = (fatal) =>
   `auto_redirect（nftables 转发）起不来,已改用纯 tun 模式启动（兼容模式）:分流规则不受影响,直连目标的入口旁路改由系统路由表实现,吞吐略低。内核原话:${fatal}。常见原因:固件缺 kmod-nft-nat 等 nftables 模块,或 PassWall / OpenClash 等插件的 nftables 规则冲突——处理好之后重启内核会自动恢复 auto_redirect。旁路由请注意:纯 tun 模式不改写终端的 DNS,终端的 DNS 若不指向本机,请在 网络 → DHCP/DNS 里打开「DNS 重定向」（把终端的 DNS 请求引到本机 dnsmasq）,否则会解析不了域名。`
 
@@ -197,11 +209,11 @@ export const deployConfig = async (ctx, paths, { config, profile, userGroups, no
   }
   const withTimings = (result) => ({ ...result, timings })
 
-  // 1. 冲突检测
+  // 1. 冲突检测:别的代理工具在跑就不启动,一个文件都不写、内核不动(用户 2026-10-05:检测到其他代理工具就禁止启动,并明确提示)
   const { conflicts, hasRunning } = await detectConflicts(ctx)
   mark('冲突检测')
   if (hasRunning) {
-    return { ok: false, stage: 'conflict', message: `请先停止:${conflicts.map((c) => c.label).join('、')}` }
+    return { ok: false, stage: 'conflict', message: conflictMessage(conflicts) }
   }
 
   // 2. 核对随包规则集并迁移旧配置路径
@@ -452,6 +464,7 @@ export const deployConfig = async (ctx, paths, { config, profile, userGroups, no
     let warning = ''
     let redirectFallbackTried = false
     let startRetried = false
+    let transientRetries = 0
     let logMark = null
     for (;;) {
       logMark = await kernelLogMark(ctx)
@@ -481,6 +494,11 @@ export const deployConfig = async (ctx, paths, { config, profile, userGroups, no
       if (!crashed) break
 
       const fatal = await readLastKernelFatal(ctx, logMark)
+      if (autoRedirect && AUTO_REDIRECT_FATAL.test(fatal) && TRANSIENT_REDIRECT_FATAL.test(fatal) && transientRetries < TRANSIENT_RETRY_SETTLE_MS.length) {
+        startRetried = true
+        await ctx.sleep(TRANSIENT_RETRY_SETTLE_MS[transientRetries++])
+        continue
+      }
       if (!startRetried && (TUN_START_FATAL.test(fatal) || (autoRedirect && AUTO_REDIRECT_FATAL.test(fatal)))) {
         startRetried = true
         await ctx.sleep(START_RETRY_SETTLE_MS)
@@ -506,11 +524,15 @@ export const deployConfig = async (ctx, paths, { config, profile, userGroups, no
     // 9b. 晚发生的崩溃交给调用方在后台盯:死了且是 auto_redirect 那类就照样降级重来一次,别的崩溃回滚直连。
     //     返回 null 表示一直在跑;isStale() 为真(又有新的部署开始了)就什么都不做
     const lateCrashWatch = async ({ sleep = detachedSleep, isStale = () => false } = {}) => {
-      for (const wait of LATE_WATCH_MS) {
+      for (const wait of autoRedirect ? LATE_WATCH_REDIRECT_MS : LATE_WATCH_MS) {
         await sleep(wait)
         if (isStale() || isCancelled()) return null
-        if ((await serviceStatus(ctx, paths.initd.core)).running) continue
-        const fatal = await readLastKernelFatal(ctx, logMark)
+        const running = (await serviceStatus(ctx, paths.initd.core)).running
+        // 在跑的时候也要看:auto_redirect 那类崩了被 procd 立刻拉起来,状态照样是「在跑」(#426)
+        const fatal = running
+          ? (autoRedirect ? await readLastKernelFatal(ctx, logMark, { newPidsOnly: true }) : '')
+          : await readLastKernelFatal(ctx, logMark)
+        if (running && !(autoRedirect && AUTO_REDIRECT_FATAL.test(fatal))) continue
         if (autoRedirect && !redirectFallbackTried && typeof rebuild === 'function' && AUTO_REDIRECT_FATAL.test(fatal)) {
           redirectFallbackTried = true
           autoRedirect = false

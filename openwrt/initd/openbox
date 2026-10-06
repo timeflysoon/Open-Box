@@ -361,6 +361,44 @@ openbox_clean_stale_nft() {
 	return 0
 }
 
+# 别的代理工具在跑就不起内核(GitHub #426;用户 2026-10-05:检测到其他代理工具就禁止启动,并明确提示)。同一台路由器上
+# 不能同时运行两个代理工具:都要接管防火墙、DNS、路由,PassWall 挂在 fw4 上的脚本还让每次防火墙重载拖几十秒,内核卡在
+# 启动、面板里看着在跑其实不工作。面板的部署流程也查(panel/server/system/conflicts.mjs),这里管不经过面板的启动:
+# 开机自启、LuCI / SSH 里的 /etc/init.d/openbox start|restart。名单和认法与面板一致(initd-contract 测试核对):装着这个
+# 插件,并且有进程的命令行里带它的运行目录。[x] 的写法免得认到别的正在搜这些路径的 grep
+openbox_conflict_running() {
+	# $1 插件的 init 脚本名;$2 它的进程命令行里会出现的运行目录(扩展正则)
+	[ -f "/etc/init.d/$1" ] || return 1
+	grep -qsE "$2" /proc/[0-9]*/cmdline 2>/dev/null
+}
+
+# 在跑的代理工具的名字,用「、」连起来;没有就是空
+openbox_conflicts() {
+	_ob_c=""
+	openbox_conflict_running openclash '/etc/[o]penclash/' && _ob_c="${_ob_c:+${_ob_c}、}OpenClash"
+	openbox_conflict_running nikki '/etc/[n]ikki/' && _ob_c="${_ob_c:+${_ob_c}、}Nikki"
+	openbox_conflict_running passwall '/(tmp|var)/etc/[p]asswall/' && _ob_c="${_ob_c:+${_ob_c}、}PassWall"
+	openbox_conflict_running passwall2 '/(tmp|var)/etc/[p]asswall2/' && _ob_c="${_ob_c:+${_ob_c}、}PassWall2"
+	openbox_conflict_running shadowsocksr '/(tmp|var)/etc/([s]srplus|[s]hadowsocksr)/' && _ob_c="${_ob_c:+${_ob_c}、}ShadowSocksR Plus+"
+	openbox_conflict_running homeproxy '/(tmp|var)/run/[h]omeproxy/' && _ob_c="${_ob_c:+${_ob_c}、}HomeProxy"
+	echo "$_ob_c"
+}
+
+# 有别的代理工具在跑就返回 1(不该起内核)。看到之后隔 2 秒再看一眼,两次都在才算:插件的界面 / 定时任务偶尔会临时跑一下
+# 它目录下的程序(查版本之类)。拒绝时把接管撤干净:上一次留下的 DNS 接管还指着内核,不撤的话整个局域网解析不了
+openbox_refuse_if_conflict() {
+	_ob_conflicts="$(openbox_conflicts)"
+	[ -n "$_ob_conflicts" ] || return 0
+	sleep 2
+	_ob_conflicts="$(openbox_conflicts)"
+	[ -n "$_ob_conflicts" ] || return 0
+	_ob_msg="检测到 $_ob_conflicts 正在运行。同一台路由器上不能同时运行两个代理工具,会互相冲突,Open-Box 不启动内核。请先停用 $_ob_conflicts(关掉它的主开关或卸载)再启动。"
+	echo "openbox: $_ob_msg" >&2
+	logger -t openbox "$_ob_msg" 2>/dev/null
+	openbox_cleanup
+	return 1
+}
+
 start_service() {
 	# 注意:procd 的 rc_procd 包装(procd_open_service; "$@"; procd_close_service)
 	# 会吞掉这里的返回码——即使 return 1,上游 rc.common 的 start 在 USE_PROCD=1 下
@@ -374,6 +412,9 @@ start_service() {
 		echo "openbox: config not found at $CONF" >&2
 		return 1
 	fi
+
+	# 别的代理工具在跑:不起内核(上面那条注释:返回码会被吞,不能当成败判据;面板看的是冲突检测和内核状态)
+	openbox_refuse_if_conflict || return 1
 
 	# 没加载 tun 模块的固件上内核起不来(open /dev/net/tun: no such file),开机自启这条路
 	# 不经过面板的预检,这里也试着加载一次;真没有这个模块就交给内核自己报错

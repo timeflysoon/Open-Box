@@ -19,6 +19,7 @@ import { replaceSubscriptionNodes } from '../engine/node-pool.mjs'
 import { buildCurrentConfig } from './deploy-runner.mjs'
 import { routerId } from './client-app.mjs'
 import { CLIENT_DEVICES_KEY, buildClientBundle, registerClientConfigRoutes, registerPublicClientConfigRoutes } from './client-config.mjs'
+import { BACKGROUND_IMAGE_KEY } from '../system/seed-defaults.mjs'
 import { routeProxyDnsUpstreams } from './dns-upstream-route.mjs'
 
 const sbBin = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../.tools/sing-box')
@@ -247,6 +248,9 @@ test('客户端配置:故障转移组带页签(名字、图标、内核里的出
   // 页签自己的图标也带上;别的组没有 lanes
   assert.match(bundle.view.icons['globe:asia'], /^<svg/)
   assert.equal(bundle.view.groups.find((g) => g.tag === '香港-自动').lanes, undefined)
+  // 组定义整份随包(App 手机上自动切页签用):和 App 用同一份 source 重算出来的一样,父组 / 页签引用和路由器的一样
+  assert.deepEqual(bundle.failover, buildClientConfig({ source: bundle.source, nodes: bundle.source.nodes }).failover)
+  assert.deepEqual(bundle.failover.map((f) => [f.tag, f.rejectTag, f.lanes.map((l) => l.ref)]), failover.map((f) => [f.tag, f.rejectTag, f.lanes.map((l) => l.ref)]))
 })
 
 test('客户端配置:bundle 带 source;用 source.nodes 重算(App 本机刷新订阅用的同一个函数)和 config / flags / view 逐字一样', async () => {
@@ -428,6 +432,47 @@ test('接口:统一的一个码 → 拉加密配置 → 规则集 → 导出文�
     assert.match(fresh.token, /^[0-9a-f]{48}$/)
     assert.equal(JSON.parse(store.getRaw(CLIENT_DEVICES_KEY)).length, 1)
     assert.equal((await codeNow()).token, fresh.token, '发了之后固定')
+  } finally {
+    await new Promise((resolve) => server.close(resolve))
+  }
+})
+
+test('客户端配置:view 带面板背景的元数据;导出文件带图片字节(不进指纹);图片接口要码对得上', async () => {
+  const { store, geoDir, paths, ctx, fetchImpl } = env()
+  const plain = await buildClientBundle({ store, ctx, paths, fetchImpl, geoDir })
+  assert.equal(plain.view.background, null)
+
+  const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xdb, 9, 8, 7])
+  store.setRaw('config/custom-background-image', 'local-image-1788361724032')
+  store.setRaw(BACKGROUND_IMAGE_KEY, `data:image/jpeg;base64,${jpeg.toString('base64')}`)
+  store.setRaw('config/dashboard-transparent', '84')
+  store.setRaw('config/blur-intensity', '16')
+  const version = createHash('sha256').update(jpeg).digest('hex').slice(0, 16)
+  const bundle = await buildClientBundle({ store, ctx, paths, fetchImpl, geoDir })
+  assert.deepEqual(bundle.view.background, { version, transparent: 84, blur: 16 })
+  assert.notEqual(bundle.fingerprint, plain.fingerprint, '换了背景,App 同步时要拿到')
+  const file = await buildClientBundle({ store, ctx, paths, fetchImpl, geoDir, withData: true })
+  assert.deepEqual(file.view.background, { version, transparent: 84, blur: 16, data: jpeg.toString('base64') })
+  assert.equal(file.fingerprint, bundle.fingerprint, '图片字节不进指纹(version 已经跟着图走)')
+  assert.deepEqual({ ...file.view, background: bundle.view.background }, bundle.view, 'view 别的部分一样')
+
+  const app = express()
+  registerPublicClientConfigRoutes(app, { store, ctx, paths, fetchImpl, geoDir })
+  registerClientConfigRoutes(app, { store, ctx, paths, fetchImpl, geoDir })
+  const server = app.listen(0)
+  await new Promise((resolve) => server.once('listening', resolve))
+  const base = `http://127.0.0.1:${server.address().port}`
+  try {
+    const code = await (await fetch(`${base}/api/openbox/client-config`)).json()
+    const image = await fetch(`${base}/client/v1/${code.routerId}/config/${code.token}/background`)
+    assert.equal(image.status, 200)
+    assert.equal(image.headers.get('content-type'), 'image/jpeg')
+    assert.deepEqual(Buffer.from(await image.arrayBuffer()), jpeg)
+    const unknown = await fetch(`${base}/client/v1/${code.routerId}/config/${'0'.repeat(48)}/background`)
+    assert.equal(unknown.status, 404)
+    assert.deepEqual(await unknown.json(), { error: 'unpaired' })
+    store.setRaw('config/custom-background-image', '')
+    assert.equal((await fetch(`${base}/client/v1/${code.routerId}/config/${code.token}/background`)).status, 404)
   } finally {
     await new Promise((resolve) => server.close(resolve))
   }

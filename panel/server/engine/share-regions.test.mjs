@@ -2,8 +2,10 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import test from 'node:test'
 import {
-  DEFAULT_SHARE_REGIONS, SHARE_REGIONS_DEFAULT_FILE, effectiveShareRegions, normalizeShareGroup, shareRegionsVersion, validateShareRegions,
+  DEFAULT_SHARE_REGIONS, SHARE_REGIONS_DEFAULT_FILE, collectShareRegionRuleUrls, effectiveShareRegions, normalizeShareGroup, shareRegionsForClient,
+  shareRegionsVersion, validateShareRegions,
 } from './share-regions.mjs'
+import { listTagForUrl } from './rule-list.mjs'
 
 // 默认三组只有一份:客户端内置的 clients/core/regions-default.json。面板这份是拷贝(发布包里没有 clients/),一字不差
 // 只打包面板的检出里没有 clients/(比如发版用的 worktree),那就没得比,跳过
@@ -99,3 +101,43 @@ test('「在这些地区之外」:至少一个地区;可以列别的组的地区
   assert.match(validateShareRegions(bad), /regionMatch/)
 })
 
+// 用户 2026-10-05:地区分流的规则和目标分流对齐,多了域名关键词和规则集链接
+test('域名关键词、规则集链接:能存;格式不对的拦下', () => {
+  const withRules = (rules) => DEFAULT_SHARE_REGIONS.map((g, i) => (i === 0 ? { ...structuredClone(g), rules } : structuredClone(g)))
+  assert.equal(validateShareRegions(withRules([
+    { type: 'domainKeyword', value: 'openai', action: 'proxy' },
+    { type: 'ruleUrl', value: 'https://lists.example.com/ai.list', action: 'proxy' },
+  ])), null)
+  for (const bad of [
+    { type: 'domainKeyword', value: 'open ai', action: 'proxy' },
+    { type: 'ruleUrl', value: 'ftp://lists.example.com/ai.list', action: 'proxy' },
+    { type: 'ruleUrl', value: `https://lists.example.com/${'a'.repeat(2050)}`, action: 'proxy' },
+  ]) {
+    assert.match(validateShareRegions(withRules([bad])), /invalid/, JSON.stringify(bad))
+  }
+})
+
+test('默认值照正式路由器 192.168.3.1:中国大陆一组最前面是 browserleaks 三条、googleapis.cn / google.cn 走代理,排在 geosite cn 前面', () => {
+  // googleapis.cn / google.cn 在 geosite-cn 里(会被判成直连),路由器上它们先命中 Google 站点集走代理:手机交回路由器才一致
+  const proxied = ['browserleaks.com', 'browserleaks.org', 'browserleaks.net', 'googleapis.cn', 'google.cn']
+  assert.deepEqual(DEFAULT_SHARE_REGIONS[0].rules.slice(0, 5), proxied.map((value) => ({ type: 'domainSuffix', value, action: 'proxy' })))
+  assert.deepEqual(DEFAULT_SHARE_REGIONS[0].rules[5], { type: 'geosite', value: 'cn', action: 'direct' })
+})
+
+test('发给 App:老 App 删掉新类型;rules=2 全给,规则集链接带 sets;链接去重收集', () => {
+  const url = 'https://lists.example.com/ai.list'
+  const groups = [{ ...structuredClone(DEFAULT_SHARE_REGIONS[2]), rules: [
+    { type: 'domainKeyword', value: 'openai', action: 'proxy' },
+    { type: 'ruleUrl', value: url, action: 'proxy' },
+    { type: 'ruleUrl', value: url, action: 'direct' },
+    { type: 'geosite', value: 'cn', action: 'proxy' },
+  ] }]
+  assert.deepEqual(shareRegionsForClient(groups)[0].rules, [{ type: 'geosite', value: 'cn', action: 'proxy' }])
+  const sets = [{ tag: listTagForUrl(url), kind: 'domain', sha256: 'ab' }]
+  const fresh = shareRegionsForClient(groups, { rulesVersion: 2, setsFor: (u) => (u === url ? sets : []) })[0].rules
+  assert.deepEqual(fresh.map((r) => r.type), ['domainKeyword', 'ruleUrl', 'ruleUrl', 'geosite'])
+  assert.deepEqual(fresh[1].sets, sets)
+  assert.equal('sets' in fresh[0], false)
+  assert.deepEqual(collectShareRegionRuleUrls(groups), [{ url, tag: listTagForUrl(url), optional: true }])
+  assert.deepEqual(collectShareRegionRuleUrls(DEFAULT_SHARE_REGIONS), [])
+})

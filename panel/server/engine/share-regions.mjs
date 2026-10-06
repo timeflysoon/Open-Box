@@ -14,12 +14,17 @@
 import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import { normalizeCidr } from './client-routes.mjs'
+import { listTagForUrl } from './rule-list.mjs'
 import {
   DEFAULT_DNS_PORT, MAX_DNS_EXTRAS, WAN_UPSTREAM, isDnsProtocol, isValidDnsPort, isValidDnsUpstream, isWanUpstream, regionDnsDefaults,
 } from './dns-upstream.mjs'
 
 export const SHARE_REGIONS_DEFAULT_FILE = new URL('../defaults/share-regions-default.json', import.meta.url)
-export const SHARE_REGION_RULE_TYPES = Object.freeze(['geosite', 'geoip', 'domain', 'domainSuffix', 'ipcidr'])
+// 规则类型和目标分流对齐(用户 2026-10-05):多了域名关键词(domainKeyword)和规则集链接(ruleUrl,路由器下载编译,
+// App 从路由器取编好的 .srs,见 system/share-region-lists.mjs)
+export const SHARE_REGION_RULE_TYPES = Object.freeze(['geosite', 'geoip', 'domain', 'domainSuffix', 'domainKeyword', 'ipcidr', 'ruleUrl'])
+// 老 App 只认这五种,遇到别的类型整组配置都生成不出来:请求地区分流不带 rules=2 的,新类型的规则先删掉再发(shareRegionsForClient)
+export const SHARE_REGION_LEGACY_RULE_TYPES = Object.freeze(['geosite', 'geoip', 'domain', 'domainSuffix', 'ipcidr'])
 // direct = 本地直连;proxy = 回路由器(经共享网络节点,由路由器按自己的规则出去)
 export const SHARE_REGION_ACTIONS = Object.freeze(['direct', 'proxy'])
 export const SHARE_GROUP_NAME_MAX = 30
@@ -29,6 +34,9 @@ const MAX_GROUPS = 12
 const MAX_RULES = 200
 const GEO_NAME = /^[a-z0-9!@._-]{1,80}$/
 const DOMAIN = /^[A-Za-z0-9*_.-]{1,253}$/
+// 和站点集的规则集链接一样(api/rulesets.mjs 的预览接口)
+const RULE_URL = /^https?:\/\/\S+$/i
+const RULE_URL_MAX = 2048
 const SIDES = ['direct', 'proxy']
 
 const isPlainObject = (v) => typeof v === 'object' && v !== null && !Array.isArray(v)
@@ -172,10 +180,32 @@ export const validateShareRegions = (input) => {
       const value = typeof r.value === 'string' ? r.value.trim() : ''
       const ok = r.type === 'geosite' || r.type === 'geoip' ? GEO_NAME.test(value)
         : r.type === 'ipcidr' ? normalizeCidr(value) !== ''
-          : DOMAIN.test(value)
+          : r.type === 'ruleUrl' ? RULE_URL.test(value) && value.length <= RULE_URL_MAX
+            : DOMAIN.test(value)
       if (!ok) return `shareRegions[${g.id}] has an invalid ${r.type} rule: ${JSON.stringify(r.value)}`
     }
   }
   if (defaults !== 1) return 'shareRegions needs exactly one default group (used when no region matches)'
   return null
 }
+
+// 地区组引用的规则集链接(去重)。optional:地区分流只给手机用,拉不到不能让路由器自己的部署失败(system/rule-lists.mjs)
+export const collectShareRegionRuleUrls = (groups) => {
+  const seen = new Map()
+  for (const g of Array.isArray(groups) ? groups : []) {
+    for (const r of Array.isArray(g && g.rules) ? g.rules : []) {
+      const url = r && r.type === 'ruleUrl' && typeof r.value === 'string' ? r.value.trim() : ''
+      if (url && !seen.has(url)) seen.set(url, listTagForUrl(url))
+    }
+  }
+  return [...seen.entries()].map(([url, tag]) => ({ url, tag, optional: true }))
+}
+
+// 发给 App 的那份。rulesVersion 2(新 App,请求带 rules=2):全部类型,规则集链接带上路由器编好的几份
+// sets: [{ tag, kind: domain | ip, sha256 }](还没编好就是空的,App 当这条不生效);1(老 App):只留它认得的五种
+export const shareRegionsForClient = (groups, { rulesVersion = 1, setsFor = () => [] } = {}) => groups.map((g) => ({
+  ...g,
+  rules: (Array.isArray(g.rules) ? g.rules : [])
+    .filter((r) => rulesVersion >= 2 || SHARE_REGION_LEGACY_RULE_TYPES.includes(r.type))
+    .map((r) => (r.type === 'ruleUrl' ? { ...r, sets: setsFor(String(r.value || '').trim()) } : r)),
+}))

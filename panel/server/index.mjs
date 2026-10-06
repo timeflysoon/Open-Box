@@ -20,7 +20,7 @@ import { registerDnsUpstreamTestRoutes } from './api/dns-upstream-test.mjs'
 import { registerPenetrationRoutes } from './api/penetration.mjs'
 import { registerProfileRoutes } from './api/profile.mjs'
 import { registerResetRoutes } from './api/reset.mjs'
-import { registerServiceRoutes } from './api/service.mjs'
+import { registerServiceRoutes, stopKernel } from './api/service.mjs'
 import { registerTimezoneRoutes } from './api/timezone.mjs'
 import { syncProcessTimezoneOnStartup } from './system/timezone.mjs'
 import { registerRulesetRoutes } from './api/rulesets.mjs'
@@ -54,9 +54,11 @@ import { registerDiagnosticsRoutes } from './api/diagnostics.mjs'
 import { readMeta, readUpdateStatus } from './system/updater.mjs'
 import { createMemoryWatchdog, recordWatchdogRestart } from './system/memory-watchdog.mjs'
 import { seedDefaultStorage } from './system/seed-defaults.mjs'
-import { fetchSelections, resolveSelections, regenerateIfPlanChanged, isDeployLocked } from './api/deploy-runner.mjs'
+import { fetchSelections, resolveSelections, regenerateIfPlanChanged, isDeployLocked, runExclusive } from './api/deploy-runner.mjs'
+import { ensureShareRegionLists } from './system/share-region-lists.mjs'
 import { flushDnsCache, registerDnsCacheRoutes } from './system/dns-cache.mjs'
 import { startScheduler } from './system/scheduler.mjs'
+import { startConflictGuard } from './system/conflict-guard.mjs'
 import { createTrafficCollector, createTrafficStore } from './system/traffic-collector.mjs'
 import { registerSubscriptionRoutes } from './api/subscriptions.mjs'
 import { registerPublicSubscriptionShareRoutes, registerSubscriptionShareRoutes } from './api/subscription-shares.mjs'
@@ -877,7 +879,7 @@ registerPublicSubscriptionShareRoutes(app, { store, fetchImpl: subscriptionFetch
 // 「导入全部配置」的设备拉配置(token 认设备,内容用设备密钥加密,api/client-config.mjs)。App 发布前不注册(CLIENT_APPS_ENABLED)
 const readOpenboxVersion = async () => (await readMeta(obCtx, obPaths)).version || ''
 if (CLIENT_APPS_ENABLED) {
-  registerPublicClientRoutes(app, { store, readVersion: readOpenboxVersion })
+  registerPublicClientRoutes(app, { store, ctx: obCtx, paths: obPaths, readVersion: readOpenboxVersion })
   registerPublicClientConfigRoutes(app, { store, ctx: obCtx, paths: obPaths, fetchImpl: globalThis.fetch, readVersion: readOpenboxVersion })
 }
 
@@ -1252,7 +1254,10 @@ const latencyHistory = createLatencyHistory({ store, skip: (tag) => kernelStale.
 registerBackupBodyParser(app)
 registerSubscriptionRoutes(app, { store, fetchImpl: subscriptionFetch, kernelStale, applyNow: () => hotApplier.runNow() })
 registerSubscriptionShareRoutes(app, { store })
-registerProfileRoutes(app, { store, applyNow: () => hotApplier.runNow() })
+// 地区分流里的规则集链接(给手机用的):存了就在后台编,定时任务每小时再补一次;和部署同一把锁,状态文件不打架
+const compileShareRegionLists = () => runExclusive(store, () => ensureShareRegionLists({ store, ctx: obCtx, paths: obPaths, log: (m) => console.log(m) }))
+  .catch((err) => console.warn(`[rule-list] 地区分流的规则集链接没编成:${err instanceof Error ? err.message : err}`))
+registerProfileRoutes(app, { store, applyNow: () => hotApplier.runNow(), onShareRegionsSaved: () => { void compileShareRegionLists() } })
 registerDeployRoutes(app, { store, ctx: obCtx, paths: obPaths })
 registerServiceRoutes(app, { store, ctx: obCtx, paths: obPaths, restartPending })
 // 后端设置 · 时区:读 / 改路由器的系统时区(system/timezone.mjs)
@@ -1384,7 +1389,9 @@ registerBackupRoutes(app, {
   },
 })
 // 自动更新计划:每分钟看一眼档案里的计划,到点就做(见 system/scheduler.mjs)
-startScheduler({ store, ctx: obCtx, paths: obPaths, fetchImpl: globalThis.fetch, subscriptionFetchImpl: subscriptionFetch, hotApplier, log: (m) => console.log(m) })
+startScheduler({ store, ctx: obCtx, paths: obPaths, fetchImpl: globalThis.fetch, subscriptionFetchImpl: subscriptionFetch, hotApplier, refreshShareRegionLists: compileShareRegionLists, log: (m) => console.log(m) })
+// 别的代理工具和 Open-Box 内核同时在跑(开机时 Open-Box 先起、别的插件后起):每 20 秒看一眼,连续两次都在就自动停内核(system/conflict-guard.mjs)
+startConflictGuard({ store, ctx: obCtx, paths: obPaths, stop: () => stopKernel({ store, ctx: obCtx, paths: obPaths }), log: (m) => console.warn(m) })
 
 // /api/* 专用 JSON 错误兜底:必须注册在所有路由之后、SPA fallback 之前。任何路由处理器里
 // 未被自己 try/catch 的异常(同步抛出,或调用 next(err))原本会落到 Express 默认错误处理器,

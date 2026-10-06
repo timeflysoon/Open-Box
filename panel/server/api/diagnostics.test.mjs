@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import express from 'express'
-import { buildDiagnostics, redact, registerDiagnosticsRoutes, scrubHosts } from './diagnostics.mjs'
+import { buildDiagnostics, KERNEL_PROCESS_SCRIPT, redact, registerDiagnosticsRoutes, scrubHosts } from './diagnostics.mjs'
 import { createMockContext } from '../system/context.mjs'
 import { createPaths } from '../system/paths.mjs'
 import { configMetaPath } from '../system/deploy.mjs'
@@ -40,6 +40,7 @@ const mkCtx = () => createMockContext({
     'cat /proc/uptime': { code: 0, stdout: '12345.67 40000\n' },
     'nft list tables': { code: 0, stdout: 'table inet fw4\ntable inet sing-box\n' },
     '/etc/init.d/openbox status': { code: 0, stdout: 'running\n' },
+    [`sh -c ${KERNEL_PROCESS_SCRIPT}`]: { code: 0, stdout: '20644 98304 kB /tmp/etc/passwall/bin/sing-box run -c /tmp/etc/passwall/haproxy_2001.json\n30162 103232 kB /opt/open-box/bin/sing-box run -c /opt/open-box/etc/config.json -D /opt/open-box/data\n' },
     'logread -e sing-box': { code: 0, stdout: Array.from({ length: 250 }, (_, i) => `line ${i}`).join('\n') + '\nERROR[1] \x1b[31mlookup hk.example.com: timeout\x1b[0m password=pw-secret\n' },
   },
 })
@@ -98,6 +99,9 @@ test('诊断包:秘密和节点地址一个都不能剩,该有的信息都在', 
   // 面板带没带 madvise 兼容库(GitHub #290 #293)跟着面板进程自己的环境走
   assert.equal(bundle.system.nodePreload, process.env.LD_PRELOAD || null)
   assert.match(bundle.kernel.nftTables, /table inet sing-box/)
+  // 进程表(#426 靠它看出 PassWall 的 sing-box 也在跑)
+  assert.match(bundle.kernel.processes, /^20644 98304 kB \/tmp\/etc\/passwall\/bin\/sing-box run/m)
+  assert.match(bundle.kernel.processes, /^30162 103232 kB \/opt\/open-box\/bin\/sing-box run/m)
   assert.equal(bundle.kernel.configMeta.routingHash, 'abc')
   assert.equal(bundle.settings.ipv6, true)
   assert.equal(bundle.lastDeploy.stage, 'start')
