@@ -45,12 +45,31 @@ export const describeEmptyResult = ({ format, skipped }) => {
     return '无法识别订阅内容的格式（既不是 Clash YAML、sing-box JSON,也不是分享链接）。' +
       '请确认订阅地址填的是订阅链接本身,而不是机场的网页地址。'
   }
-  const types = [...new Set((skipped || []).map((s) => s.type).filter(Boolean))]
-  if (types.length) {
-    return `订阅解析成功（${format} 格式）,但其中 ${skipped.length} 个节点使用的协议都不受支持:` +
-      `${types.join('、')}。`
+  const list = skipped || []
+  if (list.length) {
+    // 按「协议 + 原因」归类说清楚(GitHub #432 #374):以前只列协议名,XHTTP 传输的 VLESS 被跳过时提示成「不受支持:vless」,
+    // 像是 VLESS 本身不支持;分享链接更是只有一句「不受支持:sharelink」
+    const groups = new Map()
+    for (const s of list) {
+      const label = skippedLabel(s)
+      groups.set(label, (groups.get(label) || 0) + 1)
+    }
+    const parts = [...groups].map(([label, count]) => `${count} 个 ${label}`)
+    return `订阅解析成功（${format} 格式）,但节点都用不了:${parts.join('、')}。`
   }
   return `订阅解析成功（${format} 格式）,但里面一个节点都没有。`
+}
+
+// 一条跳过记录在提示里怎么说。原因码见 clash.mjs / sharelink.mjs 的 skipped;sing-box JSON 订阅的跳过记录没有原因码
+const skippedLabel = ({ type, reason, detail }) => {
+  const name = type || '认不出的行'
+  if (reason === 'unsupported-transport') {
+    const transport = String(detail || '').replace(/^unsupported transport:\s*/, '').toUpperCase()
+    return `${name}（${transport ? `${transport} ` : ''}传输,内核没有这种传输）`
+  }
+  if (reason === 'unsupported-plugin') return `${name}（${detail ? `${detail} ` : ''}插件不支持）`
+  if (reason === 'invalid') return `${name}（链接或字段写法不对）`
+  return `${name}（不支持这种协议）`
 }
 
 // 所有尝试都被服务器按状态码拒了:按状态码说原因,一句话、给出下一步(用户 2026-09-30:瞬云订阅链接失效,刷新没有任何提示、

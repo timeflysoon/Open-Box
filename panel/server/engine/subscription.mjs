@@ -1,5 +1,5 @@
 import { decodeBase64, isProbablyBase64 } from './codec.mjs'
-import { parseShareLink } from './sharelink.mjs'
+import { parseShareLinkDetailed } from './sharelink.mjs'
 import { parseClashProxies } from './clash.mjs'
 import { parseSingboxOutbounds } from './singbox-in.mjs'
 
@@ -29,9 +29,10 @@ const parseSharelinkLines = (text) => {
   for (const rawLine of text.split(/\r?\n/)) {
     const line = rawLine.trim()
     if (!line || line.startsWith('#') || line.startsWith('//')) continue
-    const node = parseShareLink(line)
-    if (node) nodes.push(node)
-    else skipped.push({ name: line.slice(0, 40), type: 'sharelink' })
+    // 解析不了的记下协议和原因(内核没有的传输 / 插件、不认识的协议、写法不对),提示里按原因说清楚
+    const result = parseShareLinkDetailed(line)
+    if (result.node) nodes.push(result.node)
+    else skipped.push({ name: line.slice(0, 40), ...result.skip })
   }
   return { nodes, skipped }
 }

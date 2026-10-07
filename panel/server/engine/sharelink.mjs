@@ -39,13 +39,15 @@ const parseSs = (uri) => {
     fragment = decodeURIComponent(rest.slice(hashIdx + 1))
     rest = rest.slice(0, hashIdx)
   }
-  // SIP002 的 plugin= 参数(obfs-local / v2ray-plugin 内核支持);内核没有的插件返回 null 当作认不出
+  // SIP002 的 plugin= 参数(obfs-local / v2ray-plugin 内核支持);内核没有的插件把原因抛出去(订阅里记为跳过、提示写明哪个插件),
+  // 别的解析错误返回 null 当作认不出
   let plugin
   const qIdx = rest.indexOf('?')
   if (qIdx >= 0) {
     try {
       plugin = sip003Plugin(new URLSearchParams(rest.slice(qIdx + 1)).get('plugin'))
-    } catch {
+    } catch (err) {
+      if (err && err.code === 'unsupported-plugin') throw err
       return null
     }
     rest = rest.slice(0, qIdx)
@@ -98,8 +100,8 @@ const parseVmess = (uri) => {
     alter_id: Number.parseInt(conf.aid ?? 0, 10) || 0,
     security: conf.scy || 'auto',
   }
-  // kcp / xhttp / splithttp 这些 sing-box 没有的传输层直接跳过,别生成一份内核拒收的配置
-  if (!SUPPORTED_TRANSPORTS.has(net)) return null
+  // kcp / xhttp / splithttp 这些 sing-box 没有的传输层直接跳过,别生成一份内核拒收的配置;原因抛出去,订阅提示里写明(同 vless)
+  if (!SUPPORTED_TRANSPORTS.has(net)) throw new Error(`unsupported transport: ${net}`)
   if (net !== 'tcp') {
     const transport = { type: net }
     if (net === 'grpc') {
@@ -336,25 +338,54 @@ export const parseHttpProxyLink = (uri) => {
   return createNode({ tag: fragment, type: 'http', server, server_port: port, fields, source: 'sharelink' })
 }
 
+const parseShareLinkStrict = (uri) => {
+  if (uri.startsWith('ss://')) return parseSs(uri)
+  if (uri.startsWith('vmess://')) return parseVmess(uri)
+  if (uri.startsWith('vless://')) return parseVless(uri)
+  if (uri.startsWith('trojan://')) return parseTrojan(uri)
+  if (uri.startsWith('hysteria2://')) return parseHysteria2(uri)
+  if (uri.startsWith('hy2://')) return parseHysteria2('hysteria2://' + uri.slice('hy2://'.length))
+  if (uri.startsWith('tuic://')) return parseTuic(uri)
+  if (uri.startsWith('anytls://')) return parseAnytls(uri)
+  // socks5h 是 curl 的写法(DNS 也走代理),对出站来说和 socks5 没区别
+  if (uri.startsWith('socks5://')) return parseSocks(uri, '5')
+  if (uri.startsWith('socks5h://')) return parseSocks(uri, '5')
+  if (uri.startsWith('socks4a://')) return parseSocks(uri, '4a')
+  if (uri.startsWith('socks4://')) return parseSocks(uri, '4')
+  if (uri.startsWith('socks://')) return parseSocks(uri, '5')
+  return null
+}
+
 export const parseShareLink = (uri) => {
   if (typeof uri !== 'string') return null
   try {
-    if (uri.startsWith('ss://')) return parseSs(uri)
-    if (uri.startsWith('vmess://')) return parseVmess(uri)
-    if (uri.startsWith('vless://')) return parseVless(uri)
-    if (uri.startsWith('trojan://')) return parseTrojan(uri)
-    if (uri.startsWith('hysteria2://')) return parseHysteria2(uri)
-    if (uri.startsWith('hy2://')) return parseHysteria2('hysteria2://' + uri.slice('hy2://'.length))
-    if (uri.startsWith('tuic://')) return parseTuic(uri)
-    if (uri.startsWith('anytls://')) return parseAnytls(uri)
-    // socks5h 是 curl 的写法(DNS 也走代理),对出站来说和 socks5 没区别
-    if (uri.startsWith('socks5://')) return parseSocks(uri, '5')
-    if (uri.startsWith('socks5h://')) return parseSocks(uri, '5')
-    if (uri.startsWith('socks4a://')) return parseSocks(uri, '4a')
-    if (uri.startsWith('socks4://')) return parseSocks(uri, '4')
-    if (uri.startsWith('socks://')) return parseSocks(uri, '5')
-    return null
+    return parseShareLinkStrict(uri)
   } catch {
     return null
+  }
+}
+
+// 认得的链接前缀 → 节点类型(订阅提示里用;hy2、socks 的几种写法各归一类)
+const SHARELINK_TYPES = {
+  ss: 'ss', vmess: 'vmess', vless: 'vless', trojan: 'trojan', hysteria2: 'hysteria2', hy2: 'hysteria2', tuic: 'tuic', anytls: 'anytls',
+  socks5: 'socks', socks5h: 'socks', socks4a: 'socks', socks4: 'socks', socks: 'socks',
+}
+
+// 订阅里逐行解析用:解析不了的说清为什么,原因码和 clash.mjs 记 skipped 的一致——unsupported-type 协议不认识(如 ssr)、
+// unsupported-transport 内核没有的传输(xhttp / kcp / splithttp)、unsupported-plugin 内核没有的 ss 插件、invalid 链接写法不对。
+// 以前一律记成 type 'sharelink',提示里只有一句「不受支持:sharelink」(GitHub #374)
+export const parseShareLinkDetailed = (uri) => {
+  const m = /^([a-z][a-z0-9+.-]*):\/\//i.exec(String(uri || ''))
+  const scheme = m ? m[1].toLowerCase() : ''
+  const type = SHARELINK_TYPES[scheme] || scheme
+  if (!SHARELINK_TYPES[scheme]) return { skip: { type, reason: scheme ? 'unsupported-type' : 'invalid' } }
+  try {
+    const node = parseShareLinkStrict(uri)
+    return node ? { node } : { skip: { type, reason: 'invalid' } }
+  } catch (err) {
+    const message = String((err && err.message) || '')
+    if (err && err.code === 'unsupported-plugin') return { skip: { type, reason: 'unsupported-plugin', detail: err.detail || message } }
+    if (/^unsupported transport:/.test(message)) return { skip: { type, reason: 'unsupported-transport', detail: message } }
+    return { skip: { type, reason: 'invalid' } }
   }
 }
