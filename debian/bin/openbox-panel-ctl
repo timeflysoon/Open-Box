@@ -1,0 +1,23 @@
+#!/bin/sh
+# Open-Box 面板在 Debian / Ubuntu(systemd)上的服务控制脚本,对应 OpenWrt 的 openwrt/initd/openbox-panel。
+# 动作集合和 openbox-ctl 一样(面板 / 命令行 open-box / 安装脚本都只用这几个),翻译成 systemctl
+UNIT=openbox-panel.service
+case "$1" in
+	start|restart) systemctl reset-failed "$UNIT" >/dev/null 2>&1; exec systemctl "$1" "$UNIT" ;;
+	stop|reload) exec systemctl "$1" "$UNIT" ;;
+	enable|disable) exec systemctl -q "$1" "$UNIT" ;;
+	enabled) exec systemctl -q is-enabled "$UNIT" ;;
+	running) exec systemctl -q is-active "$UNIT" ;;
+	status)
+		if systemctl -q is-active "$UNIT"; then
+			echo "running"
+			exit 0
+		fi
+		echo "inactive"
+		exit 3
+		;;
+	*)
+		echo "Usage: $0 {start|stop|restart|reload|enable|disable|enabled|running|status}" >&2
+		exit 1
+		;;
+esac

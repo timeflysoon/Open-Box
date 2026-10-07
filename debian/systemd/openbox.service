@@ -1,0 +1,28 @@
+# Open-Box sing-box 内核(Debian / Ubuntu)。对应 OpenWrt 的 /etc/init.d/openbox:procd 的 respawn 3600 5 5 换成
+# Restart=on-failure + 启动限流(一小时内最多拉 5 次);起内核前后的系统层动作在 debian/bin/openbox-ctl 里
+[Unit]
+Description=Open-Box sing-box core
+Documentation=https://github.com/timeflysoon/Open-Box
+After=network-online.target openbox-panel.service
+Wants=network-online.target
+StartLimitIntervalSec=3600
+StartLimitBurst=5
+
+[Service]
+Type=simple
+ExecStartPre=/opt/open-box/debian/bin/openbox-ctl pre-start
+ExecStart=/opt/open-box/bin/sing-box run -c /opt/open-box/etc/config.json -D /opt/open-box/data
+ExecStopPost=/opt/open-box/debian/bin/openbox-ctl post-stop
+Restart=on-failure
+RestartSec=5
+# 让 sing-box 正常收到 SIGTERM 收尾(删自己的 nft 表和路由),超时才强杀
+KillMode=mixed
+TimeoutStopSec=15
+LimitNOFILE=65535
+LimitCORE=infinity
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# 直连应答放行的开关文件(内核 tcp10 起,见 panel/server/system/direct-answer-bypass.mjs)
+Environment=OPENBOX_DIRECT_ANSWER_FLAG=/opt/open-box/data/flip/direct-answer.on
+
+[Install]
+WantedBy=multi-user.target

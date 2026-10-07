@@ -1,0 +1,569 @@
+#!/bin/sh /etc/rc.common
+# Open-Box sing-box core service
+
+USE_PROCD=1
+START=99
+STOP=10
+
+OPENBOX_ROOT=/opt/open-box
+BIN="$OPENBOX_ROOT/bin/sing-box"
+CONF="$OPENBOX_ROOT/etc/config.json"
+DATA="$OPENBOX_ROOT/data"
+OPENBOX_DNS_UPSTREAM='127.0.0.1#7853'
+# 与 panel/server/system/dns-takeover.mjs 的 dnsTakeoverBackupPath 一致:该文件存在
+# <=> applyDnsTakeover 曾经接管过 dnsmasq(仅 dnsmasq 分流模式会写)。默认 hijack 模式
+# 从不创建它,借此判断"是否需要清理"而不是无脑动 dnsmasq。
+DNSMASQ_BACKUP="$DATA/dnsmasq-backup.txt"
+# 与 dns-takeover.mjs 的 dnsTakeoverStatePath 一致:面板最近一次接管往 dnsmasq 写了什么
+# (每行 server=<值>,全局接管再加一行 noresolv=1)。开机时照抄,见 openbox_apply_takeover。
+DNSMASQ_TAKEOVER="$DATA/dnsmasq-takeover.txt"
+# 与 dns-takeover.mjs 一致:domains 的转发条目及 DNS 重写 rebind 例外(all 也可能有例外)。
+# 正本在 data/,开机复制进 dnsmasq 的 conf-dir(在 /tmp,重启就没了)。不改用户自己的 rebind_domain。
+DNSMASQ_FORWARD_SRC="$DATA/dnsmasq-forward.conf"
+DNSMASQ_FORWARD_CONF=open-box.conf
+# dnsmasq 查询日志(受管文件里带 log-facility 这一行时写这里;panel/server/system/dnsmasq-query-log.mjs 的 DNSMASQ_QUERY_LOG_PATH,
+# openbox-panel 里同一个路径):面板读它认出 dnsmasq 转来的查询是哪台终端。没人读时是指向 /dev/null 的软链接
+DNSMASQ_QUERY_LOG=/var/run/dnsmasq/open-box-query.log
+# 加上查询日志后 dnsmasq 起不来时记在这里(panel/server/system/dns-takeover.mjs 的 queryLogFailedPath):之后面板不再加那两行
+DNSMASQ_QUERY_LOG_FAILED="$DATA/dnsmasq-query-log.failed"
+# dnsmasq 除了 conf-dir 还会读的配置:固件自带的主配置、init 脚本按 uci 生成的那份(查已有日志设置用,不加引号好展开通配)
+DNSMASQ_CONF_FILES="/etc/dnsmasq.conf /var/etc/dnsmasq.conf*"
+# 与 system/deploy.mjs 的 configMetaPath 一致:面板每次落盘 config.json 时旁边写的元数据,
+# 里面的 dnsMode 说明这份配置是哪种 DNS 模式。
+CONF_META="$OPENBOX_ROOT/etc/config.meta.json"
+# 与 engine/config.mjs 的 DNSMASQ_OUTBOUND_TAG 一致:老版本部署的配置没有元数据文件,
+# 只能退而求其次在 config.json 里找这个出站 tag(节点名恰好也叫 dnsmasq 时会误判,
+# 所以只作为没有元数据时的兜底)。
+DNSMASQ_OUTBOUND_TAG=dnsmasq
+# sing-box 自己流量的 fwmark(tun 的 auto_redirect_output_mark 默认值):带这个标记的包
+# 会被内核的 nft output 链直接放行、ip rule 9000 跳过 tun 路由表
+SINGBOX_OUTPUT_MARK=0x2024
+# Open-Box 的放行位(内核 1.14.1-openbox-tcp15 起认,见 system/entry-bypass.mjs):进内核前放行的流量只按位或上这一位,
+# 别的位(mwan3 记在连接上的线路等)原样留着,怎么走交给路由器自己的路由
+OPENBOX_PASS_MARK=0x02000000
+NFT_TABLE="inet openbox"
+# 内核正常收尾要做的事不少:删自己的 nft 表和路由、把直连应答放行的地址存档、关 tun。procd 默认只给 5 秒,
+# 到点就强杀;iStoreOS 这类机器上常常收不完(#386 日志里「close inbound/tun take too much time」和「not stopped
+# on SIGTERM, sending SIGKILL」在同一秒,正式路由器升级时也出现过)。给 15 秒,和 Debian 单元的 TimeoutStopSec 一样
+OPENBOX_TERM_TIMEOUT=15
+# 内核的 tun 网卡名(和 panel/server/engine/tun-options.mjs 的 TUN_INTERFACE_NAME 一致)
+OPENBOX_TUN=openbox-tun
+
+openbox_dnsmasq_mode() {
+	if [ -f "$CONF_META" ]; then
+		grep -qE "\"dnsMode\": *\"dnsmasq\"" "$CONF_META" 2>/dev/null
+		return $?
+	fi
+	grep -qE "\"tag\": *\"$DNSMASQ_OUTBOUND_TAG\"" "$CONF" 2>/dev/null
+}
+
+# dnsmasq 读的 conf-dir:uci 设了 confdir 就用它(逗号后面是过滤规则),没设按 dnsmasq 初始化脚本的默认
+# /tmp/dnsmasq.<段名>.d。和 dns-takeover.mjs 的 dnsmasqConfDir 同一个算法
+openbox_dnsmasq_confdir() {
+	_ob_dir="$(uci -q get dhcp.@dnsmasq[0].confdir | cut -d, -f1)"
+	case "$_ob_dir" in
+		/*) echo "$_ob_dir"; return 0 ;;
+	esac
+	_ob_sec="$(uci -q show dhcp.@dnsmasq[0] | sed -n 's/^dhcp\.\([^.=]*\)=dnsmasq.*/\1/p' | head -n 1)"
+	echo "/tmp/dnsmasq${_ob_sec:+.$_ob_sec}.d"
+}
+
+# procd 里内核实例当前的 PID;没在跑(崩了、或重试用完放弃)就是空
+openbox_instance_pid() {
+	ubus call service list '{"name":"openbox"}' 2>/dev/null | sed -n 's/.*"pid": *\([0-9][0-9]*\).*/\1/p' | head -n 1
+}
+
+# 内核起不来时把 dnsmasq 还给系统。procd 重试 5 次放弃后不会调 stop,接管若留着,dnsmasq
+# 就一直指着一个死掉的 127.0.0.1#7853 且 noresolv=1——全 LAN 无解析,比"代理没起来"糟得多。
+# 起一个后台小循环盯 60 秒:同一个 PID 连续 5 次(10 秒)都在就放心退出;到点还没稳住就做
+# 一次完整清理(和 stop 一样:还原 dnsmasq、撤 v6 拦截、删标记表)。只在 dnsmasq 模式下需要。
+# 判断依据必须是 PID 稳定而不是 status 文本:配置坏了时 procd 每 5 秒重拉一次,status
+# 在两次崩溃之间照样报 running,看文本会被骗过去(实测)。
+openbox_watch_start() {
+	openbox_dnsmasq_mode || return 0
+	(
+		# 脱离调用方的会话:从 ssh 手动 restart 时会话一结束 SIGHUP 会把它带走
+		trap '' HUP INT TERM
+		# 放开 rc.common 的锁:procd_lock 是 `exec 1000>锁文件; flock 1000`,这个子 shell 会把
+		# fd 1000 一起继承过来,锁就跟着它活到退出(约 12 秒)。期间任何 /etc/init.d/openbox
+		# status 都得干等——面板每次部署重启内核后看一眼状态,就白白卡这 12 秒(实测)。
+		exec 1000>&- 2>/dev/null
+		_ob_up=0
+		_ob_i=0
+		_ob_last=""
+		while [ "$_ob_i" -lt 30 ]; do
+			sleep 2
+			_ob_i=$((_ob_i + 1))
+			_ob_pid="$(openbox_instance_pid)"
+			if [ -n "$_ob_pid" ] && [ "$_ob_pid" = "$_ob_last" ]; then
+				_ob_up=$((_ob_up + 1))
+				[ "$_ob_up" -ge 5 ] && exit 0
+			else
+				_ob_up=0
+			fi
+			_ob_last="$_ob_pid"
+		done
+		if [ -z "$(openbox_instance_pid)" ]; then
+			logger -t openbox "sing-box did not stay up after start; restoring dnsmasq upstream" 2>/dev/null
+			openbox_cleanup
+		fi
+	) </dev/null >/dev/null 2>&1 &
+}
+
+# dnsmasq 查询日志那两行(受管文件里,面板开着域名过滤时加的)。dnsmasq 已经有别处设了日志去向 / 查询日志——uci 选项、固件自带的
+# /etc/dnsmasq.conf(常见 log-facility=/dev/null)、init 脚本生成的 /var/etc/dnsmasq.conf.*、conf-dir 里别的文件——再加一行
+# log-facility,dnsmasq 2.9x 直接拒绝启动(illegal repeated keyword),DNS 和 DHCP 一起停(GitHub #286)。
+# 和 dns-takeover.mjs 的 userDnsmasqLogging 同一个判断;$1 是 conf-dir
+openbox_dnsmasq_logging_conflict() {
+	[ "$(uci -q get dhcp.@dnsmasq[0].logqueries)" = "1" ] && return 0
+	[ -n "$(uci -q get dhcp.@dnsmasq[0].logfacility)" ] && return 0
+	for _ob_f in $DNSMASQ_CONF_FILES "$1"/*; do
+		[ -f "$_ob_f" ] || continue
+		[ "${_ob_f##*/}" = "$DNSMASQ_FORWARD_CONF" ] && continue
+		grep -qE '^[ 	]*log-(facility|queries)([ 	=]|$)' "$_ob_f" && return 0
+	done
+	return 1
+}
+openbox_strip_query_log() {
+	[ -f "$1" ] || return 0
+	grep -vxF -e 'log-queries=extra' -e "log-facility=$DNSMASQ_QUERY_LOG" "$1" > "$1.ob-new"
+	if [ -s "$1.ob-new" ]; then mv -f "$1.ob-new" "$1"; else rm -f "$1.ob-new" "$1"; fi
+}
+# 重启 dnsmasq;受管文件里带着查询日志时确认它真起来了(配置有错时一启动就退出、procd 隔几秒再拉),没起来就撤掉那两行、
+# 记下失败、再重启一次
+openbox_dnsmasq_restart() {
+	/etc/init.d/dnsmasq restart >/dev/null 2>&1
+	_ob_q="$(openbox_dnsmasq_confdir)/$DNSMASQ_FORWARD_CONF"
+	grep -qx "log-facility=$DNSMASQ_QUERY_LOG" "$_ob_q" 2>/dev/null || return 0
+	_ob_miss=0
+	for _ob_i in 1 2 3 4; do
+		sleep 1
+		pidof dnsmasq >/dev/null 2>&1 || _ob_miss=$((_ob_miss + 1))
+	done
+	[ "$_ob_miss" -lt 2 ] && return 0
+	openbox_strip_query_log "$_ob_q"
+	openbox_strip_query_log "$DNSMASQ_FORWARD_SRC"
+	echo "dnsmasq 加上查询日志后起不来,开机重放时已自动去掉 $(date)" > "$DNSMASQ_QUERY_LOG_FAILED"
+	rm -f "$DNSMASQ_QUERY_LOG"
+	/etc/init.d/dnsmasq restart >/dev/null 2>&1
+	logger -t openbox "dnsmasq did not start with the query log lines; removed them" 2>/dev/null
+}
+
+# 这份配置是 dnsmasq 分流模式时,确保 dnsmasq 的上游指向内核。
+# 为什么要在这里做:干净重启时 K10 的 stop 会按设计把接管还原(内核死了不能让全 LAN 无解析),
+# 开机 S99 只用 procd 拉起内核、没人重新接管——dnsmasq 走运营商上游,被内核 nft 的
+# output 链 DNAT 回 172.19.0.2,内核再按规则回送给 dnsmasq,打环到全 LAN 超时、内核内存
+# 冲到几百 MB(2026-09-04 正式路由器)。有面板写的状态文件就照抄,没有就全局接管兜底。
+# 状态文件第一行 plan=none|domains|all(dns-takeover.mjs 写):none 是面板明确要求"一个都不转发,
+# 原 DNS 原样"——那就什么都不动,不能再拿"没有上游条目"当成"全量接管兜底"(全部直连的档案
+# 每次启动都会被重新接管,面板显示 none、实际 dnsmasq 又指回内核)。没有状态文件才是老版本
+# 没记录,照旧全量接管兜底。
+# 幂等:已经是目标状态就一个字不动,面板 deploy 之后的 restart 不会多重启一次 dnsmasq。
+openbox_apply_takeover() {
+	openbox_dnsmasq_mode || return 0
+	command -v uci >/dev/null 2>&1 || return 0
+	_ob_want=""
+	_ob_want_noresolv=""
+	_ob_plan=""
+	if [ -f "$DNSMASQ_TAKEOVER" ]; then
+		while IFS= read -r _ob_line || [ -n "$_ob_line" ]; do
+			case "$_ob_line" in
+				plan=*) _ob_plan="${_ob_line#plan=}" ;;
+				server=*) _ob_want="$_ob_want ${_ob_line#server=}" ;;
+				noresolv=1) _ob_want_noresolv=1 ;;
+			esac
+		done < "$DNSMASQ_TAKEOVER"
+	fi
+	[ "$_ob_plan" = "none" ] && return 0
+	# 状态文件不在(部署失败回滚时会被删掉)但元数据写着这份配置的 DNS 计划是 none:同样什么都不动。
+	# 只有两边都没有记录才是老版本留下的现场
+	if [ -z "$_ob_plan" ] && [ -f "$CONF_META" ] && grep -qE "\"dnsForward\": *\"none\"" "$CONF_META" 2>/dev/null; then
+		return 0
+	fi
+	_ob_have_noresolv="$(uci -q get dhcp.@dnsmasq[0].noresolv)"
+	[ "$_ob_have_noresolv" = "1" ] || _ob_have_noresolv=""
+	_ob_confdir="$(openbox_dnsmasq_confdir)"
+	_ob_installed="$_ob_confdir/$DNSMASQ_FORWARD_CONF"
+	# 两种接管模式都重放受管文件:all 没有逐域名 server 条目,但仍需要重写的 rebind 例外。
+	_ob_restart=""
+	if [ -f "$DNSMASQ_FORWARD_SRC" ]; then
+		if [ ! -f "$_ob_installed" ] || [ "$(md5sum < "$DNSMASQ_FORWARD_SRC")" != "$(md5sum < "$_ob_installed")" ]; then
+			mkdir -p "$_ob_confdir"
+			cp "$DNSMASQ_FORWARD_SRC" "$_ob_installed"
+			_ob_restart=1
+		fi
+	elif [ -f "$_ob_installed" ]; then
+		rm -f "$_ob_installed"
+		_ob_restart=1
+	fi
+	# 受管文件要 dnsmasq 记查询日志:dnsmasq 别处已经设了日志(或者上次加上后没起来)就先把那两行去掉,不然 dnsmasq 起不来;
+	# 否则日志文件还不在(开机时 /tmp 是空的)就先指向 /dev/null 再重启 dnsmasq——面板还没起来、没人读的时候不能让它往 /tmp 里
+	# 一直写。面板起来后会换成普通文件(dnsmasq-query-log.mjs)
+	if [ -f "$_ob_installed" ] && grep -qx "log-facility=$DNSMASQ_QUERY_LOG" "$_ob_installed"; then
+		if [ -f "$DNSMASQ_QUERY_LOG_FAILED" ] || openbox_dnsmasq_logging_conflict "$_ob_confdir"; then
+			openbox_strip_query_log "$_ob_installed"
+			openbox_strip_query_log "$DNSMASQ_FORWARD_SRC"
+			_ob_restart=1
+		elif [ ! -e "$DNSMASQ_QUERY_LOG" ]; then
+			mkdir -p "${DNSMASQ_QUERY_LOG%/*}"
+			ln -sf /dev/null "$DNSMASQ_QUERY_LOG"
+		fi
+	fi
+	# 按域名转发:uci 里是用户自己的上游,一个字不碰;只保证转发文件在 conf-dir 里(那是 /tmp,开机是空的)
+	# 且和正本一致、noresolv 和状态文件一致。都对就不重启 dnsmasq
+	if [ "$_ob_plan" = "domains" ]; then
+		if [ "$_ob_want_noresolv" != "$_ob_have_noresolv" ]; then
+			if [ -n "$_ob_want_noresolv" ]; then
+				uci -q set dhcp.@dnsmasq[0].noresolv=1
+			else
+				uci -q delete dhcp.@dnsmasq[0].noresolv
+			fi
+			uci -q commit dhcp
+			_ob_restart=1
+		fi
+		[ -n "$_ob_restart" ] && openbox_dnsmasq_restart
+		return 0
+	fi
+	# 全量接管(plan=all / 老版本没记录):上游只能剩内核这一个,noresolv=1。比的是完整列表——只看
+	# 我们自己的条目在不在,列表里混着原上游也会被当成"已经到位"而放过(复审 S1):dnsmasq 会挑
+	# "最快的"那台去问,走代理的域名就被原上游答了
+	[ -z "$_ob_want" ] && _ob_want=" $OPENBOX_DNS_UPSTREAM"
+	_ob_want_noresolv=1
+	_ob_have="$(uci -q get dhcp.@dnsmasq[0].server)"
+	if [ "$(printf '%s\n' $_ob_want | sort)" = "$(printf '%s\n' $_ob_have | sort)" ] \
+		&& [ "$_ob_want_noresolv" = "$_ob_have_noresolv" ] && [ -z "$_ob_restart" ]; then
+		return 0
+	fi
+	# 备份文件是 stop 清理与面板还原的依据:第一次接管前先留底
+	if [ ! -f "$DNSMASQ_BACKUP" ]; then
+		mkdir -p "$DATA"
+		uci -q show dhcp.@dnsmasq[0] > "$DNSMASQ_BACKUP"
+	fi
+	uci -q delete dhcp.@dnsmasq[0].server
+	for _ob_server in $_ob_want; do
+		uci -q add_list dhcp.@dnsmasq[0].server="$_ob_server"
+	done
+	uci -q set dhcp.@dnsmasq[0].noresolv=1
+	uci -q commit dhcp
+	openbox_dnsmasq_restart
+	echo "openbox: dnsmasq upstream re-pointed to sing-box ($_ob_want )" >&2
+}
+
+# 进内核之前就放行的端口 / 终端(GitHub #183 #187):面板部署时生成的 nft 链正文(不含 table 外壳,
+# server/system/entry-bypass.mjs)。只认规则里会出现的字符,混进别的东西整份不装
+ENTRY_BYPASS="$OPENBOX_ROOT/etc/entry-bypass.nft"
+openbox_entry_bypass() {
+	[ -s "$ENTRY_BYPASS" ] || return 0
+	grep -q '[^A-Za-z0-9 	{}.,:;!="_@/-]' "$ENTRY_BYPASS" && return 0
+	cat "$ENTRY_BYPASS"
+}
+
+# Open-Box 自己的 nft 表(inet openbox),起内核前按需整张重建;都不需要就不建。表里的规则都是给包和连接或上
+# 放行位 $OPENBOX_PASS_MARK:内核的 auto_redirect 链看到它就 return,下面那两条策略路由让它不进 tun 表。
+# - dns_out(只在 dnsmasq 分流模式装,防打环):dnsmasq 自己发往外部上游的查询打上放行位,内核的 nft 就不再把它
+#   DNAT 回 172.19.0.2。正常接管时 dnsmasq 只问 127.0.0.1#7853(走 lo,本就不会被 DNAT);按域名转发时其余域名
+#   交给路由器上游、以及接管丢失的异常情况,都靠这条不打环。劫持模式本来就要让路由器自己的解析进内核,不装。
+# - entry_bypass_in / entry_bypass_out(面板生成的,见上):放行端口、按 IP 的不进内核 / 白名单
+# 这张表防火墙重载不动它;restart 不清理(见 restart()),所以这里先删再建
+# 给内核自身流量的标记补一条**终止查找**的策略路由(GitHub #157)。
+#
+# sing-box 的 auto_route 自己会装 `9000: from all fwmark <output mark> goto 9002` + `9002: nop`,
+# 意思是"带这个标记的包跳过 tun 表",但 goto 一个 nop **不终止查找** —— 后面还有什么规则就接着匹配。
+# GL.iNet 固件开了 VPN 策略路由 / 断网保护时,后面正好是两条黑洞:
+#   9910: not from all fwmark 0/0xf000 blackhole     (0x2024 & 0xf000 = 0x2000 ≠ 0,命中)
+#   9920: from all iif br-lan blackhole              (进内核前放行的局域网包,iif 正是 br-lan)
+# 于是内核自己发出去的每一个连接、以及所有"进内核前放行"的流量,全部 no route to host ——
+# 报告者的日志里直连国内 IP 都不通,就是这么来的。
+#
+# 补一条优先级在 9000 之前、直接 `lookup main` 的规则,查找就在 main 表结束,到不了那些黑洞。
+# 普通固件上结果不变(本来也是落到 32766 main)。这条只管内核自己的流量。
+#
+# 进内核前放行的流量(带放行位 $OPENBOX_PASS_MARK)交给路由器自己的路由,只补两条不让它进 tun 表的:
+#   8998: fwmark <放行位>/<放行位> goto 9010   纯 tun 兼容模式下 sing-box 的 9000~9009 会把局域网的包全拉进 tun 表,
+#         跳到它的 9010 nop 之后接着按路由器的规则走;auto_redirect 模式下没有 9010,这条是 [unresolved],不生效
+#   32767(排在系统的 lookup default 之后): fwmark <放行位>/<放行位> unreachable   主表、default 表都查不到路由时到此为止,
+#         不掉进 auto_redirect 的兜底规则 `32768: not from all fwmark 0x2024 lookup <tun 表>`
+# mwan3 的规则(1001~3002)排在这些之前,带 mwan3 标记的包照 mwan3 走。放行位避开了上面 GL.iNet 那条的 0xf000。
+OPENBOX_MARK_RULE_PREF=8999
+OPENBOX_PASS_RULE_PREF=8998
+OPENBOX_PASS_SKIP_TO=9010
+OPENBOX_PASS_LAST_PREF=32767
+
+openbox_apply_mark_rule() {
+	command -v ip >/dev/null 2>&1 || return 0
+	openbox_clear_mark_rule
+	ip rule add pref $OPENBOX_MARK_RULE_PREF fwmark $SINGBOX_OUTPUT_MARK lookup main >/dev/null 2>&1
+	ip -6 rule add pref $OPENBOX_MARK_RULE_PREF fwmark $SINGBOX_OUTPUT_MARK lookup main >/dev/null 2>&1
+	for _ob_ip in "ip" "ip -6"; do
+		$_ob_ip rule add pref $OPENBOX_PASS_RULE_PREF fwmark $OPENBOX_PASS_MARK/$OPENBOX_PASS_MARK goto $OPENBOX_PASS_SKIP_TO >/dev/null 2>&1
+		$_ob_ip rule add pref $OPENBOX_PASS_LAST_PREF fwmark $OPENBOX_PASS_MARK/$OPENBOX_PASS_MARK unreachable >/dev/null 2>&1
+	done
+	return 0
+}
+
+openbox_clear_mark_rule() {
+	command -v ip >/dev/null 2>&1 || return 0
+	while ip rule del pref $OPENBOX_MARK_RULE_PREF >/dev/null 2>&1; do :; done
+	while ip -6 rule del pref $OPENBOX_MARK_RULE_PREF >/dev/null 2>&1; do :; done
+	# 32767 上还有系统自己的 lookup default:只按放行位那条的条件删,不能光按优先级删
+	for _ob_ip in "ip" "ip -6"; do
+		while $_ob_ip rule del pref $OPENBOX_PASS_RULE_PREF fwmark $OPENBOX_PASS_MARK/$OPENBOX_PASS_MARK >/dev/null 2>&1; do :; done
+		while $_ob_ip rule del pref $OPENBOX_PASS_LAST_PREF fwmark $OPENBOX_PASS_MARK/$OPENBOX_PASS_MARK unreachable >/dev/null 2>&1; do :; done
+	done
+	return 0
+}
+
+openbox_apply_nft() {
+	command -v nft >/dev/null 2>&1 || return 0
+	nft delete table $NFT_TABLE >/dev/null 2>&1
+	_ob_uid=""
+	openbox_dnsmasq_mode && _ob_uid="$(id -u dnsmasq 2>/dev/null)"
+	_ob_entry="$(openbox_entry_bypass)"
+	[ -n "$_ob_uid" ] || [ -n "$_ob_entry" ] || return 0
+	{
+		echo "table $NFT_TABLE {"
+		if [ -n "$_ob_uid" ]; then
+			echo "	chain dns_out {"
+			echo "		type filter hook output priority -150; policy accept;"
+			echo "		meta skuid $_ob_uid meta l4proto { tcp, udp } th dport 53 meta mark set meta mark or $OPENBOX_PASS_MARK ct mark set ct mark or $OPENBOX_PASS_MARK"
+			echo "	}"
+		fi
+		[ -n "$_ob_entry" ] && echo "$_ob_entry"
+		echo "}"
+	} | nft -f - >/dev/null 2>&1 || echo "openbox: failed to install nft table $NFT_TABLE" >&2
+}
+
+# auto_redirect 在 nft 里用到的表达式各自是一个内核模块(queue / nat / redir / tproxy / socket / fib)。装的时候
+# 预检会 modprobe 一次,但重启后没人再加载它们,nft 提交规则时内核找不到模块就回 ENOENT:
+#   auto-redirect: setup nftables: flush nftables: conn.Receive: netlink receive: no such file or directory
+# (GitHub #225 的 N1:lsmod 里有 nfnetlink_queue、没有 nft_queue)。起内核前挨个 modprobe 一遍,没装的模块
+# 静默跳过——缺了就还是走降级纯 tun 那条路,面板会说明
+openbox_load_modules() {
+	for _ob_mod in tun nft_queue nft_nat nft_redir nft_tproxy nft_socket nft_fib_inet nft_ct; do
+		[ -d "/sys/module/$_ob_mod" ] || modprobe "$_ob_mod" >/dev/null 2>&1
+	done
+}
+
+# 内核的 auto_redirect 会自己建一张 `inet sing-box` 表。正常退出时它会删掉,但被强杀、
+# OOM 或崩溃时不会——开发路由器上实测:进程早就没了,表还在。留着的表会让下一次启动在
+# 建同名表时撞上已存在的对象,内核直接 FATAL:
+#   auto-redirect: setup nftables: flush nftables: conn.Receive: netlink receive: file exist
+# 而且这个状态自我维持:每次启动都撞同一张表,一直起不来(网友实测:开 IPv6 之后卡在这里)。
+# 所以起内核之前先把上一次的残留清掉。
+# 只在**没有任何 sing-box 在跑**时才清:这张表的名字是内核写死的,机器上要是还跑着别的
+# sing-box(passwall 之类),那张表是它的,不能动。
+openbox_clean_stale_nft() {
+	command -v nft >/dev/null 2>&1 || return 0
+	pgrep sing-box >/dev/null 2>&1 && return 0
+	nft list table inet sing-box >/dev/null 2>&1 || return 0
+	echo "openbox: removing stale nftables table left by a previous kernel run" >&2
+	nft delete table inet sing-box >/dev/null 2>&1
+	return 0
+}
+
+# 别的代理工具在跑就不起内核(GitHub #426;用户 2026-10-05:检测到其他代理工具就禁止启动,并明确提示)。同一台路由器上
+# 不能同时运行两个代理工具:都要接管防火墙、DNS、路由,PassWall 挂在 fw4 上的脚本还让每次防火墙重载拖几十秒,内核卡在
+# 启动、面板里看着在跑其实不工作。面板的部署流程也查(panel/server/system/conflicts.mjs),这里管不经过面板的启动:
+# 开机自启、LuCI / SSH 里的 /etc/init.d/openbox start|restart。名单和认法与面板一致(initd-contract 测试核对):装着这个
+# 插件,并且有进程的命令行里带它的运行目录。[x] 的写法免得认到别的正在搜这些路径的 grep
+openbox_conflict_running() {
+	# $1 插件的 init 脚本名;$2 它的进程命令行里会出现的运行目录(扩展正则)
+	[ -f "/etc/init.d/$1" ] || return 1
+	grep -qsE "$2" /proc/[0-9]*/cmdline 2>/dev/null
+}
+
+# 在跑的代理工具的名字,用「、」连起来;没有就是空
+openbox_conflicts() {
+	_ob_c=""
+	openbox_conflict_running openclash '/etc/[o]penclash/' && _ob_c="${_ob_c:+${_ob_c}、}OpenClash"
+	openbox_conflict_running nikki '/etc/[n]ikki/' && _ob_c="${_ob_c:+${_ob_c}、}Nikki"
+	openbox_conflict_running passwall '/(tmp|var)/etc/[p]asswall/' && _ob_c="${_ob_c:+${_ob_c}、}PassWall"
+	openbox_conflict_running passwall2 '/(tmp|var)/etc/[p]asswall2/' && _ob_c="${_ob_c:+${_ob_c}、}PassWall2"
+	openbox_conflict_running shadowsocksr '/(tmp|var)/etc/([s]srplus|[s]hadowsocksr)/' && _ob_c="${_ob_c:+${_ob_c}、}ShadowSocksR Plus+"
+	openbox_conflict_running homeproxy '/(tmp|var)/run/[h]omeproxy/' && _ob_c="${_ob_c:+${_ob_c}、}HomeProxy"
+	echo "$_ob_c"
+}
+
+# 有别的代理工具在跑就返回 1(不该起内核)。看到之后隔 2 秒再看一眼,两次都在才算:插件的界面 / 定时任务偶尔会临时跑一下
+# 它目录下的程序(查版本之类)。拒绝时把接管撤干净:上一次留下的 DNS 接管还指着内核,不撤的话整个局域网解析不了
+openbox_refuse_if_conflict() {
+	_ob_conflicts="$(openbox_conflicts)"
+	[ -n "$_ob_conflicts" ] || return 0
+	sleep 2
+	_ob_conflicts="$(openbox_conflicts)"
+	[ -n "$_ob_conflicts" ] || return 0
+	_ob_msg="检测到 $_ob_conflicts 正在运行。同一台路由器上不能同时运行两个代理工具,会互相冲突,Open-Box 不启动内核。请先停用 $_ob_conflicts(关掉它的主开关或卸载)再启动。"
+	echo "openbox: $_ob_msg" >&2
+	logger -t openbox "$_ob_msg" 2>/dev/null
+	openbox_cleanup
+	return 1
+}
+
+start_service() {
+	# 注意:procd 的 rc_procd 包装(procd_open_service; "$@"; procd_close_service)
+	# 会吞掉这里的返回码——即使 return 1,上游 rc.common 的 start 在 USE_PROCD=1 下
+	# 仍可能退出 0。下面的检查与 echo 只用于日志排障,不能作为成败判据;精确归因
+	# 交给面板侧 deployConfig 在重启内核前的预检(检查二进制与配置文件是否存在)。
+	if [ ! -x "$BIN" ]; then
+		echo "openbox: sing-box binary not found at $BIN" >&2
+		return 1
+	fi
+	if [ ! -f "$CONF" ]; then
+		echo "openbox: config not found at $CONF" >&2
+		return 1
+	fi
+
+	# 别的代理工具在跑:不起内核(上面那条注释:返回码会被吞,不能当成败判据;面板看的是冲突检测和内核状态)
+	openbox_refuse_if_conflict || return 1
+
+	# 没加载 tun 模块的固件上内核起不来(open /dev/net/tun: no such file),开机自启这条路
+	# 不经过面板的预检,这里也试着加载一次;真没有这个模块就交给内核自己报错
+	[ -e /dev/net/tun ] || modprobe tun >/dev/null 2>&1
+
+	openbox_clean_stale_nft
+	openbox_apply_takeover
+	openbox_load_modules
+	openbox_apply_nft
+	openbox_apply_mark_rule
+
+	procd_open_instance openbox
+	procd_set_param command "$BIN" run -c "$CONF" -D "$DATA"
+	# 直连应答放行的开关文件(内核 tcp10 起):面板在入口白名单模式时建它,内核的 DNS 直连侧应答发出前按它决定写不写
+	# 入口放行集合(panel/server/system/direct-answer-bypass.mjs)
+	procd_set_param env OPENBOX_DIRECT_ANSWER_FLAG="$DATA/flip/direct-answer.on"
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	procd_set_param respawn 3600 5 5
+	procd_set_param term_timeout "$OPENBOX_TERM_TIMEOUT"
+	procd_set_param limits core="unlimited" nofile="65535 65535"
+	procd_close_instance
+
+	openbox_watch_start
+}
+
+# 停止后让系统回到"能正常上网"的状态:
+# - 摘掉指向已死内核的 dnsmasq 上游(否则全 LAN DNS 中断);整体接管与按域名转发
+#   两种形态都要摘
+# - 删掉 noresolv=1(不删的话是"既不许用 resolv.conf 也没有上游",比接管前更坏,
+#   全 LAN DNS 彻底无解析;删掉后 dnsmasq 回退到 WAN 下发的 resolv.conf)
+# - 移除 IPv6 拦截(内核已停,再拦只会断掉用户的 v6)
+# - 刻意保留面板放行规则:那是用户访问恢复界面的通道
+# 仅在确有变更时才 commit/重启 dnsmasq 与 firewall:默认 hijack 模式从不碰 dnsmasq,
+# 无脑 commit 既会造成一次无意义的全 LAN 解析瞬断,还会顺带提交用户在别处暂存的改动。
+openbox_cleanup() {
+	openbox_clear_mark_rule
+	# 按域名转发的转发文件(在 dnsmasq 的 conf-dir 里)先拿掉:它指向的内核马上就没了。有备份的话下面
+	# 的 uci 还原会一起重启 dnsmasq;没有备份(domains 期间 uci 本来就是用户的)就单独重启一次
+	_ob_installed="$(openbox_dnsmasq_confdir)/$DNSMASQ_FORWARD_CONF"
+	_ob_had_forward=""
+	if [ -f "$_ob_installed" ]; then
+		rm -f "$_ob_installed"
+		_ob_had_forward=1
+	fi
+	# 仅当我们确实接管过 dnsmasq 时才动它:备份文件存在 <=> 接管发生过。
+	# hijack 模式从不碰 dnsmasq,此处必须完全不作为,否则会清掉用户自己设的
+	# noresolv(AdGuard Home / Pi-hole 之类会自行设置)、或者仅因用户自己配置了
+	# server 列表就触发一次无谓的 uci commit + dnsmasq 重启。
+	if [ -f "$DNSMASQ_BACKUP" ]; then
+		# 按备份把 dnsmasq 还原到接管前:整段清空后重建 server 列表和 noresolv——和面板的
+		# restoreDnsTakeover 同一语义。以前只摘掉我们自己写的条目、删掉 noresolv:接管前用户若配置了
+		# 显式上游(server=9.9.9.9 + noresolv=1),停止之后上游列表就是空的,原值只留在备份里——
+		# 没有 WAN 自动 DNS 的设备(禁用 peerdns、静态组网)从此没有解析,有 WAN DNS 的也被改了路径。
+		# 备份是 `uci -q show dhcp.@dnsmasq[0]` 的原样输出:list 值形如 .server='1.1.1.1' '8.8.8.8',
+		# 每个值单独加引号、空格分隔;noresolv 形如 .noresolv='1'。
+		uci -q delete dhcp.@dnsmasq[0].server
+		uci -q delete dhcp.@dnsmasq[0].noresolv
+		_ob_noresolv=""
+		while IFS= read -r _ob_line || [ -n "$_ob_line" ]; do
+			case "$_ob_line" in
+				*.server=*)
+					_ob_rhs="${_ob_line#*.server=}"
+					while [ -n "$_ob_rhs" ]; do
+						case "$_ob_rhs" in
+							"'"*) _ob_rhs="${_ob_rhs#\'}"; _ob_val="${_ob_rhs%%\'*}"; _ob_rhs="${_ob_rhs#*\'}"; _ob_rhs="${_ob_rhs# }" ;;
+							*) _ob_val="$_ob_rhs"; _ob_rhs="" ;;
+						esac
+						[ -n "$_ob_val" ] && uci -q add_list dhcp.@dnsmasq[0].server="$_ob_val"
+					done
+					;;
+				*.noresolv=*)
+					_ob_noresolv="${_ob_line#*.noresolv=}"
+					_ob_noresolv="${_ob_noresolv#\'}"
+					_ob_noresolv="${_ob_noresolv%\'}"
+					;;
+			esac
+		done < "$DNSMASQ_BACKUP"
+		[ -n "$_ob_noresolv" ] && uci -q set dhcp.@dnsmasq[0].noresolv="$_ob_noresolv"
+		if [ -n "$(uci -q changes dhcp)" ]; then
+			# commit 成功(dnsmasq 真的回到接管前)才删备份;闪存写满 commit 失败就把暂存的改动
+			# 撤掉、备份留着,下次 stop 或面板还原还能重来
+			if uci -q commit dhcp; then
+				/etc/init.d/dnsmasq restart >/dev/null 2>&1
+				rm -f "$DNSMASQ_BACKUP"
+			else
+				uci -q revert dhcp
+				echo "openbox: uci commit dhcp failed; keeping $DNSMASQ_BACKUP for retry" >&2
+			fi
+		else
+			rm -f "$DNSMASQ_BACKUP"
+			[ -n "$_ob_had_forward" ] && /etc/init.d/dnsmasq restart >/dev/null 2>&1
+		fi
+	elif [ -n "$_ob_had_forward" ]; then
+		/etc/init.d/dnsmasq restart >/dev/null 2>&1
+	fi
+	# 受管文件拿掉、dnsmasq 重启过之后,查询日志没人写了
+	rm -f "$DNSMASQ_QUERY_LOG"
+
+	uci -q delete firewall.openbox_tun_forward
+	uci -q delete firewall.openbox_tun_input
+	uci -q delete firewall.openbox_v6block
+	if [ -n "$(uci -q changes firewall)" ]; then
+		uci -q commit firewall
+		/etc/init.d/firewall reload >/dev/null 2>&1
+	fi
+
+	# 内核停了,dnsmasq 已回到自己的上游,打标记的兜底也一起撤
+	command -v nft >/dev/null 2>&1 && nft delete table $NFT_TABLE >/dev/null 2>&1
+	return 0
+}
+
+# 停止时默认做安全清理;但 restart 不应该清理——上游 rc.common 在 USE_PROCD=1 下
+# restart() 仍是 stop; start,而 stop 会调用 stop_service。不跳过的话,面板每次
+# deployConfig 重启内核,都会被这里自己撤掉刚刚下发的 DNS 接管与 IPv6 拦截。
+OPENBOX_SKIP_CLEANUP=0
+
+stop_service() {
+	[ "$OPENBOX_SKIP_CLEANUP" = "1" ] && return 0
+	openbox_cleanup
+}
+
+# procd 的 stop 只发 SIGTERM 就返回;紧接着的 start 让 procd 在旧进程一退出(或到点被强杀)时马上拉起新的。旧内核
+# 被强杀时 tun 网卡、路由还在拆,新内核建路由会失败(#386:set routes: add route 56: no route to host),或者
+# auto_redirect 起不来被面板降级成纯 tun(#383 #378);面板这时查状态看到的还是没退出的旧进程,报「启动成功」
+# 其实没在工作。所以 restart 先等旧进程真的退出、tun 网卡没了再起。$1 是 stop 之前 procd 记的旧进程号
+openbox_wait_kernel_gone() {
+	# 不支持小数的 sleep(极简 busybox)就按整秒等
+	if sleep 0.1 2>/dev/null; then _ob_tick=0.2; _ob_per=5; else _ob_tick=1; _ob_per=1; fi
+	_ob_n=0
+	if [ -n "$1" ]; then
+		while [ -d "/proc/$1" ] && [ "$_ob_n" -lt $(( (OPENBOX_TERM_TIMEOUT + 3) * _ob_per )) ]; do
+			sleep "$_ob_tick"
+			_ob_n=$((_ob_n + 1))
+		done
+	fi
+	_ob_n=0
+	while [ -e "/sys/class/net/$OPENBOX_TUN" ] && [ "$_ob_n" -lt $(( 5 * _ob_per )) ]; do
+		sleep "$_ob_tick"
+		_ob_n=$((_ob_n + 1))
+	done
+	return 0
+}
+
+restart() {
+	OPENBOX_SKIP_CLEANUP=1
+	_ob_old_pid="$(openbox_instance_pid)"
+	stop
+	openbox_wait_kernel_gone "$_ob_old_pid"
+	OPENBOX_SKIP_CLEANUP=0
+	start
+}

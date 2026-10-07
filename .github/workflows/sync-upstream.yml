@@ -1,0 +1,103 @@
+name: Sync upstream
+
+# 上游 liandu2024/Open-Box 出新版本时,把它 release 包里的文件同步过来(含编译后的前端和 *.so),
+# 仓库地址换回自己的,直接提交到目标分支。
+# 内核不在这里处理:release.yml 每次构建都会自动取上游 Latest 的 x64 / arm64 内核。
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 指定上游版本(留空 = Latest)
+        required: false
+        default: ''
+      force:
+        description: 版本相同也强制重新同步
+        type: boolean
+        default: false
+  schedule:
+    - cron: '17 */6 * * *'
+
+permissions:
+  contents: write
+
+env:
+  UPSTREAM_REPO: liandu2024/Open-Box
+  OWN_REPO: timeflysoon/Open-Box
+  BASE_BRANCH: ${{ vars.SYNC_BASE_BRANCH || 'catch-up-upstream' }}
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.BASE_BRANCH }}
+
+      - name: Sync files from upstream release
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          set -eu
+
+          # 1. 定下上游版本
+          tag="$INPUT_TAG"
+          if [ -z "$tag" ]; then
+            tag=$(curl -sI --retry 3 --connect-timeout 20 "https://github.com/$UPSTREAM_REPO/releases/latest" \
+              | tr -d '\r' | sed -n 's/^[Ll]ocation: .*\/releases\/tag\/\(v[0-9][0-9A-Za-z._-]*\).*/\1/p' | head -n 1)
+          fi
+          case "$tag" in v[0-9]*) ;; *) echo "无法确定上游版本:「$tag」" >&2; exit 1 ;; esac
+          echo "上游版本:$tag"
+
+          last=$(cat .upstream-synced 2>/dev/null || true)
+          if [ "$last" = "$tag" ] && [ "$FORCE" != true ]; then
+            echo "已同步到 $tag,无需处理"
+            exit 0
+          fi
+
+          # 2. 下载 app 组件(含 openwrt、debian、panel、update.sh、uninstall.sh),校验 sha256
+          base="https://github.com/$UPSTREAM_REPO/releases/download/$tag"
+          curl -fsSL --retry 3 -o components.json "$base/open-box-$tag-linux-x64-components.json"
+          set -- $(python3 -c 'import json,sys;a=json.load(open(sys.argv[1]))["components"]["app"];print(a["asset"],a["sha256"])' components.json)
+          asset=$1; sha=$2
+          curl -fsSL --retry 3 -o app.tar.gz "$base/$asset"
+          echo "$sha  app.tar.gz" | sha256sum -c -
+          mkdir app && tar -xzf app.tar.gz -C app
+
+          # 3. 覆盖(不删除你自己新增的文件)
+          rsync -a app/openwrt/ openwrt/
+          rsync -a app/debian/ debian/
+          # panel/: 整个面板(明文后端 + 编译后的前端)整体覆盖;不动依赖清单,不带 node_modules
+          [ -d app/panel/server ] || { echo "上游包里没有 panel/server,目录结构变了" >&2; exit 1; }
+          rsync -a --exclude='node_modules' --exclude='/package.json' --exclude='/pnpm-lock.yaml' app/panel/ panel/
+          cp app/update.sh scripts/update.sh
+          cp app/uninstall.sh scripts/uninstall.sh
+          # install.sh 不在 release 包里,取上游该版本的源码
+          curl -fsSL --retry 3 -o scripts/install.sh "https://raw.githubusercontent.com/$UPSTREAM_REPO/$tag/scripts/install.sh"
+          chmod +x scripts/install.sh scripts/update.sh scripts/uninstall.sh
+
+          # 4. 仓库地址换回自己的(panel 里的 updater.mjs 和前端文件也要换,否则面板会去检查上游版本)
+          targets="openwrt debian scripts/install.sh scripts/update.sh scripts/uninstall.sh"
+          grep -rlI "$UPSTREAM_REPO" $targets panel | xargs -r sed -i "s#$UPSTREAM_REPO#$OWN_REPO#g"
+          if grep -rnI "liandu2024" $targets; then
+            echo "仍有指向上游的残留(见上),请人工处理后再同步" >&2
+            exit 1
+          fi
+          if grep -rqI "liandu2024" panel; then
+            echo "::warning::panel 里还有 liandu2024 字样,确认不是仓库地址后可忽略"
+            grep -rnI "liandu2024" panel | cut -c1-200 | head -20
+          fi
+          for f in scripts/install.sh scripts/update.sh scripts/uninstall.sh; do sh -n "$f"; done
+
+          # 5. 直接提交到目标分支
+          echo "$tag" > .upstream-synced
+          rm -rf app app.tar.gz components.json
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          # 前端 dist 可能被 .gitignore 忽略,强制加入 panel 下的文件
+          git add -f panel
+          if git diff --cached --quiet; then echo "没有变化"; exit 0; fi
+          git commit -m "sync: 上游 $tag(openwrt、debian、panel、install/update/uninstall.sh),仓库地址保持 $OWN_REPO"
+          git push origin "HEAD:$BASE_BRANCH"

@@ -1,0 +1,23 @@
+{
+	"luci-app-openbox": {
+		"description": "Grant access to Open-Box service controls",
+		"read": {
+			"ubus": { "luci": [ "getInitList" ], "service": [ "list" ] },
+			"file": {
+				"/opt/open-box/meta.json": [ "read" ],
+				"/tmp/openbox-update.log": [ "read" ],
+				"/tmp/openbox-update.status": [ "read" ],
+				"/tmp/openbox-uninstall.log": [ "read" ],
+				"/tmp/openbox-uninstall.status": [ "read" ]
+			}
+		},
+		"write": {
+			"ubus": { "luci": [ "setInitAction" ] },
+			"file": {
+				"/opt/open-box/uninstall.sh": [ "exec" ],
+				"/opt/open-box/update.sh": [ "exec" ],
+				"/opt/open-box/openwrt/bin/open-box": [ "exec" ]
+			}
+		}
+	}
+}

@@ -1,0 +1,44 @@
+#!/bin/sh
+# openbox-panel.service 的 ExecStart:算好端口和堆上限再 exec Node,对应 OpenWrt 脚本 openwrt/initd/openbox-panel 的
+# start_service。Debian 上 node/bin/node 是安装脚本从 nodejs.org 取的 glibc 版(发布包里捆的是 OpenWrt 用的 musl 版,
+# glibc 系统跑不起来),所以这里不设 LD_LIBRARY_PATH——node/lib/ 里那份 musl 版 libstdc++ 装给 glibc 的 Node 会直接崩
+OPENBOX_ROOT=/opt/open-box
+NODE="$OPENBOX_ROOT/node/bin/node"
+ENTRY="$OPENBOX_ROOT/panel/server/index.mjs"
+DATA="$OPENBOX_ROOT/data"
+
+if [ ! -x "$NODE" ]; then
+	echo "openbox-panel: node runtime not found at $NODE" >&2
+	exit 1
+fi
+if [ ! -f "$ENTRY" ]; then
+	echo "openbox-panel: panel entry not found at $ENTRY" >&2
+	exit 1
+fi
+mkdir -p "$DATA"
+
+# 命令行 open-box(看面板密码 / 检查升级):Debian 放 /usr/local/bin,每次启动补一次软链接,不覆盖别人的真文件
+if [ -f "$OPENBOX_ROOT/openwrt/bin/open-box" ] && { [ ! -e /usr/local/bin/open-box ] || [ -L /usr/local/bin/open-box ]; }; then
+	chmod +x "$OPENBOX_ROOT/openwrt/bin/open-box" 2>/dev/null
+	ln -sf "$OPENBOX_ROOT/openwrt/bin/open-box" /usr/local/bin/open-box 2>/dev/null
+fi
+
+# 面板端口与堆上限的算法和 OpenWrt 脚本一致(data/panel-port 没有就是 2026;内存不到 768 MB 堆收紧到 128 MB)
+panel_port=$(cat "$DATA/panel-port" 2>/dev/null | tr -dc '0-9')
+[ -n "$panel_port" ] || panel_port=2026
+heap_mb=160
+mem_kb=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo 2>/dev/null)
+[ -n "$mem_kb" ] && [ "$mem_kb" -lt 786432 ] && heap_mb=128
+
+# HOST=:: 双栈(GitHub #276,没开 IPv6 时面板自己退回 0.0.0.0);OPENSSL_CONF=/dev/null:不读系统的 OpenSSL 配置(GitHub #265)
+export PORT="$panel_port" HOST=:: OPENBOX_ROOT="$OPENBOX_ROOT" OPENBOX_PANEL_HEAP_MB="$heap_mb" \
+	ZASHBOARD_DB_PATH="$DATA/openbox.sqlite" OPENBOX_PLATFORM=systemd OPENSSL_CONF=/dev/null
+unset LD_LIBRARY_PATH
+# 内核缺 madvise 的机器(GitHub #290 #293,和 OpenWrt 脚本一样):安装 / 升级脚本试出来要带兼容库时记在 data/node-preload
+node_preload=$(cat "$DATA/node-preload" 2>/dev/null)
+if [ -n "$node_preload" ] && [ -f "$node_preload" ]; then
+	export LD_PRELOAD="$node_preload"
+else
+	unset LD_PRELOAD
+fi
+exec "$NODE" "--max-old-space-size=$heap_mb" "$ENTRY"

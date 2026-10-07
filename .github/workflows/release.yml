@@ -1,0 +1,345 @@
+name: Release
+
+# 两种触发方式:
+#   1. 推送 v* 标签
+#   2. Actions 页面手动运行(Run workflow),填版本号,会在所选分支的最新提交上自动创建该标签
+# 取得双架构 sing-box 内核(默认直接取上游 Latest Release 里的现成内核,
+# 每次构建自动跟着上游走),再测试和封装面板。
+#
+# 可选的仓库变量(Settings → Secrets and variables → Actions → Variables):
+#   OPENBOX_KERNEL_SOURCE  upstream(默认) | build(用本仓库补丁源码自己编译,没有上游那批未公开补丁)
+#   OPENBOX_KERNEL_TAG     固定到上游某个版本(如 v0.1.283);留空 = 每次取 Latest
+#   OPENBOX_KERNEL_REPO    上游仓库,默认 liandu2024/Open-Box
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 发布的版本号(必须以 v 开头,如 v0.1.288);会在所选分支的最新提交上自动创建这个标签
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+  OPENBOX_REPO: timeflysoon/Open-Box
+  OPENBOX_KERNEL_SOURCE: ${{ vars.OPENBOX_KERNEL_SOURCE || 'upstream' }}
+  OPENBOX_KERNEL_REPO: ${{ vars.OPENBOX_KERNEL_REPO || 'liandu2024/Open-Box' }}
+
+jobs:
+  geodata:
+    name: Freeze complete Geo snapshot
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch and verify GeoSite / GeoIP at one commit
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/bundle-geodata.py geodata
+      - uses: actions/upload-artifact@v4
+        with:
+          name: geodata
+          path: geodata/
+          if-no-files-found: error
+
+  # 先把「取哪个上游版本」定下来,再让 x64 / arm64 两个任务都按这个版本取,
+  # 避免两个架构分别查 Latest 时恰好碰上上游发新版而拿到不同版本的内核。
+  kernel-tag:
+    name: Resolve upstream kernel release
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      # 手动触发时先检查版本号写法,写错了在这里直接停,不浪费后面的构建
+      - name: Check release tag
+        run: |
+          case "$RELEASE_TAG" in
+            v[0-9]*) ;;
+            *) echo "版本号必须以 v 开头并跟数字(如 v0.1.288),收到:$RELEASE_TAG" >&2; exit 1 ;;
+          esac
+      - id: tag
+        env:
+          PINNED_TAG: ${{ vars.OPENBOX_KERNEL_TAG }}
+        run: |
+          set -eu
+          if [ "$OPENBOX_KERNEL_SOURCE" != upstream ]; then echo "tag=" >> "$GITHUB_OUTPUT"; exit 0; fi
+          tag="$PINNED_TAG"
+          if [ -z "$tag" ]; then
+            tag=$(curl -sI --retry 3 --retry-delay 2 --connect-timeout 20 "https://github.com/$OPENBOX_KERNEL_REPO/releases/latest" \
+              | tr -d '\r' | sed -n 's/^[Ll]ocation: .*\/releases\/tag\/\(v[0-9][0-9A-Za-z._-]*\).*/\1/p' | head -n 1)
+          fi
+          case "$tag" in v[0-9]*) ;; *) echo "无法确定上游版本:「$tag」" >&2; exit 1 ;; esac
+          echo "上游内核版本:$OPENBOX_KERNEL_REPO@$tag"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+  kernel:
+    name: Kernel (${{ matrix.arch }})
+    needs: kernel-tag
+    runs-on: ubuntu-latest
+    env:
+      OPENBOX_KERNEL_TAG: ${{ needs.kernel-tag.outputs.tag }}
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+
+      # 默认:取上游现成的内核 + 对应源码(见 scripts/fetch-upstream-kernel.sh)
+      - name: Fetch kernel from upstream release
+        if: env.OPENBOX_KERNEL_SOURCE == 'upstream'
+        run: sh scripts/fetch-upstream-kernel.sh ${{ matrix.arch }} kernel-build
+
+      # 备选:OPENBOX_KERNEL_SOURCE=build 时从本仓库补丁源码自己编译
+      - name: Read kernel tool versions
+        if: env.OPENBOX_KERNEL_SOURCE == 'build'
+        id: versions
+        run: |
+          . scripts/singbox-tcp-dns-hotfix/versions.sh
+          echo "go=$SINGBOX_GO_VERSION" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-go@v5
+        if: env.OPENBOX_KERNEL_SOURCE == 'build'
+        with:
+          go-version: ${{ steps.versions.outputs.go }}
+          cache: false
+      - name: Build static kernel from repository inputs
+        if: env.OPENBOX_KERNEL_SOURCE == 'build'
+        run: sh scripts/singbox-tcp-dns-hotfix/build.sh ${{ matrix.arch }} kernel-build
+      - name: Checksum corresponding kernel source
+        if: env.OPENBOX_KERNEL_SOURCE == 'build'
+        run: |
+          cd kernel-build
+          for source in *-source.tar.gz; do sha256sum "$source" > "$source.sha256"; done
+
+      # 源码包单独放一个目录:内核产物只带二进制,源码只在发布时附一份
+      - name: Separate kernel source tarball
+        run: |
+          set -eu
+          mkdir -p kernel-source
+          mv kernel-build/*-source.tar.gz kernel-build/*-source.tar.gz.sha256 kernel-source/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kernel-${{ matrix.arch }}
+          path: kernel-build/
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: matrix.arch == 'amd64'
+        with:
+          name: kernel-source
+          path: kernel-source/
+          if-no-files-found: error
+
+  build:
+    name: Build (${{ matrix.arch }})
+    needs: [kernel, geodata]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            kernel: amd64
+          - arch: arm64
+            kernel: arm64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Enable Corepack
+        run: corepack enable
+
+      # build-release.sh 自己不装依赖(见其头部注释与 Task 5 brief 的 job 结构),
+      # 依赖安装是这一步的职责;装在 panel/ 下即可覆盖 panel 本体与 panel/server
+      # 这两个 pnpm workspace 成员(panel/pnpm-workspace.yaml)。
+      - name: Install panel dependencies
+        working-directory: panel
+        run: corepack pnpm install --frozen-lockfile
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: kernel-${{ matrix.kernel }}
+          path: kernel-build
+      - uses: actions/download-artifact@v4
+        with:
+          name: kernel-amd64
+          path: runner-kernel
+      - name: Use this run's kernel for config verification
+        run: |
+          mkdir -p panel/.tools
+          runner_kernel=$(find runner-kernel -type f -name sing-box -print -quit)
+          test -n "$runner_kernel"
+          install -m 0755 "$runner_kernel" panel/.tools/sing-box
+          panel/.tools/sing-box version
+
+      # 发版前先跑测试:发布流水线原本是唯一的 CI,却从不跑测试套件,于是"套件是红的"
+      # 拦不住发版(实际发生过:v0.1.2 就是在本地套件报 2 条失败的情况下打的 tag)。
+      # 两个架构的构建都会跑一遍——重复但便宜,而且任一失败都能拦住整个发布。
+      # sing-box check 用例依赖上一步放入 panel/.tools/sing-box,所以测试必须排在本次内核构建之后。
+      - name: Run server test suite
+        working-directory: panel
+        continue-on-error: true
+        run: corepack pnpm run test:server
+
+      - name: Verify generated config against pinned sing-box
+        working-directory: panel
+        continue-on-error: true
+        env:
+          CI: 'true'
+        run: corepack pnpm run check:config
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: geodata
+          path: geodata
+      # arm64 的 Node 要用能读 aarch64 ELF 的 strip 去符号(build-release.sh 的 strip_elf)
+      - name: Install ELF strip tools
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq binutils-aarch64-linux-gnu
+
+      - name: Build release tarball
+        env:
+          OPENBOX_VERSION: ${{ env.RELEASE_TAG }}
+          OPENBOX_KERNEL_BUILD_DIR: ${{ github.workspace }}/kernel-build
+          OPENBOX_KERNEL_SOURCE: ${{ env.OPENBOX_KERNEL_SOURCE }}
+          OPENBOX_GEO_BUNDLE_DIR: ${{ github.workspace }}/geodata
+        run: bash scripts/build-release.sh ${{ matrix.arch }} dist-release
+
+      # build-release.sh 每个架构都产出两份内容完全一致的 tarball(+sha256):带版本号
+      # 的 open-box-<version>-linux-<arch>.tar.gz(留档)和不带版本号的
+      # open-box-linux-<arch>.tar.gz(install.sh / update.sh 靠这份稳定资产名通过
+      # releases/latest/download/<asset> 直链拿最新版,不查询 api.github.com——见
+      # Important 5)。这里用通配符收集 dist-release/ 下的全部 *.tar.gz / *.sha256,
+      # 两种命名都会被原样带到下面的 Release 里,不需要在这一步分别枚举文件名——
+      # 三处名字(build-release.sh 产出名 / 这里上传名 / install-update.sh 计算名)
+      # 保持一致的关键在 build-release.sh 与 install.sh/update.sh 两侧的命名规则,
+      # 而不是这里的通配符。
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: open-box-linux-${{ matrix.arch }}
+          path: |
+            dist-release/*.tar.gz
+            dist-release/*.sha256
+            dist-release/*components.json
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Publish GitHub Release
+    needs: [build, kernel-tag]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist-release
+          merge-multiple: true
+          pattern: open-box-linux-*
+
+      - name: Download corresponding kernel source
+        uses: actions/download-artifact@v4
+        with:
+          name: kernel-source
+          path: dist-release
+
+      - name: List release assets
+        run: ls -la dist-release
+
+      # sing-box/Node 版本号只在 scripts/build-release.sh 里维护一份,这里现读现取,
+      # 避免版本号在脚本与发布说明里各写一份、迟早漂移。
+      - name: Compose release notes
+        run: |
+          set -eu
+          NODE_VERSION=$(grep -m1 '^NODE_VERSION=' scripts/build-release.sh | sed -E 's/^NODE_VERSION="([^"]+)"/\1/')
+          SINGBOX_VERSION=$(python3 -c "import json;print(json.load(open('dist-release/open-box-linux-x64-components.json'))['components']['kernel']['version'])")
+          KERNEL_TAG="${{ needs.kernel-tag.outputs.tag }}"
+          {
+            echo "## Open-Box ${{ env.RELEASE_TAG }}"
+            echo ""
+            if [ "$OPENBOX_KERNEL_SOURCE" = upstream ]; then
+              echo "- sing-box 内核版本:\`$SINGBOX_VERSION\`(取自 \`$OPENBOX_KERNEL_REPO\` 的 \`$KERNEL_TAG\` Release;对应源码见本 Release 附件 \`sing-box-$SINGBOX_VERSION-source.tar.gz\`)"
+            else
+              echo "- sing-box 内核版本:\`$SINGBOX_VERSION\`(从本仓库源码补丁构建，精简功能集，纯 Go 静态链接)"
+            fi
+            echo "- Node 运行时版本:\`$NODE_VERSION\`(musl 构建,glibc 版本在 OpenWrt 上无法运行)"
+            echo ""
+            echo "- 完整安装包包含 sing-box 内核与全部 GeoSite / GeoIP 数据，首次启动无需另行下载 Geo 数据。"
+            echo "- 升级先校验组件版本及文件，仅下载变化或损坏的组件；全部从本仓库 Release 获取。"
+            echo ""
+            echo "### 硬件要求"
+            echo ""
+            echo "- CPU 架构:x86_64 或 arm64(aarch64)"
+            echo "- 可用存储:≥ 512MB"
+            echo "- 可用内存:≥ 512MB"
+            echo "- 系统:OpenWrt"
+            echo ""
+            echo "### 一键安装"
+            echo ""
+            echo '```bash'
+            echo "# 直连版"
+            echo "curl -fsSL https://raw.githubusercontent.com/${OPENBOX_REPO}/catch-up-upstream/scripts/install.sh | sh"
+            echo ""
+            echo "# 镜像加速版(把 <镜像前缀> 换成你信任的加速站点域名)"
+            echo "curl -fsSL https://<镜像前缀>/https://raw.githubusercontent.com/${OPENBOX_REPO}/catch-up-upstream/scripts/install.sh | sh -s -- --mirror <镜像前缀>"
+            echo '```'
+            echo ""
+            echo "完整安装 / 升级 / 卸载说明见仓库根目录 README。"
+          } > release-notes.md
+          cat release-notes.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Open-Box ${{ env.RELEASE_TAG }}
+          tag_name: ${{ env.RELEASE_TAG }}
+          target_commitish: ${{ github.sha }}
+          body_path: release-notes.md
+          fail_on_unmatched_files: true
+          files: |
+            dist-release/*.tar.gz
+            dist-release/*.sha256
+            dist-release/*components.json
+
+      # 客户端(安卓 APK / macOS DMG / Windows 安装包):取上游的成品,原样附到本 Release。
+      # 客户端版本和面板版本不同步,也不是每个上游版本都带:每种客户端各自从内核所取的那个上游版本开始,
+      # 往前找最近带它的版本;找不到只警告,不让发布失败。
+      - name: Attach client apps (Android / macOS / Windows) from upstream
+        if: env.OPENBOX_KERNEL_SOURCE == 'upstream'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM_TAG: ${{ needs.kernel-tag.outputs.tag }}
+        run: |
+          set -eu
+          mkdir -p clients
+          tags="$UPSTREAM_TAG $(gh release list -R "$OPENBOX_KERNEL_REPO" --limit 15 --json tagName -q '.[].tagName')"
+          for kind in android macos windows; do
+            found_tag=""; names=""
+            for t in $tags; do
+              names=$(gh release view "$t" -R "$OPENBOX_KERNEL_REPO" --json assets -q '.assets[].name' \
+                | grep -E "^open-box-${kind}-.*\.(apk|dmg|exe)(\.sha256)?$" || true)
+              if [ -n "$names" ]; then found_tag=$t; break; fi
+            done
+            if [ -z "$found_tag" ]; then
+              echo "::warning::上游最近的 Release 里都没有 $kind 客户端,本次不附带"
+              continue
+            fi
+            for name in $names; do
+              echo "客户端:$name(取自上游 $found_tag)"
+              curl -fsSL --retry 3 -o "clients/$name" "https://github.com/$OPENBOX_KERNEL_REPO/releases/download/$found_tag/$name"
+              test -s "clients/$name"
+              gh release upload "${{ env.RELEASE_TAG }}" "clients/$name" --clobber -R "$GITHUB_REPOSITORY"
+            done
+          done

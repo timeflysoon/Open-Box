@@ -1,0 +1,19 @@
+#!/bin/sh
+# 给面板用的 logread 替身:Debian / Ubuntu 没有 OpenWrt 的 logread,日志在 journald 里。openbox-panel.service 把本目录
+# 排在 PATH 最前面,面板里 `logread -e <正则>`(system/deploy.mjs 取内核最后一句 FATAL)和 `logread | grep ...`
+# (api/diagnostics.mjs 收集诊断包)照常能用。输出用 journalctl 的 short 格式,和 syslog 一样是
+# `<时间> <主机> sing-box[<pid>]: <内容>`,面板就靠 `sing-box[<pid>]:` 这个前缀截出内核原话
+PATTERN=""
+LINES=3000
+while [ $# -gt 0 ]; do
+	case "$1" in
+		-e) PATTERN="$2"; shift 2 ;;
+		-l) LINES="$2"; shift 2 ;;
+		*) shift ;;
+	esac
+done
+if [ -n "$PATTERN" ]; then
+	journalctl --no-pager -q -o short -u openbox.service -u openbox-panel.service -n "$LINES" | grep -E -- "$PATTERN"
+else
+	journalctl --no-pager -q -o short -u openbox.service -u openbox-panel.service -n "$LINES"
+fi
