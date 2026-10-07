@@ -53,7 +53,7 @@ import { registerBackupBodyParser, registerBackupRoutes } from './api/backup.mjs
 import { registerDiagnosticsRoutes } from './api/diagnostics.mjs'
 import { readMeta, readUpdateStatus } from './system/updater.mjs'
 import { createMemoryWatchdog, recordWatchdogRestart } from './system/memory-watchdog.mjs'
-import { seedDefaultStorage } from './system/seed-defaults.mjs'
+import { repairLoginDefaultsBurst, seedDefaultStorage } from './system/seed-defaults.mjs'
 import { fetchSelections, resolveSelections, regenerateIfPlanChanged, isDeployLocked, runExclusive } from './api/deploy-runner.mjs'
 import { ensureShareRegionLists } from './system/share-region-lists.mjs'
 import { flushDnsCache, registerDnsCacheRoutes } from './system/dns-cache.mjs'
@@ -181,6 +181,17 @@ seedDefaultStorage({
   hasKey: (key) => Boolean(getStorageValueStatement.get(key)),
   log: (m) => console.log(m),
 })
+// 老版本设密码 / 登录时把路由器上的面板设置冲成了前端出厂值(默认背景没了):升级后第一次启动修一次(同上文件)
+try {
+  repairLoginDefaultsBurst({
+    rows: () => db.prepare(`SELECT key, value, updated_at FROM app_storage WHERE key LIKE 'config/%'`).all(),
+    get: (key) => getStorageValueStatement.get(key)?.value ?? null,
+    set: (key, value) => upsertStorageValueStatement.run(key, value),
+    log: (m) => console.log(m),
+  })
+} catch (err) {
+  console.log(`[defaults] 修复面板设置失败:${err instanceof Error ? err.message : err}`)
+}
 
 // 跑在哪种系统上(OpenWrt / Debian 的 systemd),见 system/platform.mjs;store 和 paths 都按它分叉
 const obPlatform = detectPlatform()
