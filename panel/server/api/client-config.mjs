@@ -16,7 +16,8 @@
 //   GET /client/v1/:routerId/config/:token/background      面板背景图(bundle 的 view.background 有 version,变了 App 才来下;
 //                                                          上传的图回字节,面板填的是网址 302 跳过去,没设背景 404,见 system/panel-background.mjs)
 // 登录后的:
-//   GET /api/openbox/client-config(这个码 + 最后同步时间)、GET /api/openbox/client-config/file
+//   GET /api/openbox/client-config(这个码 + 最后同步时间 + 同步开没开)、GET /api/openbox/client-config/file、
+//   PUT /api/openbox/client-config/enabled { enabled }(电源图标,关着时上面三个公开路由回 403 disabled)
 import { createCipheriv, createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import fs from 'node:fs'
 import os from 'node:os'
@@ -37,6 +38,11 @@ import { ENGINE_VERSION, buildClientConfig, viewGroups, viewSubscriptions } from
 
 // 必须带 openbox/ 前缀(浏览器同步设置只保护这个前缀)。不进导出 / 导入:码和这台路由器绑定。名字沿用以前按设备发码的时候,现在只留一条
 export const CLIENT_DEVICES_KEY = 'openbox/client-devices'
+// 本地分流的同步开关(用户 2026-10-07:「增加一个电源的图标,点击可以关闭,这样避免泄露,需要同步时再打开」):关着时公开的
+// /client/v1/:routerId/config/... 一律回 403 { error: 'disabled' },码泄露了也拉不到节点;导出文件是登录后自己下载的,不受影响。
+// 没设过 = 开着(老设备照旧能同步)。同样 openbox/ 前缀、不进导出
+export const CLIENT_CONFIG_ENABLED_KEY = 'openbox/client-config-enabled'
+export const clientConfigEnabled = (store) => store.getRaw(CLIENT_CONFIG_ENABLED_KEY) !== '0'
 const TOKEN_RE = /^[0-9a-f]{48}$/
 
 const sha256 = (value) => createHash('sha256').update(value).digest('hex')
@@ -208,11 +214,19 @@ export const buildClientBundle = async ({ store, ctx, paths, fetchImpl = globalT
 }
 
 export const registerPublicClientConfigRoutes = (app, { store, ctx, paths, fetchImpl, readVersion, geoDir = DEFAULT_GEO_DIR } = {}) => {
-  // 认不出这台设备(删掉了,或者路由器换了):404 { error: 'unpaired' },App 据此提示「配对失效,请重新配对」
+  // 认不出这台设备(删掉了,或者路由器换了):404 { error: 'unpaired' },App 据此提示「配对失效,请重新配对」;
+  // 码是对的但面板上关了本地分流:403 { error: 'disabled' },App 提示到面板里打开(只有拿着有效码的才看得到这个状态)
   const device = (req, res) => {
     res.setHeader('Cache-Control', 'no-store')
     const d = req.params.routerId === routerId(store) ? findDevice(store, req.params.token) : null
-    if (!d) res.status(404).json({ error: 'unpaired' })
+    if (!d) {
+      res.status(404).json({ error: 'unpaired' })
+      return null
+    }
+    if (!clientConfigEnabled(store)) {
+      res.status(403).json({ error: 'disabled' })
+      return null
+    }
     return d
   }
   app.get('/client/v1/:routerId/config/:token', async (req, res) => {
@@ -245,6 +259,7 @@ export const registerClientConfigRoutes = (app, { store, ctx, paths, fetchImpl, 
   // 出码要的东西,界面拿去拼码(二维码、复制链接、导出文件里的 importCode 都是这一个)
   const issued = async (device) => ({
     device: publicDevice(device),
+    enabled: clientConfigEnabled(store),
     token: device.token,
     key: device.key,
     routerId: routerId(store),
@@ -255,6 +270,13 @@ export const registerClientConfigRoutes = (app, { store, ctx, paths, fetchImpl, 
   // 统一的那一个码(没有就发一套,以前按设备发过的按 unifiedCredential 收成一条)
   router.get('/client-config', async (_req, res) => {
     res.json(await issued(unifiedCredential(store)))
+  })
+  // 电源图标:开 / 关本地分流的同步
+  router.put('/client-config/enabled', express.json({ limit: '1kb' }), (req, res) => {
+    const enabled = req.body?.enabled
+    if (typeof enabled !== 'boolean') return res.status(400).json({ error: 'enabled must be a boolean' })
+    store.setRaw(CLIENT_CONFIG_ENABLED_KEY, enabled ? '1' : '0')
+    res.json({ enabled })
   })
   router.get('/client-config/file', async (_req, res) => {
     try {

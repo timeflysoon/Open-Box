@@ -78,3 +78,15 @@ test('connectionOwner:链路根是站点集就是它;否则按规则原文对回
   assert.equal(connectionOwner({ chains: ['直连'], rule: 'RuleSet(geosite-cn)', routeRules: rules, routing, builtin }), null)
   assert.equal(connectionOwner({ chains: [], rule: '', routeRules: rules, routing, builtin }), null)
 })
+
+test('真实路由:终端分流规则挂着「入站不是共享网络」(engine/client-routes.mjs),原文和配置都去掉它再对,归「终端分流」', () => {
+  const routeRules = [
+    { domain_suffix: ['google.com'], outbound: '谷歌' },
+    { type: 'logical', mode: 'and', rules: [{ source_ip_cidr: ['192.168.3.18/32'] }, { inbound: ['share-home'], invert: true }], outbound: '直连' },
+  ]
+  const found = findKernelRule(routeRules, 'source_ip_cidr=192.168.3.18/32 && !(inbound=share-home) => route(直连)')
+  assert.equal(found.index, 1)
+  const owner = connectionOwner({ chains: ['直连'], rule: 'source_ip_cidr=192.168.3.18/32 && !(inbound=share-home) => route(直连)', routeRules, routing: {}, builtin: { direct: '直连', block: '拒绝' } })
+  assert.deepEqual(owner, { kind: 'builtin', name: 'clients', index: 1 })
+})
+

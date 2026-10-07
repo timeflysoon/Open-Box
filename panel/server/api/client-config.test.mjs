@@ -402,6 +402,23 @@ test('接口:统一的一个码 → 拉加密配置 → 规则集 → 导出文�
     assert.deepEqual(await unknown.json(), { error: 'unpaired' })
     assert.equal((await fetch(`${base}/client/v1/${'f'.repeat(32)}/config/${created.token}`)).status, 404)
 
+    // 电源图标(用户 2026-10-07「点击可以关闭,这样避免泄露,需要同步时再打开」):关了以后码对也拉不到配置、规则集、背景,
+    // 回 403 disabled;认不出的码照旧 404 unpaired;导出文件是登录后的,不受影响;打开后恢复
+    const power = (enabled) => fetch(`${base}/api/openbox/client-config/enabled`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled }) })
+    assert.equal(again.enabled, true)
+    assert.deepEqual(await (await power(false)).json(), { enabled: false })
+    assert.equal((await codeNow()).enabled, false)
+    const blocked = await fetch(url)
+    assert.equal(blocked.status, 403)
+    assert.deepEqual(await blocked.json(), { error: 'disabled' })
+    assert.equal((await fetch(`${url}/rule-set/geosite-cn.srs`)).status, 403)
+    assert.equal((await fetch(`${url}/background`)).status, 403)
+    assert.equal((await fetch(`${base}/client/v1/${created.routerId}/config/${'0'.repeat(48)}`)).status, 404)
+    assert.equal((await fetch(`${base}/api/openbox/client-config/file`)).status, 200)
+    assert.equal((await power('no')).status, 400)
+    assert.deepEqual(await (await power(true)).json(), { enabled: true })
+    assert.equal((await fetch(url)).status, 200)
+
     // 导出文件:geosite / geoip 随 App 安装包带,只列 tag / 摘要 / 大小、不带内容(码由面板界面放进 importCode)
     const file = await (await fetch(`${base}/api/openbox/client-config/file`)).json()
     const cnBytes = fs.readFileSync(path.join(geoDir, 'geosite-cn.srs'))

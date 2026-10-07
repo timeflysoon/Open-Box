@@ -1,5 +1,6 @@
 import { customOutboundTag, customPolicyActive, customRuleTag, isNtpDirectRule, normalizeRouting, parsePortSpec } from './routing-model.mjs'
 import { isNodeDirectTag } from './direct-hosts.mjs'
+import { stripShareGuardText, withoutShareGuard } from './client-routes.mjs'
 
 // 一条 route 规则归谁。界面的「规则匹配」一步要说清楚命中的是哪个站点集(含兜底)、还是前置自定义分流、还是
 // 内置规则(私网直连、订阅和节点站点直连、终端分流、内核自用的 tun / DNS 规则)——出口(直连 / 节点)是出口,不是站点集。
@@ -120,11 +121,12 @@ const itemsMatch = (kernel, generated) => {
 }
 
 // 规则原文对回配置里的哪一条(按内容,不按下标)。出口对得上的才算候选;多条同样对得上取第一条
+// 终端分流规则带着「入站不是共享网络」(engine/client-routes.mjs):原文和配置两边都先去掉它再比
 export const findKernelRule = (routeRules, text) => {
-  const parsed = parseKernelRuleText(text)
+  const parsed = parseKernelRuleText(stripShareGuardText(text))
   if (!parsed.items.size) return { index: -1, rule: null, parsed }
   for (let index = 0; index < (routeRules || []).length; index++) {
-    const rule = routeRules[index]
+    const rule = withoutShareGuard(routeRules[index])
     if (!rule || typeof rule !== 'object') continue
     if (parsed.outbound && rule.outbound !== undefined && rule.outbound !== parsed.outbound) continue
     if (parsed.action === 'reject' && rule.action !== 'reject') continue

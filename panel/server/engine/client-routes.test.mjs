@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { admitDnsDirect, isDirectClientRoute, isIpOrCidr, normalizeCidr, normalizeClientRoutes, terminalDnsLocalOnly, terminalDnsRedirected, terminalDnsSources } from './client-routes.mjs'
+import { admitDnsDirect, guardTerminalRules, isDirectClientRoute, isIpOrCidr, isNotShareInbound, normalizeCidr, normalizeClientRoutes, stripShareGuardText, terminalDnsLocalOnly, terminalDnsRedirected, terminalDnsSources, withoutShareGuard } from './client-routes.mjs'
+import { flattenFlipRule } from './flip.mjs'
 
 test('normalizeCidr:裸 IPv4/IPv6 补前缀,网段原样,非法返回空', () => {
   assert.equal(normalizeCidr('10.0.0.209'), '10.0.0.209/32')
@@ -107,5 +108,37 @@ test('「只让这些终端进内核」:名单里有按 IP 的才转名单外终
   assert.equal(admitDnsDirect(ipList, { ...on, splitDns: false }), false)
   assert.equal(admitDnsDirect(ipList, { ...on, dnsMode: 'off' }), false)
   assert.equal(admitDnsDirect([], on), false)
+})
+
+test('guardTerminalRules:带来源条件的规则挂「入站不是共享网络」,普通规则拆成条件 + 动作,logical 直接追加;其余不动,没有共享入站原样返回', () => {
+  const rules = [
+    { source_ip_cidr: ['192.168.3.18/32'], outbound: '直连' },
+    { source_mac_address: ['00:15:5d:03:0a:12'], domain_suffix: ['lan'], server: 'dns-local' },
+    { type: 'logical', mode: 'and', rules: [{ source_ip_cidr: ['192.168.3.20/32'] }, { ip_version: 6 }], action: 'reject' },
+    { domain_suffix: ['google.com'], outbound: '谷歌' },
+    { type: 'logical', mode: 'and', rules: [{ rule_set: ['obflip-a'] }, { domain: ['x.com'] }], server: 'dns-proxy' },
+  ]
+  assert.equal(guardTerminalRules(rules, []), rules, '没有共享入站:原样')
+  const out = guardTerminalRules(rules, ['share-home', 'share-lan'])
+  const guard = { inbound: ['share-home', 'share-lan'], invert: true }
+  assert.deepEqual(out[0], { type: 'logical', mode: 'and', rules: [{ source_ip_cidr: ['192.168.3.18/32'] }, guard], outbound: '直连' })
+  assert.deepEqual(out[1], { type: 'logical', mode: 'and', rules: [{ source_mac_address: ['00:15:5d:03:0a:12'], domain_suffix: ['lan'] }, guard], server: 'dns-local' })
+  assert.deepEqual(out[2].rules, [{ source_ip_cidr: ['192.168.3.20/32'] }, { ip_version: 6 }, guard])
+  assert.equal(out[2].action, 'reject')
+  assert.equal(out[3], rules[3], '不带来源条件的规则不动')
+  assert.equal(out[4], rules[4])
+  assert.ok(isNotShareInbound(guard))
+  assert.ok(!isNotShareInbound({ inbound: ['dns-in'], invert: true }), '别的入站取反不算')
+  // 读规则的各处去掉这个子条件,就是原来那条
+  out.forEach((r, i) => assert.deepEqual(withoutShareGuard(r), rules[i]))
+  assert.deepEqual(flattenFlipRule(out[0], {}), rules[0], 'flattenFlipRule 先去掉它再判开关')
+})
+
+test('stripShareGuardText:内核规则原文里「入站不是共享网络」那段去掉(一个入站 / 多个入站两种写法),别的不动', () => {
+  // 真内核(1.14.1-openbox-tcp18)打出来的原文
+  assert.equal(stripShareGuardText('source_ip_cidr=192.168.3.18/32 && !(inbound=share-lan) => route(直连)'), 'source_ip_cidr=192.168.3.18/32 => route(直连)')
+  assert.equal(stripShareGuardText('source_ip_cidr=[192.168.3.18/32 192.168.3.4/32] && !(inbound=[share-home share-lan]) => route(直连)'), 'source_ip_cidr=[192.168.3.18/32 192.168.3.4/32] => route(直连)')
+  assert.equal(stripShareGuardText('ip_cidr=10.0.0.0/8 && !(inbound=dns-in) => route(直连)'), 'ip_cidr=10.0.0.0/8 && !(inbound=dns-in) => route(直连)')
+  assert.equal(stripShareGuardText(''), '')
 })
 

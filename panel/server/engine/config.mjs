@@ -6,7 +6,7 @@ import { emitUserGroups } from './user-groups.mjs'
 import { customOutboundTag, customPolicyActive, effectiveOutbound, nativeBypassPlan, normalizeRouting, policyClasses, policyOutboundOptions } from './routing-model.mjs'
 import { buildRoute } from './routing.mjs'
 import { buildServerInbounds } from './servers.mjs'
-import { admitDnsDirect, admitSources, bypassSources, normalizeClientRoutes } from './client-routes.mjs'
+import { admitDnsDirect, admitSources, bypassSources, guardTerminalRules, normalizeClientRoutes } from './client-routes.mjs'
 import { planNodeDns, withNodeResolver } from './node-dns.mjs'
 import { buildDnsWithResolvers, dnsFakeIpEnabled, fakeIpCachePath, ipv6InTun, ipv6ProxyMode, FAKEIP_V6 } from './dns.mjs'
 import { NODE_DIRECT_DOMAIN_TAG, NODE_DIRECT_IP_TAG, NODE_DIRECT_PLACEHOLDER, collectDirectHosts, isSharedCdnCidr, nodeDirectRuleSets } from './direct-hosts.mjs'
@@ -342,7 +342,12 @@ export const buildConfigDetailed = ({ nodes, profile, userGroups, systemDns, loc
   // 「只让这些终端进内核」名单外终端的查询(入口转过来,system/entry-bypass.mjs):这里的一律直连解析,给真实地址
   if (admitDirect) inbounds.push({ type: 'direct', tag: DNS_DIRECT_INBOUND_TAG, listen: profile.ipv6 ? '::' : '0.0.0.0', listen_port: DNS_DIRECT_INBOUND_PORT })
   // 共享网络:用户在设置里开的服务器入站(engine/servers.mjs)
-  inbounds.push(...buildServerInbounds(profile.servers, tlsCert))
+  const shareInbounds = buildServerInbounds(profile.servers, tlsCert)
+  inbounds.push(...shareInbounds)
+  // 终端分流 / 「不进内核」按来源认终端的路由、DNS 规则不管从共享网络入站进来的连接(engine/client-routes.mjs 的 guardTerminalRules)
+  const shareTags = shareInbounds.map((i) => i.tag)
+  route.rules = guardTerminalRules(route.rules, shareTags)
+  if (dns.rules) dns.rules = guardTerminalRules(dns.rules, shareTags)
 
   const config = {
     log: { level: 'warn' },

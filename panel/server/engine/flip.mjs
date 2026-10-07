@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { withoutShareGuard } from './client-routes.mjs'
 
 // 热切换:站点集在直连 / 代理之间翻面时不重启内核。这是唯一的模式——v0.1.207 / v0.1.208 有过一个开关
 // 「直连和代理切换重启内核」(档案键 restartOnClassFlip / restartOnFlip)可以退回老的重启路径,v0.1.210 起去掉。
@@ -76,7 +77,9 @@ export const flipFlagOfRule = (rule) => {
   }
   return ''
 }
-export const flattenFlipRule = (rule, flipState = {}) => {
+export const flattenFlipRule = (rawRule, flipState = {}) => {
+  // 终端分流规则带的「入站不是共享网络」(engine/client-routes.mjs 的 guardTerminalRules)先去掉:读规则的各处模拟的都是局域网终端
+  const rule = withoutShareGuard(rawRule)
   // flipState 传 true:不管开关状态,只要「这条规则去掉开关之后匹配什么」(反查规则归谁管时用)
   const isOn = (tag) => flipState === true || Boolean(flipState && flipState[tag])
   const flag = flipFlagOfRule(rule)

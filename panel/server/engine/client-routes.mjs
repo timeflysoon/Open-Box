@@ -154,3 +154,55 @@ export const admitDnsDirect = (list, { dnsMode = 'hijack', autoRedirect = false,
 // 不再写 include_mac_address——两边各管一半的话,按 IP 放进来的终端会被按 MAC 的名单挡掉。
 // 只在 auto_redirect 下有效,纯 tun 兼容模式下所有终端照常进内核。一条都没有(或都停用)就是默认的全部进内核
 export const admitSources = (list) => collectSources(list, 'admit')
+
+// 按来源认终端的规则(终端分流、「不进内核」,路由和 DNS 两处,源 IP / MAC)只管局域网终端经路由器上网的连接。
+// 从共享网络入站(engine/servers.mjs 的 serverTag,share-<id>:节点分流 App、把路由器当代理用的设备)进来的连接按路由器
+// 的分流规则走,不能因为来源地址恰好是某台终端就被这些规则接走——家里的电脑设成「直连」终端、又用 App 的节点分流连回
+// 路由器时,内核看到的来源就是这台电脑,Google 被送去直连、DNS 也被按直连答(客户端会话 2026-10-07 在正式路由器上查到)。
+// sing-box 的 inbound 条件只能写正向列表,所以补一个「入站不是共享网络」的子条件:普通规则拆成 logical AND(条件一份、
+// 动作留在外面),logical AND 直接追加。规则条数不变,按下标记的规则归属照旧对得上;没有共享网络入站时原样返回。
+// 读规则的各处(规则页推算、规则归属)模拟的都是局域网终端,由 engine/flip.mjs 的 flattenFlipRule 把这个子条件去掉再判
+export const notShareInbound = (tags) => ({ inbound: [...tags], invert: true })
+export const isNotShareInbound = (sub) => Boolean(sub) && typeof sub === 'object' && sub.invert === true && Array.isArray(sub.inbound) &&
+  sub.inbound.length > 0 && sub.inbound.every((t) => typeof t === 'string' && t.startsWith('share-')) && Object.keys(sub).length === 2
+const hasSourceCondition = (rule) => Boolean(rule) && typeof rule === 'object' &&
+  (Object.prototype.hasOwnProperty.call(rule, 'source_ip_cidr') || Object.prototype.hasOwnProperty.call(rule, 'source_mac_address'))
+// 普通规则拆开时算「条件」的字段(其余是动作:outbound / action / server / tag / strategy …)。只列这些规则实际会带的,
+// 多一个没列的条件会被当成动作留在外面——engine/client-routes.test.mjs 用生成的配置逐条核对
+const SHARE_GUARD_CONDITION_KEYS = new Set([
+  'source_ip_cidr', 'source_mac_address', 'domain', 'domain_suffix', 'domain_keyword', 'domain_regex', 'rule_set', 'query_type',
+  'ip_version', 'network', 'protocol', 'port', 'port_range', 'ip_cidr', 'ip_is_private', 'inbound', 'invert', 'source_port', 'source_port_range',
+])
+export const guardTerminalRules = (rules, shareTags) => {
+  const tags = Array.isArray(shareTags) ? shareTags.filter((t) => typeof t === 'string' && t) : []
+  if (!Array.isArray(rules) || !tags.length) return rules
+  return rules.map((rule) => {
+    if (!rule || typeof rule !== 'object') return rule
+    if (rule.type === 'logical') {
+      if (rule.mode !== 'and' || !Array.isArray(rule.rules) || !rule.rules.some(hasSourceCondition)) return rule
+      return { ...rule, rules: [...rule.rules, notShareInbound(tags)] }
+    }
+    if (!hasSourceCondition(rule)) return rule
+    const cond = {}
+    const tail = {}
+    for (const [key, value] of Object.entries(rule)) (SHARE_GUARD_CONDITION_KEYS.has(key) ? cond : tail)[key] = value
+    return { type: 'logical', mode: 'and', rules: [cond, notShareInbound(tags)], ...tail }
+  })
+}
+
+// 读规则的各处(规则页推算、规则归属、真实路由对回配置)模拟 / 认的都是局域网终端,「入站不是共享网络」恒成立:去掉这个子条件;
+// 只剩一条普通条件的并回普通规则(动作照抄),还带开关等其它子规则的留着 logical
+export const withoutShareGuard = (rule) => {
+  if (!rule || rule.type !== 'logical' || rule.mode !== 'and' || !Array.isArray(rule.rules) || !rule.rules.some(isNotShareInbound)) return rule
+  const rest = rule.rules.filter((sub) => !isNotShareInbound(sub))
+  const { type: _t, mode: _m, rules: _r, ...tail } = rule
+  void _t
+  void _m
+  void _r
+  if (rest.length === 1 && rest[0] && rest[0].type !== 'logical') return { ...rest[0], ...tail }
+  return { ...rule, rules: rest }
+}
+// 内核连接记录里的规则原文(rule.String()):logical 各子规则用 " && " 连,取反的写成 "!(…)",入站一个写 inbound=x、多个写
+// inbound=[x y]。去掉这段再给界面看 / 对回配置
+const SHARE_GUARD_TEXT = / && !\(inbound=(?:\[share-[^\]]*\]|share-[^\s)]+)\)/g
+export const stripShareGuardText = (text) => String(text || '').replace(SHARE_GUARD_TEXT, '')

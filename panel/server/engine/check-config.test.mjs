@@ -13,6 +13,7 @@ import { buildRoute } from './routing.mjs'
 import { builtinTags } from './user-groups.mjs'
 import { FLIP_PLACEHOLDER_SRS_BASE64, flipFlagContent, isFlipBypassTag, isFlipNeedTag, isFlipTag } from './flip.mjs'
 import { isNodeDirectTag, nodeDirectSources } from './direct-hosts.mjs'
+import { withoutShareGuard } from './client-routes.mjs'
 
 const enginedir = path.dirname(fileURLToPath(import.meta.url))
 const sbBin = path.resolve(enginedir, '../../.tools/sing-box')
@@ -346,6 +347,84 @@ test('节点服务器 / 终端分流「直连」「不进内核」的配置通�
     fs.rmSync(dir, { recursive: true, force: true })
   }
 })
+
+// 终端分流 / 「不进内核」按来源认终端的规则不管从共享网络入站进来的连接(客户端会话 2026-10-07:家里设成「直连」终端的电脑用
+// App 的节点分流连回路由器,内核看到的来源就是这台电脑,Google 被送去直连)。带来源条件的路由 / DNS 规则都挂上「入站不是共享网络」,
+// 别的规则一条不动,规则条数不变;去掉这个子条件就是原来那条(读规则的各处靠它);真内核认
+for (const mode of ['dnsmasq', 'hijack']) {
+  test(`共享网络入站不吃终端分流规则(dns.mode=${mode}):带来源条件的路由 / DNS 规则挂「入站不是共享网络」,其余不变,过 sing-box check`, { skip: skipIfNoBin }, () => {
+    requireBin()
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'openbox-checkshare-'))
+    try {
+      const sub = 'ss://YWVzLTI1Ni1nY206c2VjcmV0cHc=@us.example.com:8388#US-01'
+      const renamed = renameNodes(parseSubscription(sub).nodes)
+      const { groups } = groupNodesByRegion(renamed)
+      const proxy = groups[0].name
+      const builtin = builtinTags([])
+      const base = {
+        ipv6: false,
+        tun: { autoRedirect: true },
+        dns: { split: true, mode, direct: '223.5.5.5', proxy: '1.1.1.1', fakeIpForProxy: true },
+        routing: {
+          proxyTag: 'PROXY',
+          policies: [{ id: 'g', name: '谷歌', default: proxy, rulesets: ['geosite-google', 'geoip-google'] }],
+          custom: { rules: [{ type: 'ipCidr', value: '10.77.0.0/16', outbound: proxy }] },
+          fallbackDefault: 'direct',
+        },
+        clientRoutes: [
+          { id: 'a', sources: ['192.168.3.18'], outbound: builtin.direct },
+          { id: 'b', match: 'mac', macs: ['00:15:5d:03:0a:12'], outbound: builtin.direct },
+          { id: 'c', match: 'mac', macs: ['aa:bb:cc:00:11:22'], bypass: true },
+          { id: 'e', sources: ['192.168.3.20'], outbound: proxy },
+          { id: 'f', sources: ['192.168.3.21'], outbound: builtin.block },
+        ],
+        rulesetDir: dir,
+        clashApiSecret: 'testsecret',
+      }
+      const servers = [
+        { id: 'home', name: 'HOME-SS', protocol: 'shadowsocks', port: 8388, method: 'aes-256-gcm', password: 'testpw', enabled: true },
+        { id: 'lan', name: 'LAN', protocol: 'mixed', port: 7899, enabled: true },
+        { id: 'off', name: 'OFF', protocol: 'shadowsocks', port: 8389, method: 'aes-256-gcm', password: 'x', enabled: false },
+      ]
+      const build = (profile) => buildConfigDetailed({ nodes: renamed, regionGroups: groups, profile, rulesetDir: dir, directHostCidrs: ['203.0.113.7/32'] }).config
+      const plain = build(base)
+      const config = build({ ...base, servers })
+      const shareTags = ['share-home', 'share-lan']
+      assert.deepEqual(config.inbounds.filter((i) => i.tag.startsWith('share-')).map((i) => i.tag), shareTags, '停用的服务器没有入站')
+      const hasSource = (r) => Boolean(r) && (r.source_ip_cidr !== undefined || r.source_mac_address !== undefined)
+      for (const key of ['route', 'dns']) {
+        const before = plain[key].rules
+        const after = config[key].rules
+        assert.equal(after.length, before.length, `${key} 规则条数不变`)
+        let guarded = 0
+        after.forEach((rule, i) => {
+          const old = before[i]
+          const sourced = hasSource(old) || (old.type === 'logical' && old.rules.some(hasSource))
+          if (!sourced) {
+            assert.deepEqual(rule, old, `${key} #${i} 不带来源条件的规则不动`)
+            return
+          }
+          guarded++
+          assert.equal(rule.type, 'logical', `${key} #${i}`)
+          assert.equal(rule.mode, 'and', `${key} #${i}`)
+          assert.deepEqual(rule.rules[rule.rules.length - 1], { inbound: shareTags, invert: true }, `${key} #${i} 最后一个子条件是「入站不是共享网络」`)
+          assert.deepEqual(withoutShareGuard(rule), old, `${key} #${i} 去掉它就是原来那条`)
+        })
+        assert.ok(guarded >= 3, `${key} 的终端规则都挂上了(${guarded} 条)`)
+      }
+      const { rulesetTags } = buildRoute(base.routing, dir)
+      for (const tag of rulesetTags) compileSrs(dir, tag)
+      const cfgPath = path.join(dir, 'config.json')
+      prepareFlip(config, dir)
+      const tun = config.inbounds.find((i) => i.type === 'tun')
+      if (process.platform !== 'linux' && tun) delete tun.auto_redirect
+      fs.writeFileSync(cfgPath, JSON.stringify(config))
+      execFileSync(sbBin, ['check', '-c', cfgPath])
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+}
 
 test('一个节点都没命中的用户组也能过 sing-box check（挂 direct 占位）', { skip: skipIfNoBin }, () => {
   requireBin()

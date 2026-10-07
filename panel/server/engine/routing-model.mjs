@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import { dnsmasqSafeDomain } from './dns-names.mjs'
 import { RULE_LIST_IP_SUFFIX, isRuleListTag, listTagForUrl, ruleListIpTag } from './rule-list.mjs'
+import { stripShareGuardText } from './client-routes.mjs'
 // 分流模型的归一化与老档案迁移。
 //
 // 现在只有一层:**站点集**。一个站点集 = 一组匹配规则 + 内核里一个同名 selector,
@@ -819,7 +820,8 @@ export const splitNoDomainGuard = (rule) => {
 // 去掉、改成一个标记,免得用户在「查看详情」里看到一串正则
 const NO_DOMAIN_RULE_TEXT = ` && !(domain_regex=${DOMAIN_PRESENT_REGEX})`
 export const stripNoDomainGuardText = (text) => {
-  const s = String(text || '')
+  // 终端分流规则的「入站不是共享网络」(engine/client-routes.mjs)同样不给界面看
+  const s = stripShareGuardText(text)
   return s.includes(NO_DOMAIN_RULE_TEXT) ? { rule: s.split(NO_DOMAIN_RULE_TEXT).join(''), noDomain: true } : { rule: s, noDomain: false }
 }
 
