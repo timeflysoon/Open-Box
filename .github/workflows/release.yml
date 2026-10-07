@@ -313,10 +313,10 @@ jobs:
             dist-release/*.sha256
             dist-release/*components.json
 
-      # 客户端(安卓 APK / macOS DMG):取上游已签名的成品,原样附到本 Release。
+      # 客户端(安卓 APK / macOS DMG / Windows 安装包):取上游的成品,原样附到本 Release。
       # 客户端版本和面板版本不同步,也不是每个上游版本都带:每种客户端各自从内核所取的那个上游版本开始,
       # 往前找最近带它的版本;找不到只警告,不让发布失败。
-      - name: Attach client apps (Android / macOS) from upstream
+      - name: Attach client apps (Android / macOS / Windows) from upstream
         if: env.OPENBOX_KERNEL_SOURCE == 'upstream'
         env:
           GH_TOKEN: ${{ github.token }}
@@ -325,11 +325,11 @@ jobs:
           set -eu
           mkdir -p clients
           tags="$UPSTREAM_TAG $(gh release list -R "$OPENBOX_KERNEL_REPO" --limit 15 --json tagName -q '.[].tagName')"
-          for kind in android macos; do
+          for kind in android macos windows; do
             found_tag=""; names=""
             for t in $tags; do
               names=$(gh release view "$t" -R "$OPENBOX_KERNEL_REPO" --json assets -q '.assets[].name' \
-                | grep -E "^open-box-${kind}-.*\.(apk|dmg)(\.sha256)?$" || true)
+                | grep -E "^open-box-${kind}-.*\.(apk|dmg|exe)(\.sha256)?$" || true)
               if [ -n "$names" ]; then found_tag=$t; break; fi
             done
             if [ -z "$found_tag" ]; then
