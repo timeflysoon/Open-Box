@@ -268,13 +268,16 @@ cmd_start() {
 }
 
 # LuCI 页面用:rpcd 的 fs.exec 有超时,生成配置要十来秒(慢的机器加上降级更久),所以放到后台跑——先把状态写成
-# running,跑完 worker 把结果写回去,页面用 `open-box start --status` 轮询。后台派发照抄 update.sh 的 --detach
+# running,跑完 worker 把结果写回去,页面用 `open-box start --status` 轮询。后台派发照抄 update.sh 的 --detach。
+# setsid 也要套一层子壳 ( … & ):rpcd 的 exec 只要派发它的 shell 底下直接挂着后台子进程,就一直不回话(子进程
+# 输出全重定向了、早跑完了也一样),LuCI 等到超时报「操作失败:XHR request timed out」,内核其实起来了(GitHub #469;
+# 开发路由器 OpenWrt 25.12 上 ubus call file exec 实测:直接 & 等满 60 秒超时,套子壳 0 秒返回)
 cmd_start_detach() {
   echo running > "$DEPLOY_STATUS"
   if command -v setsid >/dev/null 2>&1; then
-    OPENBOX_DEPLOY_WORKER=1 setsid sh "$0" start > "$DEPLOY_LOG" 2>&1 < /dev/null &
+    ( OPENBOX_DEPLOY_WORKER=1 setsid sh "$0" start > "$DEPLOY_LOG" 2>&1 < /dev/null & )
   elif command -v busybox >/dev/null 2>&1 && busybox setsid true >/dev/null 2>&1; then
-    OPENBOX_DEPLOY_WORKER=1 busybox setsid sh "$0" start > "$DEPLOY_LOG" 2>&1 < /dev/null &
+    ( OPENBOX_DEPLOY_WORKER=1 busybox setsid sh "$0" start > "$DEPLOY_LOG" 2>&1 < /dev/null & )
   else
     # 连 nohup 都可能没有(#406 那种固件):有就套上,没有就靠 subshell 里忽略的信号直接起
     _ob_nohup=""

@@ -991,12 +991,14 @@ if [ "$DETACH" = "1" ]; then
     { echo "stage=failed"; echo "message=没法把升级进程挪出面板服务(systemd-run --scope 不可用),请 SSH 登录后运行 open-box update"; } > "$STATUS_PATH" 2>/dev/null || true
     die "没法把升级进程挪出面板服务(systemd-run --scope 不可用),在面板里升级会在停面板时被一起结束。请 SSH 登录后运行:open-box update"
   elif command -v setsid >/dev/null 2>&1; then
-    OPENBOX_UPDATE_CHANNEL_OVERRIDE="$CHANNEL_OVERRIDE" OPENBOX_UPDATE_MIRROR_PREFIX="$CLI_MIRROR_PREFIX" OPENBOX_UPDATE_EXPECT="$EXPECT_VERSION" OPENBOX_UPDATE_DISPATCHED=1 \
-      setsid sh "$0" >"$UPDATE_LOG" 2>&1 </dev/null &
+    # 套一层子壳 ( … & ):worker 直接挂在派发进程底下时,rpcd 的 fs.exec 一直不回话,LuCI 那条请求只能等到超时
+    # (GitHub #469 查清的,open-box 命令行 cmd_start_detach 有说明);套上以后派发完立刻返回
+    ( OPENBOX_UPDATE_CHANNEL_OVERRIDE="$CHANNEL_OVERRIDE" OPENBOX_UPDATE_MIRROR_PREFIX="$CLI_MIRROR_PREFIX" OPENBOX_UPDATE_EXPECT="$EXPECT_VERSION" OPENBOX_UPDATE_DISPATCHED=1 \
+      setsid sh "$0" >"$UPDATE_LOG" 2>&1 </dev/null & )
   elif command -v busybox >/dev/null 2>&1 && busybox setsid true >/dev/null 2>&1; then
     # BusyBox 常见的编译方式是保留 applet、但不创建 /usr/bin/setsid 链接。
-    OPENBOX_UPDATE_CHANNEL_OVERRIDE="$CHANNEL_OVERRIDE" OPENBOX_UPDATE_MIRROR_PREFIX="$CLI_MIRROR_PREFIX" OPENBOX_UPDATE_EXPECT="$EXPECT_VERSION" OPENBOX_UPDATE_DISPATCHED=1 \
-      busybox setsid sh "$0" >"$UPDATE_LOG" 2>&1 </dev/null &
+    ( OPENBOX_UPDATE_CHANNEL_OVERRIDE="$CHANNEL_OVERRIDE" OPENBOX_UPDATE_MIRROR_PREFIX="$CLI_MIRROR_PREFIX" OPENBOX_UPDATE_EXPECT="$EXPECT_VERSION" OPENBOX_UPDATE_DISPATCHED=1 \
+      busybox setsid sh "$0" >"$UPDATE_LOG" 2>&1 </dev/null & )
   else
     # 没有 setsid 的极简固件:双重 fork,避免把 worker 留在 fs.exec 的前台会话里。两层 subshell 都忽略
     # HUP/INT/TERM(忽略状态一直继承到 worker)、关闭输出后立即返回。有 nohup 就再套一层;连 nohup 都没有的

@@ -271,12 +271,13 @@ if [ "$DETACH" = "1" ]; then
   trap - EXIT
   _detach_args=""
   [ "$PURGE" -eq 1 ] && _detach_args="--purge"
+  # setsid 也套一层子壳 ( … & ):worker 直接挂在派发进程底下时,rpcd 的 fs.exec 一直不回话(GitHub #469,见 update.sh)
   if command -v setsid >/dev/null 2>&1; then
     # shellcheck disable=SC2086
-    setsid sh "$0" $_detach_args >"$UNINSTALL_LOG" 2>&1 </dev/null &
+    ( setsid sh "$0" $_detach_args >"$UNINSTALL_LOG" 2>&1 </dev/null & )
   elif command -v busybox >/dev/null 2>&1 && busybox setsid true 2>/dev/null; then
     # shellcheck disable=SC2086
-    busybox setsid sh "$0" $_detach_args >"$UNINSTALL_LOG" 2>&1 </dev/null &
+    ( busybox setsid sh "$0" $_detach_args >"$UNINSTALL_LOG" 2>&1 </dev/null & )
   else
     # 没有 setsid 的极简固件:双重 fork、忽略挂断信号,同样不把 worker 留在前台会话里。有 nohup 就套上;
     # 连 nohup 都没有的固件(#406)直接起 sh
