@@ -15,6 +15,7 @@ import crypto from 'node:crypto'
 import net from 'node:net'
 import { TUN_OUTPUT_MARK } from './lan-probe.mjs'
 import { childEnv } from './timezone.mjs'
+import { expectedQuery } from '../engine/test-url.mjs'
 
 // 探测实例自己的连接打上内核自身流量的标记,跳过正在运行的内核(和 init 脚本、entry-bypass 用的是同一个)
 export const PROBE_MARK = TUN_OUTPUT_MARK
@@ -37,6 +38,8 @@ const lastLine = (text) => stripAnsi(text).split('\n').map((l) => l.trim()).filt
 export const classifyProbeError = (message) => {
   const m = String(message || '').toLowerCase()
   if (!m) return 'error'
+  // 内核 tcp19:应答状态码不在「可接受状态码」里(站点回 403 / 404 之类),节点本身是通的
+  if (/unexpected status \d+/.test(m)) return 'status'
   if (/i\/o timeout|deadline exceeded|timeout|timed out/.test(m)) return 'timeout'
   if (/no such host|nxdomain|lookup |server misbehaving|dns/.test(m)) return 'dns'
   if (/connection refused/.test(m)) return 'refused'
@@ -181,9 +184,9 @@ export const createNodeProber = ({
       await ctx.writeFile(fetchPath, JSON.stringify(base()))
       results.forEach((r, i) => { if (r) report(i) })
       const reasonSlot = semaphore(REASON_CONCURRENCY)
-      await runPool(jobs.map((j, i) => ({ ...j, i })), CONCURRENCY, async ({ tag, url, i }) => {
+      await runPool(jobs.map((j, i) => ({ ...j, i })), CONCURRENCY, async ({ tag, url, expected, i }) => {
         if (results[i]) return
-        const r = await delayOf(tag, url, timeout)
+        const r = await delayOf(tag, url, timeout, expected)
         if (r !== 'pending') { results[i] = r; report(i); return }
         results[i] = await reasonSlot(() => reasonOf(tag, url))
         report(i)
@@ -220,8 +223,10 @@ export const createNodeProber = ({
       return { ok: false, reason: classifyProbeError(error), error: error.slice(0, 200) }
     }
 
-    async function delayOf(tag, url, ms) {
-      const q = `url=${encodeURIComponent(url)}&timeout=${ms}`
+    // expected:可接受状态码(内核 tcp19);回别的状态码时实例答 503、原因里写着 unexpected status,直接按它记,
+    // 不再补拨(tools fetch 不看状态码,补拨会成功,被错记成「时通时断」)
+    async function delayOf(tag, url, ms, expected = '') {
+      const q = `url=${encodeURIComponent(url)}&timeout=${ms}${expectedQuery(expected)}`
       try {
         const res = await fetchImpl(`${api}/proxies/${encodeURIComponent(tag)}/delay?${q}`, {
           headers: { Authorization: `Bearer ${secret}` },
@@ -235,6 +240,11 @@ export const createNodeProber = ({
         }
         if (res.status === 504) return { ok: false, reason: 'timeout' }
         if (res.status === 404) return { ok: false, reason: 'not-found' }
+        if (res.status === 503 && expected) {
+          const body = await res.json().catch(() => null)
+          const error = body && typeof body.error === 'string' ? body.error : ''
+          if (classifyProbeError(error) === 'status') return { ok: false, reason: 'status', error: error.slice(0, 200) }
+        }
         return 'pending'
       } catch {
         return { ok: false, reason: 'timeout' }

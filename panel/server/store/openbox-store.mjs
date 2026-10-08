@@ -77,6 +77,8 @@ export const DEFAULT_PROFILE = {
   // 默认 HTTP，用户可自定义 HTTP / HTTPS 地址(见 engine/test-url.mjs)
   testUrl: DEFAULT_TEST_URL,
   directTestUrl: DEFAULT_DIRECT_TEST_URL,
+  // 测速的「可接受状态码」(内核 tcp19,GitHub #482):空 = 什么应答都算通;节点组自己没写时用这个(engine/test-url.mjs)
+  testExpectedStatus: '',
   // 自动更新计划(面板进程内的定时器,见 system/scheduler.mjs):默认都关
   // channel 是自动更新走的通道;checkChannel 是卡片上手动「检查更新 / 立即更新」那个下拉框
   // 上次选的通道,记下来免得每次进页面都要重选

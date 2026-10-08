@@ -13,7 +13,7 @@ import { CLASH_API_BASE } from '../api/penetration.mjs'
 import { processUptime } from './service.mjs'
 import { parseDuration } from '../engine/duration.mjs'
 import { isInternalTag } from '../engine/user-groups.mjs'
-import { kernelTestUrl } from '../engine/test-url.mjs'
+import { kernelTestUrl, probeKeyUrl } from '../engine/test-url.mjs'
 
 export { parseDuration }
 
@@ -83,7 +83,8 @@ export const createLatencyScheduler = ({
     const groups = (cfg.outbounds || [])
       .filter((o) => o && o.type === 'urltest' && o.tag && !isInternalTag(o.tag))
       // 保留组配置的检测地址；随包内核的 Clash API 和原生定时探测均支持 HTTP / HTTPS。
-      .map((o) => ({ tag: o.tag, url: kernelTestUrl(o.url || ''), intervalMs: parseDuration(o.interval) || DEFAULT_INTERVAL_MS, members: Array.isArray(o.outbounds) ? o.outbounds : [] }))
+      // keyUrl:测速去重的键,带上组的可接受状态码(内核 tcp19 的 expected_status;故障转移那边同样这么记)
+      .map((o) => ({ tag: o.tag, url: kernelTestUrl(o.url || ''), keyUrl: probeKeyUrl(kernelTestUrl(o.url || ''), typeof o.expected_status === 'string' ? o.expected_status : ''), intervalMs: parseDuration(o.interval) || DEFAULT_INTERVAL_MS, members: Array.isArray(o.outbounds) ? o.outbounds : [] }))
     return groups
   }
 
@@ -144,7 +145,7 @@ export const createLatencyScheduler = ({
       for (const g of groups) {
         const id = owner(g.tag)
         probeCoordinator.unregisterOwner(id)
-        for (const member of leafMembersOf(proxies, g.members)) probeCoordinator.register(id, member, g.url, g.intervalMs)
+        for (const member of leafMembersOf(proxies, g.members)) probeCoordinator.register(id, member, g.keyUrl, g.intervalMs)
         registeredOwners.add(id)
       }
     }
@@ -163,8 +164,8 @@ export const createLatencyScheduler = ({
       const members = leafMembersOf(proxies, g.members)
       const due = members.filter((m) => {
         const t = latestTime(proxies[m])
-        const key = probeCoordinator?.keyOf(m, g.url)
-        const shared = key ? probeCoordinator.latest(m, g.url) : null
+        const key = probeCoordinator?.keyOf(m, g.keyUrl)
+        const shared = key ? probeCoordinator.latest(m, g.keyUrl) : null
         const observedAt = Math.max(t, shared?.at || 0)
         const ownSince = lastTested.get(`${g.tag}\0${m}`) || (!probeCoordinator ? lastTested.get(m) : 0) || 0
         const since = ownSince || observedAt
@@ -219,11 +220,11 @@ export const createLatencyScheduler = ({
           if (failedThisRound) {
             samples.push({ name: m, time, delay: 0 })
             // 内核组测速失败时删掉历史,分不出超时还是连不上;按超时交给共享时间线(故障转移按它判「当前页签全部超时」)
-            probeCoordinator?.observe(m, g.url, { ok: false, delay: 0, at, reason: 'timeout' })
+            probeCoordinator?.observe(m, g.keyUrl, { ok: false, delay: 0, at, reason: 'timeout' })
           } else if (passed) {
-            probeCoordinator?.observe(m, g.url, { ok: true, delay: Number(passed[m]), at: latest && Date.parse(latest.time) ? Date.parse(latest.time) : at })
+            probeCoordinator?.observe(m, g.keyUrl, { ok: true, delay: Number(passed[m]), at: latest && Date.parse(latest.time) ? Date.parse(latest.time) : at })
           } else {
-            probeCoordinator?.observe(m, g.url, { ok: Number(latest.delay) > 0, delay: Number(latest.delay) || 0, at: Date.parse(latest.time) || at })
+            probeCoordinator?.observe(m, g.keyUrl, { ok: Number(latest.delay) > 0, delay: Number(latest.delay) || 0, at: Date.parse(latest.time) || at })
           }
         }
         history.recordSamples(samples)

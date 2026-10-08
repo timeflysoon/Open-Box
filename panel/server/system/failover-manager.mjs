@@ -37,7 +37,7 @@ import {
   RECHECK_DELAY_MS, assessLane, decideRound, finishRound, initFailoverState, laneObservation, laneRole, needsLatestHistory,
   needsSwitch, nextRoundDelay, persistedOf, recordProbes, roundPlan,
 } from '../engine/failover-core.mjs'
-import { kernelTestUrl } from '../engine/test-url.mjs'
+import { expectedQuery, kernelTestUrl, normalizeExpectedStatus, probeKeyUrl } from '../engine/test-url.mjs'
 import { configMetaPath } from './deploy.mjs'
 import { processUptime } from './service.mjs'
 
@@ -167,12 +167,13 @@ export const createFailoverManager = ({
   // 本地等回话要给排队留时间;老内核不认 priority 参数也照常测
   // since(毫秒):复查时带上这一次失败的时刻——内核自己对正在用的节点也会在 10 秒后复查(tcp14),两边都是「比这次失败更新的
   // 一个结果」:谁先到谁真测,后到的直接用那个结果(正在测就等它),同一个节点只多测一次
-  const probeNode = async (tag, url, timeoutMs, intervalMs, force = false, since = 0) => {
+  // expected:可接受状态码(内核 tcp19),回别的状态码内核按失败答(503)
+  const probeNode = async (tag, url, timeoutMs, intervalMs, force = false, since = 0, expected = '') => {
     const at = now()
     const priority = force ? 'critical' : 'interactive'
     const sinceQuery = force && since > 0 ? `&since=${Math.floor(since)}` : ''
     try {
-      const res = await withTimeout(fetchImpl, api(`/proxies/${encodeURIComponent(tag)}/delay?url=${encodeURIComponent(url)}&timeout=${timeoutMs}&force=${force}&interval=${intervalMs}&priority=${priority}${sinceQuery}`), { headers: headers() }, timeoutMs + (force ? 20_000 : 60_000))
+      const res = await withTimeout(fetchImpl, api(`/proxies/${encodeURIComponent(tag)}/delay?url=${encodeURIComponent(url)}&timeout=${timeoutMs}&force=${force}&interval=${intervalMs}&priority=${priority}${sinceQuery}${expectedQuery(expected)}`), { headers: headers() }, timeoutMs + (force ? 20_000 : 60_000))
       if (!res) return { ok: null, at, reason: 'no-response' }
       let body = null
       try { body = await res.json() } catch { /* handled as zero delay or unavailable below */ }
@@ -218,18 +219,19 @@ export const createFailoverManager = ({
     // 这轮开始前内核对这个组的看法:父组和页签引用都在才动手,并给出这轮要测的节点(复查轮强制重测当前页签的)
     const plan = roundPlan(state, proxies)
     if (plan.skip) return { skipped: plan.skip }
-    const { url, timeoutMs, recheckRound } = plan
+    const { url, expected = '', timeoutMs, recheckRound } = plan
     const ownInterval = plan.intervalMs
+    const keyUrl = probeKeyUrl(url, expected)
 
     // 1. 节点探测(去重、有界并发)
     const results = new Map()
-    const probeInterval = (tag) => (probeCoordinator ? probeCoordinator.intervalFor(probeCoordinator.keyOf(tag, url), ownInterval) : ownInterval)
+    const probeInterval = (tag) => (probeCoordinator ? probeCoordinator.intervalFor(probeCoordinator.keyOf(tag, keyUrl), ownInterval) : ownInterval)
     if (plan.probes.length) {
       const at = now()
       const list = await mapLimit(plan.probes, probeConcurrency, async ({ tag, force, since }) => {
-        const run = () => probeNode(tag, url, timeoutMs, probeInterval(tag), force, since)
+        const run = () => probeNode(tag, url, timeoutMs, probeInterval(tag), force, since, expected)
         const r = probeCoordinator
-          ? await probeCoordinator.request(force ? { tag, url, intervalMs: probeInterval(tag), run, force: true } : { tag, url, intervalMs: ownInterval, run })
+          ? await probeCoordinator.request(force ? { tag, url: keyUrl, intervalMs: probeInterval(tag), run, force: true } : { tag, url: keyUrl, intervalMs: ownInterval, run })
           : await run()
         return r || { ok: null, at, reason: 'no-result' }
       })
@@ -322,7 +324,8 @@ export const createFailoverManager = ({
         const id = `failover:${g.id}`
         probeCoordinator.unregisterOwner(id)
         const intervalMs = Math.max(5000, Number(g.settings?.intervalMs) || 300_000)
-        const url = kernelTestUrl(g.settings?.testUrl || '')
+        // 去重的键带上可接受状态码:同一节点同一地址,状态码要求不同的不能共用结果
+        const url = probeKeyUrl(kernelTestUrl(g.settings?.testUrl || ''), normalizeExpectedStatus(g.settings?.expectedStatus) ?? '')
         for (const lane of g.lanes) for (const tag of lane.valid) probeCoordinator.register(id, tag, url, intervalMs)
         registeredOwners.add(id)
       }

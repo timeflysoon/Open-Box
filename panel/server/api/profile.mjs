@@ -4,6 +4,7 @@ import { validateDnsFilter } from '../engine/dns-filter.mjs'
 import { DNS_REWRITE_DEFAULTS, validateDnsRewrite } from '../engine/dns-rewrite.mjs'
 import { RESERVED_PORTS, SERVER_PROTOCOLS, SS_METHODS } from '../engine/servers.mjs'
 import { normalizeServerInfo, validateServerInfo } from '../engine/server-info.mjs'
+import { normalizeExpectedStatus } from '../engine/test-url.mjs'
 import { validateShareRegions } from '../engine/share-regions.mjs'
 import { clientMatch, isIpOrCidr, isMac } from '../engine/client-routes.mjs'
 import { validateChainProxies } from '../engine/chain-proxy.mjs'
@@ -97,6 +98,10 @@ export const validateProfilePatch = (patch, { reservedNames = [] } = {}) => {
 
   for (const key of ['testUrl', 'directTestUrl']) {
     if (key in patch && !isHttpUrl(patch[key])) return `${key} must be an http(s) URL`
+  }
+  // 全局的「可接受状态码」(内核 tcp19,engine/test-url.mjs):空 / * = 不限
+  if ('testExpectedStatus' in patch && normalizeExpectedStatus(patch.testExpectedStatus) === null) {
+    return 'testExpectedStatus must be status codes or ranges joined by "/", like 200-399 or 204'
   }
 
   // 站点集里的规则集链接:必须是 http(s) 网址(部署时会去拉,拉回来的东西要编成规则集)
@@ -535,6 +540,7 @@ export const registerProfileRoutes = (app, { store, applyNow = null, onShareRegi
     }
     const renamed = Array.isArray(patch.chainProxies) ? applyChainRenames(store, patch) : []
     if ('serverInfo' in patch) patch.serverInfo = normalizeServerInfo(patch.serverInfo)
+    if ('testExpectedStatus' in patch) patch.testExpectedStatus = normalizeExpectedStatus(patch.testExpectedStatus) ?? ''
     // App 里节点的图标、名称统一在「路由器标识」里设(用户 2026-10-04),共享服务器自己不再带图标:老数据里的一起丢掉
     if (Array.isArray(patch.servers)) patch.servers = patch.servers.map((server) => Object.fromEntries(Object.entries(server).filter(([key]) => key !== 'icon' && key !== 'iconSvg')))
     const profile = store.setProfile(patch)
@@ -542,7 +548,7 @@ export const registerProfileRoutes = (app, { store, applyNow = null, onShareRegi
     // 用户自己选了地区:后台按出口 IP 自动判的那一次就不做了(system/router-region.mjs)
     if (patch.dns && typeof patch.dns === 'object' && 'region' in patch.dns) cancelRegionDetect(store)
     let applied
-    if (typeof applyNow === 'function' && ['chainProxies', 'testUrl', 'routing'].some((key) => key in patch)) {
+    if (typeof applyNow === 'function' && ['chainProxies', 'testUrl', 'testExpectedStatus', 'routing'].some((key) => key in patch)) {
       try { applied = appliedSummary(await applyNow()) } catch (error) { applied = { ok: false, changed: 0, reason: error instanceof Error ? error.message : String(error) } }
     }
     res.json({ profile, ...(renamed.length ? { renamed } : {}), ...(applied ? { applied } : {}) })

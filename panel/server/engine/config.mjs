@@ -120,6 +120,7 @@ export const buildConfigDetailed = ({ nodes, profile, userGroups, systemDns, loc
   // 旁路计划)只用 publicTags——内部子组不能漏进候选
   const { outbounds: userGroupOutbounds, builtin, publicTags, failover } = emitUserGroups(userGroups || [], allNodes, {
     testUrl: profile.testUrl,
+    expectedStatus: profile.testExpectedStatus,
   })
 
   // 每个站点集在内核里就是一个同名 selector,成员是「节点管理」里启用着的条目

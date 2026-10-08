@@ -5,7 +5,7 @@ import { classifyProbeError, createNodeProber, DEFAULT_PROBE_TIMEOUT_MS } from '
 import { CLASH_API_BASE } from './penetration.mjs'
 import { emitEndpoint } from '../engine/emit-endpoint.mjs'
 import { emitOutbound } from '../engine/emit-outbound.mjs'
-import { DEFAULT_TEST_URL } from '../engine/test-url.mjs'
+import { DEFAULT_TEST_URL, expectedQuery, normalizeExpectedStatus } from '../engine/test-url.mjs'
 import { activeNodes, resolveNodes } from './subscriptions.mjs'
 import { fetchSelections, resolveSelections } from './deploy-runner.mjs'
 import { chainNodes, parseChainNode } from '../engine/chain-proxy.mjs'
@@ -126,8 +126,9 @@ export const registerNodeLatencyRoutes = (app, { ctx, paths, store = null, fetch
     }
   }
   // 内核测一个节点。null = 内核里没有这个节点(交给测速实例);reused = 内核拿的是别人刚测完的结果(不另记一笔)
-  const kernelDelay = async (tag, url, timeoutMs) => {
-    const q = `url=${encodeURIComponent(url)}&timeout=${timeoutMs}&force=false&interval=${KERNEL_REUSE_MS}&priority=interactive`
+  // expected:可接受状态码(内核 tcp19,'' = 不限)
+  const kernelDelay = async (tag, url, timeoutMs, expected = '') => {
+    const q = `url=${encodeURIComponent(url)}&timeout=${timeoutMs}&force=false&interval=${KERNEL_REUSE_MS}&priority=interactive${expectedQuery(expected)}`
     let res
     try {
       res = await fetchImpl(`${CLASH_API_BASE}/proxies/${encodeURIComponent(tag)}/delay?${q}`, { headers: kernelHeaders(), signal: AbortSignal.timeout(timeoutMs + KERNEL_QUEUE_GRACE_MS) })
@@ -150,6 +151,17 @@ export const registerNodeLatencyRoutes = (app, { ctx, paths, store = null, fetch
       const u = store?.getProfile?.()?.testUrl
       return typeof u === 'string' && u.trim() ? u.trim() : DEFAULT_TEST_URL
     } catch { return DEFAULT_TEST_URL }
+  }
+  // 用全局测速地址测的时候,也按全局的「可接受状态码」判(后端设置 · 测速地址;内核 tcp19,GitHub #482):和自动择优 /
+  // 故障转移的判断一致,站点回 403 的节点手动测也显示不通。用别的地址测(组自己的地址等)不带
+  const expectedFor = (url) => {
+    if (url !== testUrl()) return ''
+    try { return normalizeExpectedStatus(store?.getProfile?.()?.testExpectedStatus) ?? '' } catch { return '' }
+  }
+  // 交给测速实例的任务:不限状态码时不带 expected 字段,和以前一样
+  const probeJob = (tag, url) => {
+    const expected = expectedFor(url)
+    return expected ? { tag, url, expected } : { tag, url }
   }
   const router = express.Router({ caseSensitive: true })
   router.use(express.json({ limit: '10mb' }))
@@ -228,7 +240,7 @@ export const registerNodeLatencyRoutes = (app, { ctx, paths, store = null, fetch
         continue
       }
       outbounds.push(outbound)
-      jobs.push({ tag: outbound.tag, url })
+      jobs.push(probeJob(outbound.tag, url))
       jobIndex.push(i)
     }
     const probed = await probe.run({ outbounds, dnsServers: nodeDns ? nodeDns.servers : [], jobs, timeoutMs })
@@ -285,7 +297,8 @@ export const registerNodeLatencyRoutes = (app, { ctx, paths, store = null, fetch
     for (const j of raw) {
       if (!j || typeof j.tag !== 'string' || !j.tag || j.tag.length > 256) return { status: 400, error: 'jobs[] must be { tag, url?, record? }' }
       if (j.url !== undefined && !validUrl(j.url)) return { status: 400, error: `bad url for ${j.tag}` }
-      jobs.push({ tag: j.tag, url: j.url ? j.url.trim() : testUrl(), record: j.record !== false })
+      const url = j.url ? j.url.trim() : testUrl()
+      jobs.push({ tag: j.tag, url, expected: expectedFor(url), record: j.record !== false })
     }
     return { jobs }
   }
@@ -297,7 +310,7 @@ export const registerNodeLatencyRoutes = (app, { ctx, paths, store = null, fetch
     const unique = []
     const slotOf = new Map()
     const slots = jobs.map((j) => {
-      const key = `${j.tag}\0${j.url}`
+      const key = `${j.tag}\0${j.url}\0${j.expected}`
       if (!slotOf.has(key)) { slotOf.set(key, unique.length); unique.push({ ...j }) } else if (j.record) unique[slotOf.get(key)].record = true
       return slotOf.get(key)
     })
@@ -314,7 +327,7 @@ export const registerNodeLatencyRoutes = (app, { ctx, paths, store = null, fetch
     const stale = kernelStale ? (await kernelStale.get().catch(() => null))?.staleTags || new Set() : new Set()
     const viaKernel = inKernel ? unique.map((j, i) => ({ ...j, i })).filter((j) => inKernel.has(j.tag) && !stale.has(j.tag)) : []
     const kernelResults = await mapLimit(viaKernel, KERNEL_REQUESTS, async (j) => {
-      const r = await kernelDelay(j.tag, j.url, timeoutMs)
+      const r = await kernelDelay(j.tag, j.url, timeoutMs, j.expected)
       // null = 内核里其实没有,下面交给测速实例,那时再报
       if (r) report(j.i)
       return r
@@ -333,7 +346,7 @@ export const registerNodeLatencyRoutes = (app, { ctx, paths, store = null, fetch
       for (const j of rest) if (problems.has(j.tag)) { uniqueResults[j.i] = problems.get(j.tag); report(j.i) }
       const runnable = rest.filter((j) => !problems.has(j.tag))
       const probed = runnable.length
-        ? await probe.run({ outbounds, endpoints, dnsServers, jobs: runnable.map(({ tag, url }) => ({ tag, url })), timeoutMs, onResult: (k) => report(runnable[k].i) })
+        ? await probe.run({ outbounds, endpoints, dnsServers, jobs: runnable.map(({ tag, url, expected }) => (expected ? { tag, url, expected } : { tag, url })), timeoutMs, onResult: (k) => report(runnable[k].i) })
         : []
       runnable.forEach((j, k) => { uniqueResults[j.i] = shapeResult(probed[k]) })
     }
@@ -410,7 +423,7 @@ export const registerNodeLatencyRoutes = (app, { ctx, paths, store = null, fetch
     }
 
     // 测速:和订阅节点同一个测速实例
-    const [latency] = await probe.run({ outbounds: [chainOutbound, ...upstreamSet.outbounds], dnsServers: upstreamSet.dnsServers, jobs: [{ tag: CHAIN_PROBE_TAG, url }], timeoutMs })
+    const [latency] = await probe.run({ outbounds: [chainOutbound, ...upstreamSet.outbounds], dnsServers: upstreamSet.dnsServers, jobs: [probeJob(CHAIN_PROBE_TAG, url)], timeoutMs })
     const shaped = shapeResult(latency)
     const out = { via: upstreamSet.via, ...shaped, ...(shaped.ok ? {} : { error: shaped.error || shaped.reason }) }
 

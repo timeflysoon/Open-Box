@@ -7,7 +7,7 @@
 // 规则(用户 2026-09-30 定):当前页签仍通过就留着;确认失败 → RECHECK_DELAY_MS 后强制复查当前页签 → 仍不通才按
 // 顺序换到第一个通过的候选;主用连续通过满 recoveryHoldMs 且开了「恢复后切回」就切回主用;全部候选确认失败切兜底
 // 拒绝;未知不触发切换;用户改了页签顺序是一次「按新优先级重选」的待办。细节见 failover-manager.mjs 文件头
-import { kernelTestUrl } from './test-url.mjs'
+import { kernelTestUrl, normalizeExpectedStatus } from './test-url.mjs'
 
 // 当前页签不通之后多久复查一次(用户 2026-09-30 定的规则:不通 → 10 秒后再测一次 → 仍不通才换页签)
 export const RECHECK_DELAY_MS = 10_000
@@ -83,7 +83,8 @@ export const recheckTargets = (state, proxies) => {
 
 // 一轮之前:proxies 是 GET /proxies 的 proxies。父组 / 页签引用不在(部署到一半、内核正在重启)就给 skip,不动手;
 // 否则给这轮的参数和要测的节点(去重)。复查轮(上一轮当前页签确认失败)只强制重测当前页签的节点,带上那次失败的
-// 完成时刻(since);别的照常复用间隔内的结果。没有测速地址就一个都不测(页签全算未知)
+// 完成时刻(since);别的照常复用间隔内的结果。没有测速地址就一个都不测(页签全算未知)。
+// expected:可接受状态码(内核 tcp19,'' = 不限),测速请求带上它,回别的状态码算这个节点失败
 export const roundPlan = (state, proxies) => {
   const s = state.settings || {}
   const parent = proxies[state.tag]
@@ -101,7 +102,9 @@ export const roundPlan = (state, proxies) => {
     const since = force ? (node && node.ok === false && Number.isFinite(node.at) ? node.at : state.lastRoundAt || 0) : 0
     return { tag, force, since }
   }) : []
-  return { url, timeoutMs: Number(s.timeoutMs) || 5000, intervalMs: Number(s.intervalMs) || 300_000, recheckRound, probes }
+  // 不限时不带这个字段(计划和以前一样;App 读不到当空串)
+  const expected = normalizeExpectedStatus(s.expectedStatus) ?? ''
+  return { url, ...(expected ? { expected } : {}), timeoutMs: Number(s.timeoutMs) || 5000, intervalMs: Number(s.intervalMs) || 300_000, recheckRound, probes }
 }
 
 // 记下这一轮的探测结果。results:{ [节点]: { ok: true | false | null, delay, at, reused, reason } }(ok null = 探测本身出了问题)

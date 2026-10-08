@@ -195,6 +195,8 @@ test('PUT /groups（failover）:动态模式、页签 id 重复、成员是组 /
     [fo({ failover: { failureThreshold: 0 } }), /连续失败轮数/],
     [fo({ failover: { recoveryHoldMs: -5 } }), /恢复等待/],
     [fo({ failover: { restorePrimary: 'yes' } }), /主用恢复后切回/],
+    [fo({ expectedStatus: 'abc' }), /可接受状态码写法不对/],
+    [fo({ expectedStatus: '300-200' }), /可接受状态码写法不对/],
     [fo({ type: 'fallback' }), /类型不合法/],
     [fo({ name: '__fo:x', type: 'selector', members: ['n1'] }), /前缀留给内部出站/],
   ]

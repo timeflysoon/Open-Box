@@ -6,6 +6,7 @@ import { parseDuration } from '../engine/duration.mjs'
 import { DNSMASQ_OUTBOUND_TAG } from '../engine/config.mjs'
 import { appliedSummary } from './subscriptions.mjs'
 import { saveNameError } from '../engine/name-guard.mjs'
+import { normalizeExpectedStatus } from '../engine/test-url.mjs'
 
 const isStr = (v) => typeof v === 'string' && v.trim().length > 0
 const numIn = (v, [lo, hi]) => {
@@ -132,6 +133,11 @@ export const registerGroupRoutes = (app, { store, applyNow = null } = {}) => {
       }
       if (typeof raw.name === 'string' && raw.name.trim().startsWith(FAILOVER_INTERNAL_PREFIX)) {
         res.status(400).json({ error: `分组名不能以「${FAILOVER_INTERNAL_PREFIX}」开头,这个前缀留给内部出站` })
+        return
+      }
+      // 可接受状态码(内核 tcp19,engine/test-url.mjs)写错了也要说出来,不能悄悄当成不限
+      if (raw.expectedStatus !== undefined && normalizeExpectedStatus(raw.expectedStatus) === null) {
+        res.status(400).json({ error: `分组「${raw.name ?? ''}」的可接受状态码写法不对:${String(raw.expectedStatus)}(状态码或范围,用 / 隔开,如 200-399 或 204)` })
         return
       }
     }

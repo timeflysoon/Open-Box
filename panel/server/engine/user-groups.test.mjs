@@ -367,6 +367,38 @@ test('url-test 组的测速地址:组里填了用组的,没填用档案里的全
   assert.equal(noGlobal[1].url, 'http://www.gstatic.com/generate_204')
 })
 
+// GitHub #482(#395):可接受状态码(内核 tcp19 的 expected_status)。组里写了用组的,没写用档案的全局设置;
+// 都没写就不往配置里写这个字段——和以前一字不差,老内核不认这个字段
+test('可接受状态码:组的优先、没写用全局;都没写不出现 expected_status;故障转移内部子组和运行映射都带上', () => {
+  const groups = [
+    { id: 'a', name: 'A', type: 'urltest', mode: 'dynamic', keywords: [], expectedStatus: ' 204 , 200-299 ' },
+    { id: 'b', name: 'B', type: 'urltest', mode: 'dynamic', keywords: [] },
+    { id: 'c', name: 'C', type: 'selector', mode: 'dynamic', keywords: [], expectedStatus: '204' },
+    failoverGroup({ expectedStatus: '200-399' }),
+    failoverGroup({ id: 'fo2', name: '主备2' }),
+  ]
+  const plain = emitUserGroups(groups, nodes, {})
+  const byTag = (r, tag) => r.outbounds.find((o) => o.tag === tag)
+  assert.equal(byTag(plain, 'A').expected_status, '204/200-299')
+  assert.ok(!('expected_status' in byTag(plain, 'B')), '组和全局都没写:不写这个字段')
+  assert.ok(!('expected_status' in byTag(plain, 'C')), 'selector 不测速,没有这个字段')
+  assert.equal(byTag(plain, '__fo:fo1:B').expected_status, '200-399')
+  assert.ok(!('expected_status' in byTag(plain, '__fo:fo2:B')))
+  assert.equal(plain.failover.find((f) => f.id === 'fo1').settings.expectedStatus, '200-399')
+  assert.ok(!('expectedStatus' in plain.failover.find((f) => f.id === 'fo2').settings))
+
+  const global = emitUserGroups(groups, nodes, { expectedStatus: '200-399' })
+  assert.equal(byTag(global, 'A').expected_status, '204/200-299', '组自己写了的不被全局覆盖')
+  assert.equal(byTag(global, 'B').expected_status, '200-399')
+  assert.equal(byTag(global, '__fo:fo2:B').expected_status, '200-399')
+  assert.equal(global.failover.find((f) => f.id === 'fo2').settings.expectedStatus, '200-399')
+  // 全局写成 * 和没写一样
+  assert.ok(!('expected_status' in byTag(emitUserGroups(groups, nodes, { expectedStatus: '*' }), 'B')))
+  // 写法不对的(保存时接口已经拦了)读出来当没写
+  assert.equal(normalizeGroup({ id: 'x', name: 'X', type: 'urltest', expectedStatus: 'abc' }, 0).expectedStatus, '')
+  assert.equal(normalizeGroup({ id: 'x', name: 'X', type: 'urltest', expectedStatus: '*' }, 0).expectedStatus, '')
+})
+
 test('自动择优组带 idle_timeout:内核默认 30 分钟不用就停止健康检查,停了就一直挂在失效的线路上', () => {
   const { outbounds } = emitUserGroups(
     [{ id: 'g', name: '自动', type: 'urltest', mode: 'static', members: ['A', 'B'] }],

@@ -453,6 +453,19 @@ test('测速地址是 http:// 的:单节点探测和子组重选都保留 HTTP �
   assert.ok(delayCalls.every((c) => c.includes('url=http%3A%2F%2Fcp.cloudflare.com%2Fgenerate_204&')), delayCalls.join('\n'))
 })
 
+// GitHub #482:可接受状态码(内核 tcp19)。单节点探测带上 expected,回别的状态码内核答 503,按这个节点失败算;
+// 没写的组请求和以前一样不带这个参数(老内核也照常测)
+test('可接受状态码:写了的组单节点探测带 expected,没写的不带', async () => {
+  const withExpected = setup({ failover: [mapping({ settings: { ...mapping().settings, expectedStatus: '200-399' } })] })
+  await withExpected.mgr.tick()
+  const probes = withExpected.k.calls.filter((c) => /\/proxies\/[^/]+\/delay\?/.test(c))
+  assert.ok(probes.length >= 5, probes.join('\n'))
+  assert.ok(probes.every((c) => c.includes('&expected=200-399')), probes.join('\n'))
+  const plain = setup()
+  await plain.mgr.tick()
+  assert.ok(plain.k.calls.filter((c) => c.includes('/delay?')).every((c) => !c.includes('expected=')))
+})
+
 // ---------- 用户改了页签顺序(主备优先级)之后的重选 ----------
 const reorderTo = ({ k, ctx }, ids, metaAt = 'v2') => {
   const original = mapping()

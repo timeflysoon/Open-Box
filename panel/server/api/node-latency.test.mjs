@@ -339,6 +339,31 @@ const fakeKernel = ({ tags = [], delays = {}, queue = null } = {}) => {
   return { calls, fetchImpl }
 }
 
+// GitHub #482:用全局测速地址测时带上全局的可接受状态码(内核 tcp19);用别的地址测不带。内核回 503 + unexpected status
+// 记成「状态码不符」(status),不是超时
+test('可接受状态码:全局地址的测速带 expected,别的地址不带;状态码不符单独归类', async () => {
+  const { store, history } = storedWorld()
+  store.setProfile({ testExpectedStatus: '200-399' })
+  const kernel = fakeKernel({ tags: ['多宝 | 美国-01', '多宝 | 香港-01'], delays: {
+    '多宝 | 美国-01': { status: 503, body: { message: 'An error occurred in the delay test', error: 'unexpected status 403' } },
+    '多宝 | 香港-01': { body: { delay: 66 } },
+  } })
+  const prober = fakeProber()
+  const { baseUrl, close } = await startApp({ store, history, prober, fetchImpl: kernel.fetchImpl })
+  try {
+    const body = await (await post(baseUrl, { jobs: [{ tag: '多宝 | 美国-01' }, { tag: '多宝 | 香港-01', url: 'http://cp.cloudflare.com/' }], timeoutMs: 5000 })).json()
+    assert.equal(body.results[0].ok, false)
+    assert.equal(body.results[0].reason, 'status')
+    assert.deepEqual(body.results[1], { ok: true, ms: 66 })
+    const usCall = kernel.calls.find((c) => c.startsWith('/proxies/多宝 | 美国-01/delay'))
+    const hkCall = kernel.calls.find((c) => c.startsWith('/proxies/多宝 | 香港-01/delay'))
+    assert.match(usCall, /&expected=200-399$/)
+    assert.ok(!hkCall.includes('expected='), hkCall)
+  } finally {
+    await close()
+  }
+})
+
 test('卡片 / 代理页:内核里有、定义也是最新的节点交给内核测(interactive、15 秒内复用刚测过的);内核里没有 / 还是旧定义的走临时测速实例', async () => {
   const { store, history } = storedWorld()
   const kernel = fakeKernel({ tags: ['多宝 | 美国-01', '多宝 | 香港-01'], delays: { '多宝 | 美国-01': { body: { delay: 88, time: '2026-09-22T07:59:59.000Z', reused: false } } } })

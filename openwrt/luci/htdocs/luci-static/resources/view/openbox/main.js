@@ -375,6 +375,17 @@ function deployCore() {
 		if (!res || res.code !== 0) {
 			throw new Error((res && (res.stderr || res.stdout)) || ('exit ' + (res && res.code)));
 		}
+	}, function (err) {
+		// 这条请求没等到回话(XHR request timed out):老版本命令行派发后台部署的写法会让 rpcd 一直不回(GitHub #469,
+		// 见命令行 cmd_start_detach),命令其实已经派发了。状态还是「在部署」就接着等结果;已经跑完的结果分不清是不是
+		// 这一次的,不断成败——提示稍后再看,刷新页面让状态跟上(以前直接报「操作失败」,内核却已经起来了)
+		return fs.exec(CLI_PATH, [ 'start', '--status' ]).catch(function () { return null; }).then(function (res) {
+			if (String((res && res.stdout) || '').trim() === 'running') return;
+			var uncertain = new Error(err && err.message ? err.message : String(err));
+			uncertain.uncertain = true;
+			throw uncertain;
+		});
+	}).then(function () {
 		ui.addNotification(null, E('p', tr('Generating the config and starting the core…')), 'info');
 		return waitDeploy(Date.now() + DEPLOY_WAIT_MS);
 	}).then(function (result) {
@@ -387,6 +398,11 @@ function deployCore() {
 		}
 		window.setTimeout(function () { location.reload(); }, 1500);
 	}).catch(function (err) {
+		if (err && err.uncertain) {
+			ui.addNotification(null, E('p', tr('The core is still starting. Check it in the Open-Box panel (Backend) in a moment.')), 'warning');
+			window.setTimeout(function () { location.reload(); }, 3000);
+			return;
+		}
 		ui.addNotification(null, E('p', fmt('Action failed: %s', err.message || err)), 'error');
 	});
 }
@@ -647,6 +663,10 @@ function pollUninstall(onStage, staleText) {
 // 只要状态文件显示出进展或已完成,这个 exec 错误就被当噪音丢弃,交给已经在
 // 独立运行的两路轮询给出真正的结论(见 startUpdate() 里 updateObserved 的
 // 说明)。
+// 2026-10-08 补(GitHub #469 查清):rpcd 不回话是派发写法造成的——worker 直接挂在
+// 派发它的 shell 底下(setsid … &)时 rpcd 的 exec 一直不回,套一层子壳 ( … & ) 就
+// 立刻返回。update.sh / uninstall.sh / open-box start 的 --detach 都已改成套子壳;
+// 这里以状态文件为准的做法照留,老版本脚本照样适用。
 // ---------------------------------------------------------------------------
 var UPDATE_PATH = '/opt/open-box/update.sh';
 var UPDATE_LOG_PATH = '/tmp/openbox-update.log';

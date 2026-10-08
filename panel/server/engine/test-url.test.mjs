@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { DEFAULT_DIRECT_TEST_URL, DEFAULT_TEST_URL, ensureTestUrlDefaults, kernelTestUrl } from './test-url.mjs'
+import { DEFAULT_DIRECT_TEST_URL, DEFAULT_TEST_URL, ensureTestUrlDefaults, expectedQuery, kernelTestUrl, normalizeExpectedStatus, probeKeyUrl } from './test-url.mjs'
 import { createStore } from '../store/openbox-store.mjs'
 
 const memStore = () => {
@@ -41,4 +41,21 @@ test('保留自定义 HTTP 和 HTTPS 地址；兼容早期直连默认值', () =
   custom.setProfile({ directTestUrl: 'http://www.msftconnecttest.com/connecttest.txt' })
   assert.equal(ensureTestUrlDefaults(custom), true)
   assert.equal(custom.getProfile().directTestUrl, DEFAULT_DIRECT_TEST_URL)
+})
+
+// 和内核 common/urltest/expected.go(tcp19)同一套写法:空 / * 不限;状态码或范围用 / 或 , 隔开
+test('可接受状态码:规范写法和内核一致,写法不对回 null', () => {
+  for (const [raw, want] of [
+    [undefined, ''], [null, ''], ['', ''], ['*', ''], [' * ', ''],
+    ['204', '204'], ['200/204', '200/204'], ['200-299/302', '200-299/302'], [' 200 - 399 , 418 ', '200-399/418'],
+    ['200-200', '200'], ['100-599', '100-599'], ['200-299,,302', '200-299/302'],
+  ]) assert.equal(normalizeExpectedStatus(raw), want, String(raw))
+  for (const raw of ['abc', '99', '600', '300-200', '/', ',', '200-', '-200', '!200', '0200', '2OO', 204, {}]) {
+    assert.equal(normalizeExpectedStatus(raw), null, String(raw))
+  }
+  // 测速去重的键:不限时就是地址本身(和以前一样),限了带上规范写法
+  assert.equal(probeKeyUrl('http://a.test/', ''), 'http://a.test/')
+  assert.equal(probeKeyUrl('http://a.test/', '200-399'), 'http://a.test/ expected=200-399')
+  assert.equal(expectedQuery(''), '')
+  assert.equal(expectedQuery('200-399/204'), '&expected=200-399%2F204')
 })

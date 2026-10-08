@@ -71,7 +71,7 @@ export const builtinDefaults = () => ([
 
 // 默认测速地址在 engine/test-url.mjs(HTTP;Clash API 与内核自动探测共用),这里转出去给老的引用方
 export { DEFAULT_TEST_URL } from './test-url.mjs'
-import { DEFAULT_TEST_URL } from './test-url.mjs'
+import { DEFAULT_TEST_URL, normalizeExpectedStatus } from './test-url.mjs'
 // 新建自动择优组的默认:300 秒测一次(面板服务端按这个间隔硬性定时测,见 system/latency-scheduler.mjs)、
 // 容差 100ms(差不到 100ms 不换节点,免得几十毫秒的抖动让选中的节点跳来跳去)
 export const DEFAULT_INTERVAL = '300s'
@@ -197,6 +197,8 @@ export const normalizeGroup = (raw, index = 0) => {
   if (type === 'urltest') {
     // 每个组可以有自己的测速地址;空 = 用档案里的全局地址
     group.testUrl = isNonEmptyString(raw?.testUrl) ? raw.testUrl.trim() : ''
+    // 可接受状态码(内核 tcp19,engine/test-url.mjs):空 = 用档案里的全局设置;写法不对的当没写(保存时 api/groups.mjs 已经拦过)
+    group.expectedStatus = normalizeExpectedStatus(raw?.expectedStatus) ?? ''
     group.interval = isNonEmptyString(raw?.interval) ? raw.interval.trim() : DEFAULT_INTERVAL
     const tol = Number(raw?.tolerance)
     group.tolerance = Number.isFinite(tol) && tol >= 0 ? Math.floor(tol) : DEFAULT_TOLERANCE
@@ -208,6 +210,7 @@ export const normalizeGroup = (raw, index = 0) => {
     group.members = []
     group.lanes = normalizeLanes(raw?.lanes)
     group.testUrl = isNonEmptyString(raw?.testUrl) ? raw.testUrl.trim() : ''
+    group.expectedStatus = normalizeExpectedStatus(raw?.expectedStatus) ?? ''
     const interval = isNonEmptyString(raw?.interval) ? raw.interval.trim() : ''
     const intervalMs = parseDuration(interval)
     group.interval = intervalMs >= FAILOVER_LIMITS.intervalMs[0] && intervalMs <= FAILOVER_LIMITS.intervalMs[1] ? interval : FAILOVER_DEFAULTS.interval
@@ -327,6 +330,11 @@ const dropCycles = (groups) => {
 // 而一个空组对用户也没有任何意义。返回同时给出被丢弃的组,供调用方如实告知。
 export const emitUserGroups = (groups, nodes, options = {}) => {
   const testUrl = options.testUrl || DEFAULT_TEST_URL
+  // 可接受状态码:组自己的优先,没写用档案的全局设置(options.expectedStatus);都没写就不往配置里写这个字段,
+  // 和 tcp19 以前一字不差(老内核不认 expected_status,写了起不来)
+  const expectedDefault = normalizeExpectedStatus(options.expectedStatus) ?? ''
+  const expectedOf = (g) => g.expectedStatus || expectedDefault
+  const withExpected = (outbound, g) => (expectedOf(g) ? { ...outbound, expected_status: expectedOf(g) } : outbound)
   const normalized = normalizeGroups(groups)
   // 保持节点原有顺序:节点已经按地区词典排过序了(见 rename.mjs),组里的成员顺序
   // 跟着它走,策略组列表看起来才和节点列表一致。
@@ -384,11 +392,11 @@ export const emitUserGroups = (groups, nodes, options = {}) => {
         return
       }
       // 内部子组共用父组的检测参数;idle_timeout 抬到不低于 interval(内核硬性要求)
-      outbounds.push({
+      outbounds.push(withExpected({
         type: 'urltest', tag: subTag, outbounds: valid,
         url: g.testUrl || testUrl, interval: g.interval || FAILOVER_DEFAULTS.interval, tolerance: g.tolerance ?? FAILOVER_DEFAULTS.tolerance,
         idle_timeout: idleTimeoutFor(DEFAULT_IDLE_TIMEOUT, g.interval || FAILOVER_DEFAULTS.interval),
-      })
+      }, g))
       lanes.push({ id: lane.id, name: lane.name, icon: lane.icon || '', index, members: lane.members, valid, mode: 'urltest', ref: subTag, subTag })
       refs.push(subTag)
     })
@@ -411,7 +419,7 @@ export const emitUserGroups = (groups, nodes, options = {}) => {
       id: g.id, tag: g.name, lanes, rejectTag,
       settings: {
         interval: g.interval || FAILOVER_DEFAULTS.interval, intervalMs, tolerance: g.tolerance ?? FAILOVER_DEFAULTS.tolerance,
-        testUrl: g.testUrl || testUrl, ...(g.failover || FAILOVER_DEFAULTS),
+        testUrl: g.testUrl || testUrl, ...(expectedOf(g) ? { expectedStatus: expectedOf(g) } : {}), ...(g.failover || FAILOVER_DEFAULTS),
       },
     })
   }
@@ -434,7 +442,7 @@ export const emitUserGroups = (groups, nodes, options = {}) => {
       placeholders.push(g.name)
     }
     if (g.type === 'urltest') {
-      outbounds.push({
+      outbounds.push(withExpected({
         type: 'urltest',
         tag: g.name,
         outbounds: members,
@@ -442,7 +450,7 @@ export const emitUserGroups = (groups, nodes, options = {}) => {
         interval: g.interval || DEFAULT_INTERVAL,
         tolerance: g.tolerance ?? DEFAULT_TOLERANCE,
         idle_timeout: idleTimeoutFor(g.idleTimeout, g.interval || DEFAULT_INTERVAL),
-      })
+      }, g))
     } else {
       outbounds.push({ type: 'selector', tag: g.name, outbounds: members })
     }

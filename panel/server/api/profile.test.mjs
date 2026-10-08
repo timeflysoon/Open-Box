@@ -53,6 +53,12 @@ test('validateProfilePatch 只碰 ipv6 不要求提供 dns（部分 patch 只校
   assert.equal(validateProfilePatch({ ipv6: false }), null)
 })
 
+// GitHub #482:全局的可接受状态码(内核 tcp19),写法和内核一样;空 / * = 不限
+test('validateProfilePatch testExpectedStatus 写法不对 → 报错;空、*、状态码和范围通过', () => {
+  for (const bad of ['abc', '99', '300-200', 204]) assert.ok(validateProfilePatch({ testExpectedStatus: bad }), String(bad))
+  for (const ok of ['', '*', '204', '200-399/204']) assert.equal(validateProfilePatch({ testExpectedStatus: ok }), null, ok)
+})
+
 test('validateProfilePatch updates.openbox.days 必须是 1-30 的整数', () => {
   assert.ok(validateProfilePatch({ updates: { openbox: { days: 0 } } }))
   assert.ok(validateProfilePatch({ updates: { openbox: { days: 31 } } }))
