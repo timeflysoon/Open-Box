@@ -3,7 +3,7 @@ import fs from 'node:fs'
 import test from 'node:test'
 import {
   DEFAULT_SHARE_REGIONS, SHARE_REGIONS_DEFAULT_FILE, collectShareRegionRuleUrls, effectiveShareRegions, normalizeShareGroup, shareRegionsForClient,
-  shareRegionsVersion, validateShareRegions,
+  shareRegionsVersion, validateShareRegions, withHomeLanRules,
 } from './share-regions.mjs'
 import { listTagForUrl } from './rule-list.mjs'
 
@@ -140,4 +140,27 @@ test('发给 App:老 App 删掉新类型;rules=2 全给,规则集链接带 sets;
   assert.equal('sets' in fresh[0], false)
   assert.deepEqual(collectShareRegionRuleUrls(groups), [{ url, tag: listTagForUrl(url), optional: true }])
   assert.deepEqual(collectShareRegionRuleUrls(DEFAULT_SHARE_REGIONS), [])
+})
+
+// 家里局域网(用户 2026-10-08「应该同步加到地区分流里面,这样同步一下就可以了」):发给 App 的每组最前面自动带「局域网网段 → 回路由器」
+test('withHomeLanRules:每组最前面带上局域网网段 → 回路由器;同一网段这一组写过的(不管走哪边、写法不同)不再加;没有网段原样返回', () => {
+  const out = withHomeLanRules(DEFAULT_SHARE_REGIONS, ['192.168.5.0/24', '10.0.0.0/24', '192.168.5.0/24'])
+  for (const [i, g] of out.entries()) {
+    assert.deepEqual(g.rules.slice(0, 2), [
+      { type: 'ipcidr', value: '192.168.5.0/24', action: 'proxy' },
+      { type: 'ipcidr', value: '10.0.0.0/24', action: 'proxy' },
+    ])
+    assert.deepEqual(g.rules.slice(2), DEFAULT_SHARE_REGIONS[i].rules)
+  }
+  // 档案里的那份不动(只在发出去时加)
+  assert.ok(DEFAULT_SHARE_REGIONS.every((g) => !g.rules.some((r) => r.type === 'ipcidr')))
+  const mine = [{ ...DEFAULT_SHARE_REGIONS[1], rules: [{ type: 'ipcidr', value: '192.168.5.9/24', action: 'direct' }] }]
+  assert.deepEqual(withHomeLanRules(mine, ['192.168.5.0/24', '10.0.0.0/24'])[0].rules, [
+    { type: 'ipcidr', value: '10.0.0.0/24', action: 'proxy' },
+    { type: 'ipcidr', value: '192.168.5.9/24', action: 'direct' },
+  ])
+  assert.equal(withHomeLanRules(DEFAULT_SHARE_REGIONS, []), DEFAULT_SHARE_REGIONS)
+  assert.equal(withHomeLanRules(DEFAULT_SHARE_REGIONS, undefined), DEFAULT_SHARE_REGIONS)
+  // 加出来的照样过地区分流的校验(App 端的 ipcidr 也认)
+  assert.equal(validateShareRegions(out), null)
 })

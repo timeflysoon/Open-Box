@@ -5,6 +5,7 @@
 //   GET /client/v1/home/:routerId            到家探测:回 200 就是连着这台路由器的局域网(App 据此自动暂停)
 //   GET /client/v1/:routerId/regions         地区分流(没改过就是默认三组)+ 版本 + 共享网络服务器的 ID / 名字(顺序即 App 里的排序)
 //                                            + 路由器标识(App 节点卡片的图标、名称、地区,engine/server-info.mjs)。
+//                                            每一组最前面自动带「家里局域网网段 → 回路由器」(engine/share-regions.mjs 的 withHomeLanRules)。
 //                                            带 rules=2(新 App)才有域名关键词、规则集链接这两种规则,规则集链接带编好的几份 sets;
 //                                            老 App 不认这两种(遇到就整组生成失败),不带 rules=2 的删掉再发;
 //                                            还带面板背景的元数据 background(system/panel-background.mjs),App 按 version 决定要不要重新下图
@@ -27,8 +28,8 @@ import { iconsFor, normalizeIconCode } from '../engine/icon-index.mjs'
 import { ruleListIpTag } from '../engine/rule-list.mjs'
 import { serverInfoView, DEFAULT_SERVER_NAME } from '../engine/server-info.mjs'
 import { enabledServers } from '../engine/servers.mjs'
-import { DEFAULT_SHARE_REGIONS, collectShareRegionRuleUrls, effectiveShareRegions, shareRegionsForClient, shareRegionsVersion } from '../engine/share-regions.mjs'
-import { readLocalAddresses } from '../system/local-subnets.mjs'
+import { DEFAULT_SHARE_REGIONS, collectShareRegionRuleUrls, effectiveShareRegions, shareRegionsForClient, shareRegionsVersion, withHomeLanRules } from '../engine/share-regions.mjs'
+import { lanSubnetsOf, readLocalAddresses } from '../system/local-subnets.mjs'
 import { panelBackground, panelBackgroundMeta, sendPanelBackground } from '../system/panel-background.mjs'
 import { panelPort } from '../system/panel-port.mjs'
 import { detectEgressCountry, readEgressCountry } from '../system/router-region.mjs'
@@ -68,7 +69,7 @@ export const serverInfoFor = (store) => {
   })
 }
 
-export const registerPublicClientRoutes = (app, { store, ctx = null, paths = null, geoDir = DEFAULT_GEO_DIR } = {}) => {
+export const registerPublicClientRoutes = (app, { store, ctx = null, paths = null, platform = 'openwrt', geoDir = DEFAULT_GEO_DIR } = {}) => {
   const known = (req, res) => {
     res.setHeader('Cache-Control', 'no-store')
     if (req.params.routerId === routerId(store)) return true
@@ -81,7 +82,7 @@ export const registerPublicClientRoutes = (app, { store, ctx = null, paths = nul
   app.get('/client/v1/:routerId/regions', async (req, res) => {
     if (!known(req, res)) return
     const profile = store.getProfile()
-    const all = effectiveShareRegions(profile)
+    const all = withHomeLanRules(effectiveShareRegions(profile), await lanSubnets(ctx, platform))
     // 新 App(rules=2):规则集链接带上编好的几份(没编好是空的,App 当这条不生效);老 App:删掉它不认得的类型。
     // version 按发出去的这份算:sha256 也在里面,名单内容一变 App 就重新拉
     const rulesVersion = req.query.rules === '2' ? 2 : 1
@@ -124,6 +125,9 @@ export const lanAddresses = async (ctx, platform) => {
   return [...new Set([...list.filter((a) => !a.includes(':')), ...list.filter((a) => a.includes(':'))])]
 }
 
+// 局域网口所在的 IPv4 网段(192.168.5.0/24 这样):地区分流发给 App 时每组最前面自动带「这些网段 → 回路由器」
+export const lanSubnets = async (ctx, platform) => (ctx ? lanSubnetsOf(await readLocalAddresses(ctx, { platform }).catch(() => [])) : [])
+
 export const registerClientAppRoutes = (app, { store, ctx = null, paths = null, platform = 'openwrt', detectCountry = detectEgressCountry } = {}) => {
   const router = express.Router()
   router.get('/client-app/info', async (_req, res) => {
@@ -132,6 +136,8 @@ export const registerClientAppRoutes = (app, { store, ctx = null, paths = null, 
       routerId: routerId(store),
       routerName: os.hostname(),
       lanAddresses: await lanAddresses(ctx, platform),
+      // 地区分流页每组规则最上面显示的「家里局域网 → 回路由器」(自动加的,只读)
+      lanSubnets: await lanSubnets(ctx, platform),
       panelPort: panelPort(),
       shareRegions: effectiveShareRegions(profile),
       shareRegionsCustomized: Array.isArray(profile.shareRegions) && profile.shareRegions.length > 0,

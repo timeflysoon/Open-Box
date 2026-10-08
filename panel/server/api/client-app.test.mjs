@@ -259,3 +259,25 @@ test('regions:老 App 拿不到新类型的规则;rules=2 拿到全部,规则集
     fs.rmSync(root, { recursive: true, force: true })
   }
 })
+
+// 家里局域网(用户 2026-10-08):地区分流发给 App 时每组最前面自动带「局域网网段 → 回路由器」,version 跟着变;info 带上给地区分流页显示
+test('regions 每组最前面自动带家里局域网网段 → 回路由器(档案里不存);info 带 lanSubnets', async () => {
+  const addr4 = '2: eth0    inet 203.0.113.9/24 scope global eth0\n3: br-lan    inet 192.168.5.1/24 brd 192.168.5.255 scope global br-lan'
+  const lanCtx = { exec: async (cmd, args) => (cmd === 'ip' ? { code: 0, stdout: args[0] === '-4' ? addr4 : '' } : { code: 1, stdout: '' }) }
+  const { store, base, close } = await setup({ ctx: lanCtx, publicCtx: lanCtx })
+  try {
+    const id = routerId(store)
+    const regions = await (await fetch(`${base}/client/v1/${id}/regions?rules=2`)).json()
+    const lanRule = { type: 'ipcidr', value: '192.168.5.0/24', action: 'proxy' }
+    assert.deepEqual(regions.groups.map((g) => g.rules[0]), DEFAULT_SHARE_REGIONS.map(() => lanRule))
+    assert.deepEqual(regions.groups.map((g) => g.rules.slice(1)), DEFAULT_SHARE_REGIONS.map((g) => g.rules))
+    assert.equal(regions.version, shareRegionsVersion(regions.groups))
+    assert.notEqual(regions.version, shareRegionsVersion(DEFAULT_SHARE_REGIONS))
+    // 老 App(不带 rules=2)也有:ipcidr 它认得
+    const legacy = await (await fetch(`${base}/client/v1/${id}/regions`)).json()
+    assert.deepEqual(legacy.groups.map((g) => g.rules[0]), DEFAULT_SHARE_REGIONS.map(() => lanRule))
+    const info = await (await fetch(`${base}/api/openbox/client-app/info`)).json()
+    assert.deepEqual(info.lanSubnets, ['192.168.5.0/24'])
+    assert.deepEqual(info.shareRegions, DEFAULT_SHARE_REGIONS)
+  } finally { await close() }
+})

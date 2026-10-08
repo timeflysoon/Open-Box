@@ -172,9 +172,9 @@ export const parseIpAddresses = (text) => {
     if (!m) continue
     const [, iface, cidr] = m
     if (iface === 'lo') continue
-    const address = cidr.split('/')[0]
+    const [address, bits] = cidr.split('/')
     if (/^127\./.test(address) || /^fe[89ab][0-9a-f]:/i.test(address) || address === '::1') continue
-    out.push({ iface, address, kind: classifyIface(iface) })
+    out.push({ iface, address, ...(bits === undefined ? {} : { prefix: Number(bits) }), kind: classifyIface(iface) })
   }
   return out
 }
@@ -241,4 +241,16 @@ export const readLocalAddresses = async (ctx, { platform = 'openwrt' } = {}) => 
     const kind = (name && classifyLogical(name)) || a.kind
     return name ? { ...a, kind, logical: name } : { ...a, kind }
   })
+}
+
+// 局域网口所在的 IPv4 私网网段(按网络地址写、去重):节点分流的 App 在外面经路由器访问家里内网用
+// (engine/share-regions.mjs 的 withHomeLanRules)。/31、/32 点对点地址不算;IPv6 先不管(App 的 IPv6 默认关)
+export const lanSubnetsOf = (addresses) => {
+  const out = []
+  for (const a of Array.isArray(addresses) ? addresses : []) {
+    if (!a || a.kind !== 'lan' || !Number.isInteger(a.prefix) || a.prefix < 8 || a.prefix > 30 || !isPrivateV4(a.address)) continue
+    const c = parseCidr(`${a.address}/${a.prefix}`)
+    if (c) out.push(formatCidr(c))
+  }
+  return [...new Set(out)]
 }

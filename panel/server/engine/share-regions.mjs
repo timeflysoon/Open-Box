@@ -209,3 +209,29 @@ export const shareRegionsForClient = (groups, { rulesVersion = 1, setsFor = () =
     .filter((r) => rulesVersion >= 2 || SHARE_REGION_LEGACY_RULE_TYPES.includes(r.type))
     .map((r) => (r.type === 'ruleUrl' ? { ...r, sets: setsFor(String(r.value || '').trim()) } : r)),
 }))
+
+// 同一个 IPv4 网段的不同写法(192.168.5.1/24、192.168.5.0/24)算同一个;别的照 normalizeCidr
+const cidrKey = (value) => {
+  const cidr = normalizeCidr(value)
+  const m = /^(\d+)\.(\d+)\.(\d+)\.(\d+)\/(\d+)$/.exec(cidr)
+  if (!m) return cidr
+  const bits = Number(m[5])
+  const mask = bits === 0 ? 0 : (0xffffffff << (32 - bits)) >>> 0
+  const net = (((Number(m[1]) << 24) | (Number(m[2]) << 16) | (Number(m[3]) << 8) | Number(m[4])) & mask) >>> 0
+  return `${net >>> 24}.${(net >>> 16) & 255}.${(net >>> 8) & 255}.${net & 255}/${bits}`
+}
+
+// 家里局域网(用户 2026-10-08:「我的规则」里加局域网网段才能在外面访问家里内网,「应该同步加到地区分流里面,这样同步一下就可以了」):
+// 发给 App 的每一组最前面自动带「路由器局域网网段 → 回路由器」。只在发出去时加、不存进档案,换了局域网地址自动跟上;
+// 这一组自己写过同一网段(不管走哪边)的不再加。App 0.1.298 起把地区分流里的私网段规则排在私网直连前面
+// (clients/core/obclient/share_config.go;老 App 排在后面不生效,也不出错),手机上「我的规则」写同一网段走直连能盖掉它
+export const withHomeLanRules = (groups, subnets) => {
+  const lan = [...new Set((Array.isArray(subnets) ? subnets : []).map(cidrKey).filter(Boolean))]
+  if (!lan.length) return groups
+  return groups.map((g) => {
+    const rules = Array.isArray(g.rules) ? g.rules : []
+    const written = new Set(rules.filter((r) => r && r.type === 'ipcidr').map((r) => cidrKey(r.value)))
+    const auto = lan.filter((cidr) => !written.has(cidr)).map((value) => ({ type: 'ipcidr', value, action: 'proxy' }))
+    return auto.length ? { ...g, rules: [...auto, ...rules] } : g
+  })
+}

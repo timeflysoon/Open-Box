@@ -254,8 +254,8 @@ test('readLocalAddresses:问 netifd 哪个逻辑接口占着这个设备,eth0 �
   } })
   const out = await readLocalAddresses(ctx)
   assert.deepEqual(out, [
-    { iface: 'eth0', address: '192.168.3.35', kind: 'wan', logical: 'wan' },
-    { iface: 'br-lan', address: '10.0.0.1', kind: 'lan', logical: 'lan' },
+    { iface: 'eth0', address: '192.168.3.35', prefix: 24, kind: 'wan', logical: 'wan' },
+    { iface: 'br-lan', address: '10.0.0.1', prefix: 24, kind: 'lan', logical: 'lan' },
   ])
   const noUbus = createMockContext({ execResults: { 'ip -4 -o addr': { code: 0, stdout: '5: pppoe-wan0    inet 10.65.3.225 peer 10.65.0.1/32 scope global pppoe-wan0\n' } } })
   assert.deepEqual(await readLocalAddresses(noUbus), [{ iface: 'pppoe-wan0', address: '10.65.3.225', kind: 'wan' }])

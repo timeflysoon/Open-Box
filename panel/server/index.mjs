@@ -890,7 +890,7 @@ registerPublicSubscriptionShareRoutes(app, { store, fetchImpl: subscriptionFetch
 // 「导入全部配置」的设备拉配置(token 认设备,内容用设备密钥加密,api/client-config.mjs)。App 发布前不注册(CLIENT_APPS_ENABLED)
 const readOpenboxVersion = async () => (await readMeta(obCtx, obPaths)).version || ''
 if (CLIENT_APPS_ENABLED) {
-  registerPublicClientRoutes(app, { store, ctx: obCtx, paths: obPaths })
+  registerPublicClientRoutes(app, { store, ctx: obCtx, paths: obPaths, platform: obPaths.platform })
   registerPublicClientConfigRoutes(app, { store, ctx: obCtx, paths: obPaths, fetchImpl: globalThis.fetch, readVersion: readOpenboxVersion })
 }
 

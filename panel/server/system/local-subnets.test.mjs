@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { cidrContains, parseCidr, parseIpAddr, readLocalSubnets, subtractCidrs, classifyByAddress, readLocalAddresses, isVirtualIface } from './local-subnets.mjs'
+import { cidrContains, parseCidr, parseIpAddr, readLocalSubnets, subtractCidrs, classifyByAddress, readLocalAddresses, isVirtualIface, lanSubnetsOf } from './local-subnets.mjs'
 import { buildConfig } from '../engine/config.mjs'
 
 test('parseCidr:按掩码取整,非法返回 null', () => {
@@ -125,4 +125,24 @@ test('readLocalAddresses:systemd 平台上虚拟口不按地址猜——内核�
   // OpenWrt 上它们本来就认不成局域网口(问不到 netifd 时按设备名猜),行为不变
   const ow = await readLocalAddresses(ctx)
   assert.ok(ow.every((a) => a.kind === 'other'), JSON.stringify(ow))
+})
+
+test('lanSubnetsOf:局域网口的 IPv4 私网网段按网络地址写、去重;WAN、虚拟口、点对点、公网、IPv6 不算', async () => {
+  const v4 = [
+    '2: eth0    inet 203.0.113.9/24 brd 203.0.113.255 scope global eth0',
+    '3: br-lan    inet 192.168.3.1/24 brd 192.168.3.255 scope global br-lan',
+    '3: br-lan    inet 192.168.3.2/24 scope global secondary br-lan',
+    '4: br-iot    inet 10.10.0.1/16 scope global br-iot',
+    '5: openbox-tun    inet 172.19.0.1/30 scope global openbox-tun',
+    '6: pppoe-wan    inet 100.64.3.4/32 scope global pppoe-wan',
+  ].join('\n')
+  const v6 = '3: br-lan    inet6 fd00:3::1/64 scope global'
+  const ubus = JSON.stringify({ interface: [{ interface: 'wan', l3_device: 'eth0' }, { interface: 'lan', l3_device: 'br-lan' }, { interface: 'lan_iot', l3_device: 'br-iot' }] })
+  const ctx = { exec: async (cmd, args) => (cmd === 'ip' ? { code: 0, stdout: args[0] === '-4' ? v4 : v6 } : { code: 0, stdout: ubus }) }
+  assert.deepEqual(lanSubnetsOf(await readLocalAddresses(ctx)), ['192.168.3.0/24', '10.10.0.0/16'])
+  // Debian / Ubuntu:按地址猜出来的局域网口照样算,内核 tun、容器网桥不算
+  const debian = { exec: async (cmd, args) => ({ code: 0, stdout: args[0] === '-4' ? '2: ens18    inet 192.168.3.23/24 scope global ens18\n5: openbox-tun    inet 172.19.0.1/30 scope global openbox-tun\n6: docker0    inet 172.17.0.1/16 scope global docker0' : '' }) }
+  assert.deepEqual(lanSubnetsOf(await readLocalAddresses(debian, { platform: 'systemd' })), ['192.168.3.0/24'])
+  assert.deepEqual(lanSubnetsOf([{ kind: 'lan', address: '192.168.1.5', prefix: 32 }, { kind: 'lan', address: '8.8.8.8', prefix: 24 }, { kind: 'lan', address: '192.168.1.5' }]), [])
+  assert.deepEqual(lanSubnetsOf(null), [])
 })
