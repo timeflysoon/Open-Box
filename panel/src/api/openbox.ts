@@ -1404,6 +1404,58 @@ export interface OpenboxRollbackResult {
 }
 export const rollbackToDirect = () => requestJson<OpenboxRollbackResult>('/api/openbox/rollback', { method: 'POST' })
 
+// ---- 系统类接口(续,对照 server/api/{updates,rulesets,timezone}.mjs 和 server/system/{updater,timezone}.mjs)
+
+// 更新日志:/update/check 探到新版之后,取那一版 Release 的说明(弹窗用)。
+// 这个接口永远回 200,取不到时 note 为 null、error 里是原因;url 是 Release 列表页(看其它版本)。
+// latest 形如 v0.1.299(三段数字,别的写法后端会忽略、自己再探一次)
+export interface OpenboxUpdateNote {
+  version: string
+  // GitHub 返回的发布时间(ISO 字符串);走镜像取说明文件时没有,是空串
+  date: string
+  // Markdown 原文,后端已截断
+  body: string
+}
+export interface OpenboxUpdateNotes {
+  url: string
+  note: OpenboxUpdateNote | null
+  // 说明从哪取到的:'api' = GitHub API,'direct' = 直连下载,其余是镜像前缀;取不到是空串
+  via: string
+  error?: string
+}
+export const fetchUpdateNotes = (latest = '') =>
+  requestJson<OpenboxUpdateNotes>(`/api/openbox/update/notes${latest ? `?latest=${encodeURIComponent(latest)}` : ''}`)
+
+// 路由器的系统时区(后端设置 · 时区)。定时任务按路由器本地时间的钟点跑,所以要让用户看得到、改得了。
+// zones 是可选的时区名单,countries 是时区 → 国家 / 地区两字母代码(UTC 没有),下拉框按国家名搜索用;
+// offset 形如 +08:00,local 形如 2026-10-08 10:03:52,时区名认不出来时这两项是空串
+export interface OpenboxTimezoneState {
+  zone: string
+  offset: string
+  local: string
+  platform: string
+  zones: string[]
+  countries: Record<string, string>
+}
+export const fetchTimezone = () => requestJson<OpenboxTimezoneState>('/api/openbox/system/timezone')
+// 改系统时区:后端先把别名换成名单里的名字,不认识的回 400;改完返回同样的形状
+export const saveTimezone = (zone: string) =>
+  requestJson<OpenboxTimezoneState>('/api/openbox/system/timezone', { method: 'PUT', body: JSON.stringify({ zone }) })
+
+// 规则集链接「立即更新」:名单平时随部署 24 小时才重拉一次,自己维护名单的人改完点这个,立刻重拉重编。
+// 只有名单的构成变了(多出 / 少了 IP 或域名那一份)才要重启内核:needsRestart 为真时提示用户。
+// counts 的结构在 server/system/rule-lists.mjs 里,这里先不展开。
+// 注意:同一前缀下的 /rulesets/check 和 /rulesets/refresh/status 后端回 410(Geo 已随 Open-Box 统一更新),不要封装
+export interface OpenboxRulesetRefreshResult {
+  url: string
+  tag: string
+  total: number
+  counts: unknown
+  needsRestart: boolean
+}
+export const refreshRuleList = (url: string) =>
+  requestJson<OpenboxRulesetRefreshResult>('/api/openbox/rulesets/refresh', { method: 'POST', body: JSON.stringify({ url }) })
+
 // 共享网络 · 保存前的端口检测(server/api/servers.mjs)
 export interface OpenboxPortCheck {
   ok: boolean
