@@ -1470,18 +1470,42 @@ export const fetchKnownClients = () => requestJson<{ clients: Array<{ ip: string
 
 // ---- 上游新增的延迟类接口(按 dist 反推,后端见 server/api/{site-latency,node-latency}.mjs)
 
-// 概览「站点延迟」:先取历史把柱子画出来,再即时测一轮。timeoutMs 是「不通」时柱子按多高画
+// 概览「站点延迟」:先取历史把柱子画出来,再即时测一轮。
+// 历史样本沿用上面的 OpenboxLatencySample:delay 为 0 = 没测通,node 是当时经过的线路(策略 → 组 → 节点,用 " → " 连起来)
 export interface OpenboxSiteLatencyHistory {
-  history: Record<string, unknown>
+  history: OpenboxLatencyHistory
+  // 「不通」的柱子按这个时长算高度(记的是 0,实际等了这么久)
   timeoutMs: number
 }
 export const fetchSiteLatencyHistory = async (): Promise<OpenboxSiteLatencyHistory> => {
   const data = await requestJson<Partial<OpenboxSiteLatencyHistory>>('/api/openbox/site-latency/history')
   return { history: data.history ?? {}, timeoutMs: data.timeoutMs ?? 5000 }
 }
-// 请求体 { sites };返回结构还没对过后端,先原样透传
-export const testSiteLatency = (sites: unknown[]) =>
-  requestJson<Record<string, unknown>>('/api/openbox/site-latency', {
+// 站点表来自面板设置 → 测试站点:最多 8 个,id 只认小写字母数字和横线(与服务端 normalizeSites 一致)
+export interface OpenboxSiteInput {
+  id: string
+  url: string
+}
+export interface OpenboxSiteLatencyResult {
+  id: string
+  url: string
+  // 线路的第一跳(站点集)和完整线路;没认出来时是 null / 空数组
+  via: string | null
+  chain: string[]
+  // 连接建好之后一次请求往返的毫秒数;openMs 是首次打开的总耗时(放悬停提示)
+  ms: number | null
+  openMs: number | null
+  // 失败原因(中文),成功为 null
+  error: string | null
+}
+export interface OpenboxSiteLatencyRun {
+  sites: OpenboxSiteLatencyResult[]
+  testedAt: number
+  history: OpenboxLatencyHistory
+  timeoutMs: number
+}
+export const testSiteLatency = (sites: OpenboxSiteInput[]) =>
+  requestJson<OpenboxSiteLatencyRun>('/api/openbox/site-latency', {
     method: 'POST',
     body: JSON.stringify({ sites }),
     signal: AbortSignal.timeout(30000),
@@ -1510,7 +1534,9 @@ export interface OpenboxChainLatencyResult {
   ok?: boolean
   ms?: number
   error?: string
-  // IP 信息部分的返回形状还没对过后端
+  // 带了 ipUrls 才有:正文原样交回(最多 16KB),由前端按答话那一家的格式解析;全部失败时只有 error
+  ip?: { ok: boolean; url?: string; body?: string; error?: string }
+  // 测速实例回的其它字段(如 reason)后端没固定
   [key: string]: unknown
 }
 export const testChainLatency = (payload: OpenboxChainLatencyPayload) =>
