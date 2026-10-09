@@ -313,10 +313,10 @@ jobs:
             dist-release/*.sha256
             dist-release/*components.json
 
-      # 客户端(安卓 APK / macOS DMG / Windows 安装包):取上游的成品,原样附到本 Release。
+      # 客户端(安卓 APK / macOS DMG / Windows 安装包 / Linux deb):取上游的成品,原样附到本 Release。
       # 客户端版本和面板版本不同步,也不是每个上游版本都带:每种客户端各自从内核所取的那个上游版本开始,
-      # 往前找最近带它的版本;找不到只警告,不让发布失败。
-      - name: Attach client apps (Android / macOS / Windows) from upstream
+      # 往前找最近带它的版本(不取比它更新的);找不到只警告,不让发布失败。
+      - name: Attach client apps (Android / macOS / Windows / Linux) from upstream
         if: env.OPENBOX_KERNEL_SOURCE == 'upstream'
         env:
           GH_TOKEN: ${{ github.token }}
@@ -324,12 +324,23 @@ jobs:
         run: |
           set -eu
           mkdir -p clients
-          tags="$UPSTREAM_TAG $(gh release list -R "$OPENBOX_KERNEL_REPO" --limit 15 --json tagName -q '.[].tagName')"
-          for kind in android macos windows; do
+          # 每种客户端的资产名规则(上游命名各不相同:
+          # Linux 的 deb 叫 open-box-desktop-linux-<版本>-amd64.deb,不是 open-box-linux-...)
+          declare -A pattern=(
+            [android]='^open-box-android-.*\.apk(\.sha256)?$'
+            [macos]='^open-box-macos-.*\.dmg(\.sha256)?$'
+            [windows]='^open-box-windows-.*\.exe(\.sha256)?$'
+            [linux]='^open-box-desktop-linux-.*\.deb(\.sha256)?$'
+          )
+          # 候选版本:内核所取的那个上游版本,和比它更早的版本(新到旧);
+          # 比它新的版本不取,免得固定了内核版本却附上更新的客户端
+          tags=$( { gh release list -R "$OPENBOX_KERNEL_REPO" --limit 20 --json tagName -q '.[].tagName'; echo "$UPSTREAM_TAG"; } \
+            | sort -ruV | awk -v t="$UPSTREAM_TAG" '$0==t{p=1} p' )
+          for kind in android macos windows linux; do
             found_tag=""; names=""
             for t in $tags; do
               names=$(gh release view "$t" -R "$OPENBOX_KERNEL_REPO" --json assets -q '.assets[].name' \
-                | grep -E "^open-box-${kind}-.*\.(apk|dmg|exe)(\.sha256)?$" || true)
+                | grep -E "${pattern[$kind]}" || true)
               if [ -n "$names" ]; then found_tag=$t; break; fi
             done
             if [ -z "$found_tag" ]; then
