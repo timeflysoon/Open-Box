@@ -215,6 +215,7 @@ const en = {
   tableWidthMode: 'Table width mode',
   testFailed: 'Test failed',
   testFinishedTip: '{name}\n{number}/{total} test finished',
+  testQueuedTip: '{name}\nQueued, other latency tests are running',
   testFinishedResultTip: '{name}\nTest finished: {success} success, {failed} timeout',
   testFailedTip: '{name}\nTest failed',
   latencyTimeout: 'timeout',

@@ -215,6 +215,7 @@ const zhTW: LANG_MESSAGE = {
   tableWidthMode: '表格寬度模式',
   testFailed: '測速超時',
   testFinishedTip: '{name}\n{number}/{total} 測試完成',
+  testQueuedTip: '{name}\n排隊中，前面還有測速在跑',
   testFinishedResultTip: '{name}\n測試完成: {success} 成功，{failed} 超時',
   testFailedTip: '{name}\n測速超時',
   latencyTimeout: '逾時',
