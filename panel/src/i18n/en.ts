@@ -216,6 +216,8 @@ const en = {
   testFailed: 'Test failed',
   testFinishedTip: '{name}\n{number}/{total} test finished',
   testQueuedTip: '{name}\nQueued, other latency tests are running',
+  siteLatency: 'Site latency',
+  siteLatencyTest: 'Test again',
   testFinishedResultTip: '{name}\nTest finished: {success} success, {failed} timeout',
   testFailedTip: '{name}\nTest failed',
   latencyTimeout: 'timeout',
