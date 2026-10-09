@@ -35,6 +35,7 @@ import { createKernelStaleNodes } from './system/kernel-stale.mjs'
 import { createHotApplier, createRestartPending } from './api/hot-apply.mjs'
 import { createNodeProber } from './system/node-probe.mjs'
 import { createLatencyProbeCoordinator } from './system/latency-probe-coordinator.mjs'
+import { createProbeLimiter } from './system/probe-limiter.mjs'
 import { createLatencyScheduler } from './system/latency-scheduler.mjs'
 import { createFailoverManager } from './system/failover-manager.mjs'
 import { createDnsRewriteServer } from './system/dns-rewrite-server.mjs'
@@ -1302,7 +1303,10 @@ registerResetRoutes(app, {
 })
 registerRulesetRoutes(app, { store, ctx: obCtx, paths: obPaths, fetchImpl: globalThis.fetch })
 registerPenetrationRoutes(app, { store, ctx: obCtx, paths: obPaths, fetchImpl: globalThis.fetch })
-registerNodeLatencyRoutes(app, { ctx: obCtx, paths: obPaths, store, fetchImpl: globalThis.fetch, prober: nodeProber, history: latencyHistory, kernelStale })
+// 面板发给内核的测速共用一份名额(GitHub #514):故障转移、定时测速、手动测速都经它,同一时刻最多 4 个在内核那边,
+// 和内核自己的名额一样多;排队在面板这边,不算请求自己的超时
+const probeLimiter = createProbeLimiter({ limit: 4 })
+registerNodeLatencyRoutes(app, { ctx: obCtx, paths: obPaths, store, fetchImpl: globalThis.fetch, prober: nodeProber, history: latencyHistory, kernelStale, limiter: probeLimiter })
 // 概览里的站点延时小卡片:面板经内核的回环入站(panel-in)真去访问一次,量连接建好之后的一次往返
 registerSiteLatencyRoutes(app, { store, fetchImpl: globalThis.fetch })
 registerDnsUpstreamTestRoutes(app, { ctx: obCtx, paths: obPaths, store, fetchImpl: globalThis.fetch })
@@ -1322,7 +1326,7 @@ const trafficCollector = createTrafficCollector({
   log: (m) => console.log(m),
 })
 registerTrafficRoutes(app, { collector: trafficCollector, ctx: obCtx, paths: obPaths, store })
-const latencyProbeCoordinator = createLatencyProbeCoordinator()
+const latencyProbeCoordinator = createLatencyProbeCoordinator({ limiter: probeLimiter })
 const latencyScheduler = createLatencyScheduler({ store, ctx: obCtx, paths: obPaths, history: latencyHistory, probeCoordinator: latencyProbeCoordinator, fetchImpl: globalThis.fetch, log: (m) => console.log(m) })
 registerLatencyHistoryRoutes(app, { history: latencyHistory, scheduler: latencyScheduler })
 // 故障转移组的后台主备管理(system/failover-manager.mjs):按 config.meta.json 里的运行映射定期端到端探测各页签

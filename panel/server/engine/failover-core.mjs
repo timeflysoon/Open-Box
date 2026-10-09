@@ -11,6 +11,11 @@ import { kernelTestUrl, normalizeExpectedStatus } from './test-url.mjs'
 
 // 当前页签不通之后多久复查一次(用户 2026-09-30 定的规则:不通 → 10 秒后再测一次 → 仍不通才换页签)
 export const RECHECK_DELAY_MS = 10_000
+// 已经切到兜底拒绝时多久再看一次(GitHub #514):拒绝 = 这个组的流量全被拒,不能等满整个检测间隔(默认 5 分钟)才有机会恢复。
+// 这时每个页签只强制测一个候选(多节点页签测内核子组此刻选中的,单节点测那个节点,手动选择的测用户选的),通了马上切回。
+// 两次整组盘点之间的这种复查轮只测候选、别的节点不碰(不然它们的结果一过期,这一轮就得排在别的组积压的测速后面等它们测完);
+// 整组盘点照常按检测间隔做。所以每分钟只多几个请求
+export const REJECT_RETRY_MS = 60_000
 
 export const laneRole = (index) => (index === 0 ? 'primary' : `backup-${index}`)
 const sameOrder = (a, b) => Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((x, i) => x === b[i])
@@ -81,11 +86,30 @@ export const recheckTargets = (state, proxies) => {
   return [...lane.valid]
 }
 
+// 已经在兜底拒绝上时每个页签强制测哪一个(REJECT_RETRY_MS):多节点页签测内核子组此刻选中的(不在有效节点里就测第一个),
+// 手动选择的测用户选中的,单节点测那个节点;空页签不测
+export const rejectTargets = (state, proxies) => {
+  const out = []
+  for (const lane of state.lanes) {
+    if (lane.mode === 'empty' || !lane.valid.length) continue
+    const picked = lane.subTag ? nowOf(proxies, lane.subTag) : ''
+    out.push(picked && lane.valid.includes(picked) ? picked : lane.valid[0])
+  }
+  return out
+}
+
 // 一轮之前:proxies 是 GET /proxies 的 proxies。父组 / 页签引用不在(部署到一半、内核正在重启)就给 skip,不动手;
 // 否则给这轮的参数和要测的节点(去重)。复查轮(上一轮当前页签确认失败)只强制重测当前页签的节点,带上那次失败的
-// 完成时刻(since);别的照常复用间隔内的结果。没有测速地址就一个都不测(页签全算未知)。
+// 完成时刻(since);已经在兜底拒绝上时每个页签强制测一个候选(rejectTargets),离上次整组盘点不到一个检测间隔的
+// 这种轮次只测候选(要 now);别的照常复用间隔内的结果。
+// 复查轮里别的节点(不强制,间隔内照常复用)要真测时排 critical。
+// 有人点了「重新检测」(state.manualRecheckAt):全部节点强制测,比点的那一刻新的结果才算,排在 interactive 那一档。
+// 没有测速地址就一个都不测(页签全算未知)。
+// 测速项 { tag, force, since[, priority] }:priority 只在和默认不同时带(默认 force 是 critical、否则 interactive)
 // expected:可接受状态码(内核 tcp19,'' = 不限),测速请求带上它,回别的状态码算这个节点失败
-export const roundPlan = (state, proxies) => {
+// now:这一轮开始的时刻(毫秒);不给就当整组盘点(和以前一样)。这一轮是不是整组盘点记在 state.planFull,finishRound 据此记
+// lastFullRoundAt
+export const roundPlan = (state, proxies, { now = 0 } = {}) => {
   const s = state.settings || {}
   const parent = proxies[state.tag]
   if (!parent || !Array.isArray(parent.all)) return { skip: 'parent-missing' }
@@ -93,18 +117,28 @@ export const roundPlan = (state, proxies) => {
   if (expectedRefs.some((r) => !parent.all.includes(r) || !proxies[r])) return { skip: 'kernel-mismatch' }
   if (state.rejectTag && !parent.all.includes(state.rejectTag)) return { skip: 'kernel-mismatch' }
   const url = kernelTestUrl(s.testUrl || '')
+  const intervalMs = Number(s.intervalMs) || 300_000
   const recheckRound = Boolean(state.recheckPending)
-  const forced = new Set(recheckRound ? recheckTargets(state, proxies) : [])
-  const tags = [...new Set(state.lanes.flatMap((l) => l.valid))]
+  const inReject = Boolean(state.rejectTag) && nowOf(proxies, state.tag) === state.rejectTag
+  const manualAt = Number(state.manualRecheckAt) || 0
+  const forced = new Set([...(recheckRound ? recheckTargets(state, proxies) : []), ...(inReject ? rejectTargets(state, proxies) : [])])
+  const lastFull = Number(state.lastFullRoundAt) || 0
+  const candidatesOnly = inReject && !manualAt && now > 0 && lastFull > 0 && now - lastFull < intervalMs
+  state.planFull = !candidatesOnly
+  const tags = candidatesOnly ? [...forced] : [...new Set(state.lanes.flatMap((l) => l.valid))]
   const probes = url ? tags.map((tag) => {
+    if (manualAt > 0 && !forced.has(tag)) return { tag, force: true, since: manualAt, priority: 'interactive' }
     const force = forced.has(tag)
     const node = state.nodes[tag]
     const since = force ? (node && node.ok === false && Number.isFinite(node.at) ? node.at : state.lastRoundAt || 0) : 0
+    // 复查轮是「当前页签可能挂了、马上要决定切不切」的时候:别的页签的节点结果在间隔内照常复用,过期了要真测的也排在
+    // critical 那一档(GitHub #514:排在别的组积压的例行测速后面,复查轮要好几分钟才完,切换跟着拖)
+    if (!force && recheckRound) return { tag, force, since, priority: 'critical' }
     return { tag, force, since }
   }) : []
   // 不限时不带这个字段(计划和以前一样;App 读不到当空串)
   const expected = normalizeExpectedStatus(s.expectedStatus) ?? ''
-  return { url, ...(expected ? { expected } : {}), timeoutMs: Number(s.timeoutMs) || 5000, intervalMs: Number(s.intervalMs) || 300_000, recheckRound, probes }
+  return { url, ...(expected ? { expected } : {}), timeoutMs: Number(s.timeoutMs) || 5000, intervalMs, recheckRound, probes }
 }
 
 // 记下这一轮的探测结果。results:{ [节点]: { ok: true | false | null, delay, at, reused, reason } }(ok null = 探测本身出了问题)
@@ -305,6 +339,8 @@ export const finishRound = (state, decision, { parentNow, at, startedAt, outcome
     : cur.health === 'up' ? (cur.index === 0 ? 'ok' : 'backup')
       : cur.health === 'down' ? 'failing' : 'unknown'
   state.lastRoundAt = startedAt
+  // 整组盘点的时刻(拒绝状态下两次盘点之间的复查轮只测候选,见 roundPlan)
+  if (state.planFull !== false) state.lastFullRoundAt = startedAt
   state.lastRoundResult = switched ? `${switched.reason}` : 'kept'
   // 有页签这轮没能确认内核的选择(内核刚启动、子组自己的首轮检测还没跑完):不等整个 interval,很快再看一次
   const unconfirmed = state.lanes.some((l) => l.confirmed === false)
@@ -318,5 +354,6 @@ export const nextRoundDelay = (state, { result = null, skip = '' } = {}) => {
   if (skip) return Math.min(10_000, intervalMs)
   if (result && result.recheck) return Math.min(RECHECK_DELAY_MS, intervalMs)
   if (result && result.unconfirmed) return Math.min(10_000, intervalMs)
+  if (result && result.status === 'reject') return Math.min(REJECT_RETRY_MS, intervalMs)
   return intervalMs
 }

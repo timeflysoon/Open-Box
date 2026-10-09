@@ -107,7 +107,7 @@ let chainProbeSeq = 0
 
 // prober:system/node-probe.mjs 的测速实例(index.mjs 建一个全局共用,同一时刻只起一个);history:延迟历史,
 // 测面板存的节点时把结果记进去(订阅卡片的圆点、代理页的时间线都读它)
-export const registerNodeLatencyRoutes = (app, { ctx, paths, store = null, fetchImpl = globalThis.fetch, lookup = dns.lookup, prober = null, history = null, kernelStale = null, now = () => Date.now() } = {}) => {
+export const registerNodeLatencyRoutes = (app, { ctx, paths, store = null, fetchImpl = globalThis.fetch, lookup = dns.lookup, prober = null, history = null, kernelStale = null, limiter = null, now = () => Date.now() } = {}) => {
   const probe = prober || createNodeProber({ ctx, paths })
   const kernelHeaders = () => {
     const secret = store && store.getClashSecret ? store.getClashSecret() : ''
@@ -127,7 +127,9 @@ export const registerNodeLatencyRoutes = (app, { ctx, paths, store = null, fetch
   }
   // 内核测一个节点。null = 内核里没有这个节点(交给测速实例);reused = 内核拿的是别人刚测完的结果(不另记一笔)
   // expected:可接受状态码(内核 tcp19,'' = 不限)
-  const kernelDelay = async (tag, url, timeoutMs, expected = '') => {
+  // 经面板全局的测速名额(GitHub #514,interactive 那一档):拿到名额才发,期限从发出去才开始算
+  const kernelDelay = (tag, url, timeoutMs, expected = '') => (limiter ? limiter.run('interactive', () => kernelDelayNow(tag, url, timeoutMs, expected)) : kernelDelayNow(tag, url, timeoutMs, expected))
+  const kernelDelayNow = async (tag, url, timeoutMs, expected = '') => {
     const q = `url=${encodeURIComponent(url)}&timeout=${timeoutMs}&force=false&interval=${KERNEL_REUSE_MS}&priority=interactive${expectedQuery(expected)}`
     let res
     try {

@@ -26,7 +26,8 @@ const binary = (() => {
   try { return /openbox-tcp([2-9]|\d{2,})/.test(execFileSync(candidate, ['version'], { encoding: 'utf8', timeout: 5000 })) ? candidate : '' } catch { return '' }
 })()
 const listen = async (s) => { s.listen(0, '127.0.0.1'); await once(s, 'listening'); return s.address().port }
-const fixture = async (t, interval = '5m', failoverIntervalMs = 300_000, clock = null) => {
+// connectDelayMs:两个节点各自隔多久才接通(节点的延迟)
+const fixture = async (t, interval = '5m', failoverIntervalMs = 300_000, clock = null, { connectDelayMs = [100, 100] } = {}) => {
   const connections = [[], []]
   const sockets = new Set()
   const modes = ['up', 'up']
@@ -42,7 +43,7 @@ const fixture = async (t, interval = '5m', failoverIntervalMs = 300_000, clock =
       connections[i].push(Date.now())
       if (modes[i] === 'timeout') return
       if (modes[i] === 'down') { client.destroy(); return }
-      await sleep(100)
+      await sleep(connectDelayMs[i])
       if (client.destroyed) return
       const upstream = net.connect(port, '127.0.0.1')
       sockets.add(upstream)
@@ -158,7 +159,10 @@ test('真实内核计数(真实时间):当前页签全部超时 → 这一轮不
   timeout: 60_000,
 }, async (t) => {
   // 管理器用真实时钟:内核对正在用节点的复查是真实的 10 秒定时器,和管理器的复查几乎同时到
-  const f = await fixture(t)
+  // node-b 慢得多(超过组的容差 50 毫秒),两个组都只选 node-a:node-b 没人用,内核不替它复查,它的第二次测试只能是故障转移的复查。
+  // 以前两个节点一样快,两个组偶尔选得不一样,两个节点都「正在用」,内核把两个都复查了,盖住了 tcp14~tcp20 复查拿回失败本身的问题
+  const f = await fixture(t, '5m', 300_000, null, { connectDelayMs: [100, 400] })
+  assert.deepEqual([(await f.api('/proxies/auto')).body.now, (await f.api('/proxies/__fo:test:A')).body.now], ['node-a', 'node-a'], 'only node-a is in use')
   f.modes[0] = 'timeout'
   f.modes[1] = 'timeout'
   // Expire the real core's successful history without waiting five minutes:
@@ -178,6 +182,7 @@ test('真实内核计数(真实时间):当前页签全部超时 → 这一轮不
   const until = async (fn) => { const deadline = Date.now() + 15_000; while (Date.now() < deadline) { if (await fn()) return; await sleep(50) } assert.fail('kernel recheck did not settle') }
   await until(async () => (await f.api('/proxies/node-a')).body.history.length === 0 && (await f.api('/proxies/node-b')).body.history.length === 0)
   await sleep(300)
+  // node-b 那一下只能是故障转移的复查真测了:复查带的 since 是毫秒,内核把失败本身当成「更新的结果」时这里是 0(tcp14~tcp20)
   assert.deepEqual(f.counts().map((n, i) => n - before[i]), [1, 1], 'kernel recheck and failover recheck share one probe per node')
   assert.equal((await f.api('/proxies/failover')).body.now, 'reject', 'still all failed after the recheck: switch to the reject fallback')
 })
