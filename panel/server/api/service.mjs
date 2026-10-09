@@ -1,6 +1,7 @@
 import express from 'express'
 import { serviceStatus, serviceEnabled, stopService, enableService, disableService, processUptime, waitForServiceState } from '../system/service.mjs'
 import { detectConflicts } from '../system/conflicts.mjs'
+import { readOsRelease } from '../system/platform.mjs'
 import { cancelPendingDeploys, runDeploy, runExclusive } from './deploy-runner.mjs'
 
 // 启动/重启内核 = 用当前设置重新生成配置并应用。界面上没有单独的「部署」按钮:各个
@@ -51,6 +52,9 @@ export const stopKernel = async ({ store, ctx, paths, stopWaitMs = 20000 }) => {
 export const registerServiceRoutes = (app, { store, ctx, paths, stopWaitMs = 20000, restartPending = null } = {}) => {
   const router = express.Router({ caseSensitive: true })
   router.use(express.json({ limit: '1mb' }))
+  // 本机系统版本(版本卡「本机版本:…」标签):系统版本不会在面板运行中变,读一次就记住;读不到是空串
+  let osRelease = null
+  const currentOsRelease = () => (osRelease ??= readOsRelease({ platform: paths.platform || 'openwrt' }))
 
   // GET /api/openbox/service/status
   router.get('/service/status', async (_req, res) => {
@@ -69,10 +73,11 @@ export const registerServiceRoutes = (app, { store, ctx, paths, stopWaitMs = 200
       try { pendingRestart = await restartPending.get() } catch { /* 算不出来就不提示 */ }
     }
     // platform:'openwrt' / 'systemd'(Debian / Ubuntu)。界面按它隐藏只有 OpenWrt 才有的东西(dnsmasq 分流、LuCI 之类)
+    // osRelease:本机系统版本(OpenWrt 24.10.0、iStoreOS 24.10.1、Ubuntu 24.04),版本卡上本机那格的标签用
     // 内核是被冲突守护自动停掉的(别的代理工具还在跑):右上角提示要说清是自动停的
     const deployState = typeof store.getDeployState === 'function' ? store.getDeployState() : null
     const conflictAutoStopped = Boolean(!core.running && conflicts.length && deployState && deployState.stage === 'conflict' && deployState.autoStopped)
-    res.json({ core: { ...core, autostart, uptimeSeconds }, panel, conflicts, conflictAutoStopped, platform: paths.platform || 'openwrt', pendingRestart: { pending: Boolean(pendingRestart.pending), reasons: pendingRestart.reasons || [] } })
+    res.json({ core: { ...core, autostart, uptimeSeconds }, panel, conflicts, conflictAutoStopped, platform: paths.platform || 'openwrt', osRelease: currentOsRelease(), pendingRestart: { pending: Boolean(pendingRestart.pending), reasons: pendingRestart.reasons || [] } })
   })
 
   // POST /api/openbox/service/core/:action
