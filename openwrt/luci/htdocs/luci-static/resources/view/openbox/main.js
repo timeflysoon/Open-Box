@@ -470,9 +470,24 @@ function cmpVersion(a, b) {
 	return 0;
 }
 
-// 检查在浏览器里发起(而不是路由器),这样即便路由器本身还没配好代理也能查。
+// 检查新版本:先让路由器自己查(open-box check:读 Release 里的组件清单,直连 GitHub 不通就依次换内置镜像,
+// 和面板「后端设置」一样由路由器去查),拿不到再退回浏览器直接问 GitHub API。原来只在浏览器里问:浏览器那边
+// 不通 GitHub API、或者出口 IP 被 GitHub 限流,就报「无法检查」,哪怕路由器自己各升级渠道都通(GitHub #498)。
 // 网络受限时优雅失败,不影响页面其它功能。
 function checkLatest() {
+	return checkLatestOnRouter().catch(function () { return checkLatestInBrowser(); });
+}
+
+// open-box check 输出三行 current= / latest= / status=;查不到时 latest 是空的
+function checkLatestOnRouter() {
+	return fs.exec(CLI_PATH, [ 'check' ]).then(function (res) {
+		var m = /^latest=(v?[0-9][0-9A-Za-z._-]*)\s*$/m.exec((res && res.stdout) || '');
+		if (!m) throw new Error('no latest');
+		return m[1];
+	});
+}
+
+function checkLatestInBrowser() {
 	return fetch('https://api.github.com/repos/' + REPO + '/releases/latest', {
 		headers: { 'Accept': 'application/vnd.github+json' }
 	}).then(function (r) {
