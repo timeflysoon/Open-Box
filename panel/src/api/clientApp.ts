@@ -120,10 +120,16 @@ export const fetchClientConfigFile = () =>
 // 概览页顶栏默认放站点推广;输入内置激活码后顶栏左右两边换成自己填的文字(留空 = 默认的版本号)。
 // 状态存在路由器上。后端用 400 回「激活码不对」{ error: 'invalid activation code' } 和「还没激活」{ error: 'not activated' }。
 
-// TODO:响应体由后端 respond() 生成,字段还没对照过,先只声明确定的 activated。
+// 两边文字最长 60 个字符(后端 ACTIVATION_TEXT_MAX,超出的会被截掉)
+export const ACTIVATION_TEXT_MAX = 60
+
+// 后端 respond():存着的状态(没激活时 left / right 都是空串)+ defaults(两边留空时概览顶栏显示的值,
+// 形如「Open-Box v1.2.3」/「sing-box 1.14.1-openbox-tcp15」)
 export interface OpenboxActivation {
   activated: boolean
-  [key: string]: unknown
+  left: string
+  right: string
+  defaults: { left: string; right: string }
 }
 
 export const fetchActivation = () => requestJson<OpenboxActivation>('/api/openbox/activation')
