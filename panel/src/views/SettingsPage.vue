@@ -54,6 +54,7 @@ import { usePaddingForViews } from '@/composables/paddingViews'
 import { isSettingVisible } from '@/composables/settings'
 import { SETTINGS_MENU_KEY, SETTINGS_TAB } from '@/constant'
 import { settingsMenuOrder } from '@/store/settings'
+import ClientAppPage from '@/views/ClientAppPage.vue'
 import ClientRoutingPage from '@/views/ClientRoutingPage.vue'
 import KernelPage from '@/views/KernelPage.vue'
 import DnsPage from '@/views/DnsPage.vue'
@@ -66,6 +67,7 @@ import {
   DevicePhoneMobileIcon,
   HomeIcon,
   MapIcon,
+  QrCodeIcon,
   RectangleStackIcon,
   RssIcon,
   ShareIcon,
@@ -81,6 +83,9 @@ const { padding } = usePaddingForViews({
 })
 const route = useRoute()
 
+// 「客户端」页签的 key。SETTINGS_TAB 枚举在 constant/index.ts,这里不去改它,避免和上游同步冲突
+const CLIENT_APP_TAB = 'clientApp' as unknown as SETTINGS_TAB
+
 // 一级页签。订阅/分流/内核原本是侧边栏里的独立页面,现在收进设置页——它们都是
 // 「配置 Open-Box 怎么跑」,和左边那些「看运行状况」的页面(代理/连接/日志/规则)
 // 不是一回事,混在同一列导航里反而看不出主次。
@@ -92,6 +97,7 @@ const tabItems: { key: SETTINGS_TAB; label: string; icon: Component }[] = [
   { key: SETTINGS_TAB.groups, label: 'groupsTab', icon: RectangleStackIcon },
   { key: SETTINGS_TAB.routing, label: 'routingSettings', icon: MapIcon },
   { key: SETTINGS_TAB.clients, label: 'clientRoutingTab', icon: DevicePhoneMobileIcon },
+  { key: CLIENT_APP_TAB, label: 'clientAppTab', icon: QrCodeIcon },
   { key: SETTINGS_TAB.share, label: 'shareNetworkTab', icon: ShareIcon },
   { key: SETTINGS_TAB.dns, label: 'dnsSettingsTab', icon: ServerStackIcon },
   { key: SETTINGS_TAB.kernel, label: 'kernelSettings', icon: CpuChipIcon },
@@ -102,6 +108,7 @@ const TAB_COMPONENTS: Partial<Record<SETTINGS_TAB, Component>> = {
   [SETTINGS_TAB.groups]: SubscriptionsPage,
   [SETTINGS_TAB.routing]: RoutingPage,
   [SETTINGS_TAB.clients]: ClientRoutingPage,
+  [CLIENT_APP_TAB]: ClientAppPage,
   [SETTINGS_TAB.kernel]: KernelPage,
   [SETTINGS_TAB.dns]: DnsPage,
   [SETTINGS_TAB.share]: ShareNetworkPage,
