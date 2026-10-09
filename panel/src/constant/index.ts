@@ -302,6 +302,7 @@ export enum SETTINGS_TAB {
   dns = 'dns',
   kernel = 'kernel',
   share = 'share',
+  clientApp = 'clientApp',
 }
 
 export enum SETTINGS_MENU_KEY {
