@@ -1467,3 +1467,51 @@ export const checkServerPort = (port: number, id: string) =>
 
 // 终端分流选来源用:DHCP 租约里的设备 + 今天流量里出现过的来源 IP
 export const fetchKnownClients = () => requestJson<{ clients: Array<{ ip: string; name: string; mac?: string }> }>('/api/openbox/clients')
+
+// ---- 上游新增的延迟类接口(按 dist 反推,后端见 server/api/{site-latency,node-latency}.mjs)
+
+// 概览「站点延迟」:先取历史把柱子画出来,再即时测一轮。timeoutMs 是「不通」时柱子按多高画
+export interface OpenboxSiteLatencyHistory {
+  history: Record<string, unknown>
+  timeoutMs: number
+}
+export const fetchSiteLatencyHistory = async (): Promise<OpenboxSiteLatencyHistory> => {
+  const data = await requestJson<Partial<OpenboxSiteLatencyHistory>>('/api/openbox/site-latency/history')
+  return { history: data.history ?? {}, timeoutMs: data.timeoutMs ?? 5000 }
+}
+// 请求体 { sites };返回结构还没对过后端,先原样透传
+export const testSiteLatency = (sites: unknown[]) =>
+  requestJson<Record<string, unknown>>('/api/openbox/site-latency', {
+    method: 'POST',
+    body: JSON.stringify({ sites }),
+    signal: AbortSignal.timeout(30000),
+  })
+
+// 手动测速前看一眼内核的测速排队:busy 为真时界面提示「已排队」(内核没跑 / 老内核没有这个接口时后端回 busy: false)
+export interface OpenboxNodeLatencyQueue {
+  busy: boolean
+  running: number
+  waiting: number
+}
+export const fetchNodeLatencyQueue = () => requestJson<OpenboxNodeLatencyQueue>('/api/openbox/nodes/latency/queue')
+
+// 链式代理编辑框的「测速 / IP 地区」:测框里填的这一份(没保存也能测)
+export interface OpenboxChainLatencyPayload {
+  link: string
+  upstream: string
+  testUrl?: string
+  timeoutMs?: number
+  // 面板设置里选的 IP 信息接口(排好序,后端只认白名单主机)
+  ipUrls?: string[]
+}
+export interface OpenboxChainLatencyResult {
+  // 上游此刻选中的节点
+  via: string
+  ok?: boolean
+  ms?: number
+  error?: string
+  // IP 信息部分的返回形状还没对过后端
+  [key: string]: unknown
+}
+export const testChainLatency = (payload: OpenboxChainLatencyPayload) =>
+  requestJson<OpenboxChainLatencyResult>('/api/openbox/chain-proxies/latency', { method: 'POST', body: JSON.stringify(payload) })
