@@ -65,6 +65,8 @@ test('GET /api/openbox/service/status → {core:{running,raw}, panel:{running,ra
     assert.equal(body.conflicts.length, 0)
     // 界面按 platform 隐藏只有 OpenWrt 才有的选项(dnsmasq 分流);默认路径表就是 openwrt
     assert.equal(body.platform, 'openwrt')
+    // 版本卡本机那格「本机:24.10.5 · x64」的架构:随包 Node 和安装包同一个架构
+    assert.equal(body.arch, process.arch)
     // mock 里没配 enabled 的返回,默认退出码 0 → 视为已开启自启
     assert.equal(body.core.autostart, true)
   } finally {

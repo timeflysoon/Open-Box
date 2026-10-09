@@ -73,11 +73,12 @@ export const registerServiceRoutes = (app, { store, ctx, paths, stopWaitMs = 200
       try { pendingRestart = await restartPending.get() } catch { /* 算不出来就不提示 */ }
     }
     // platform:'openwrt' / 'systemd'(Debian / Ubuntu)。界面按它隐藏只有 OpenWrt 才有的东西(dnsmasq 分流、LuCI 之类)
-    // osRelease:本机系统版本(OpenWrt 24.10.0、iStoreOS 24.10.1、Ubuntu 24.04),版本卡上本机那格的标签用
+    // osRelease:本机系统版本(OpenWrt 24.10.0、iStoreOS 24.10.1、Ubuntu 24.04);arch:本机架构(x64 / arm64,随包 Node 和安装包同一个架构)。
+    // 版本卡上本机那格写「本机:24.10.0 · x64」(用户 2026-10-09)
     // 内核是被冲突守护自动停掉的(别的代理工具还在跑):右上角提示要说清是自动停的
     const deployState = typeof store.getDeployState === 'function' ? store.getDeployState() : null
     const conflictAutoStopped = Boolean(!core.running && conflicts.length && deployState && deployState.stage === 'conflict' && deployState.autoStopped)
-    res.json({ core: { ...core, autostart, uptimeSeconds }, panel, conflicts, conflictAutoStopped, platform: paths.platform || 'openwrt', osRelease: currentOsRelease(), pendingRestart: { pending: Boolean(pendingRestart.pending), reasons: pendingRestart.reasons || [] } })
+    res.json({ core: { ...core, autostart, uptimeSeconds }, panel, conflicts, conflictAutoStopped, platform: paths.platform || 'openwrt', osRelease: currentOsRelease(), arch: process.arch, pendingRestart: { pending: Boolean(pendingRestart.pending), reasons: pendingRestart.reasons || [] } })
   })
 
   // POST /api/openbox/service/core/:action
