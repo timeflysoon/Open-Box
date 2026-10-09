@@ -5,6 +5,7 @@
 // 和 openbox.ts 一样走 fetchServerApi,这样 401/403 的处理和面板其余部分一致。
 // requestJson 在 openbox.ts 里没有导出,这里照它的行为写了一份(错误体 {error} 优先于 {message}),
 // 不去改 openbox.ts,避免和以后从上游同步的内容冲突。
+import { saveProfile } from '@/api/openbox'
 import { fetchServerApi } from '@/store/auth'
 
 // ---- 通用 ----
@@ -37,10 +38,89 @@ const requestJson = async <T>(input: string, init?: RequestInit): Promise<T> => 
 
 // ---- 客户端 App(server/api/client-app.mjs)----
 
-// 地区分流的一组 / 路由器标识:内部字段由 engine/share-regions.mjs、engine/server-info.mjs 定义,
-// 这里先不展开,界面用到哪个字段再补类型。
-export type OpenboxShareRegion = Record<string, unknown>
-export type OpenboxServerInfo = Record<string, unknown>
+// ---- 地区分流(档案 shareRegions,后端 engine/share-regions.mjs)----
+// 共享网络的手机客户端按所在地区决定哪些流量本地直连、哪些回路由器。不进路由器自己的内核配置,改了不用重启内核。
+// 没存 / 存了空数组 = 用默认三组(中国大陆 / 港澳 / 其他地区),所以「恢复默认」就是 saveShareRegions([])。
+
+export const SHARE_REGION_RULE_TYPES = [
+  'geosite',
+  'geoip',
+  'domain',
+  'domainSuffix',
+  'domainKeyword',
+  'ipcidr',
+  'ruleUrl',
+] as const
+export type OpenboxShareRuleType = (typeof SHARE_REGION_RULE_TYPES)[number]
+// direct = 本地直连;proxy = 回路由器(经共享网络节点,由路由器按自己的规则出去)
+export type OpenboxShareAction = 'direct' | 'proxy'
+
+export interface OpenboxShareRule {
+  type: OpenboxShareRuleType
+  value: string
+  action: OpenboxShareAction
+}
+
+// 一条 DNS 上游。server 是 IP,或记号 'wan'(= 手机此刻所在网络的系统 DNS,固定 UDP 53)
+export interface OpenboxShareDnsUpstream {
+  server: string
+  protocol: string
+  port: number
+}
+
+// 直连 / 代理两侧各一条主上游 + 若干备用(并发查,谁先给出 NOERROR 用谁的);设计和路由器的「DNS 上游」一致
+export interface OpenboxShareGroupDns {
+  direct: string
+  directProtocol: string
+  directPort: number
+  directExtras: OpenboxShareDnsUpstream[]
+  proxy: string
+  proxyProtocol: string
+  proxyPort: number
+  proxyExtras: OpenboxShareDnsUpstream[]
+}
+
+export interface OpenboxShareRegionGroup {
+  // /^[a-z0-9_-]{1,32}$/,组与组之间不能重复
+  id: string
+  name: string
+  description?: string
+  // 两位国家代码(大写)
+  regions: string[]
+  // 不写 = 在这些地区时用这一组;'outside' = 在这些地区之外时用(至少列一个地区)。
+  // 「一个地区只能归一组」只在「在这些地区」的组之间查
+  regionMatch?: 'inside' | 'outside'
+  // 定位不到、或没有任何一组命中时用的组
+  default?: boolean
+  rules: OpenboxShareRule[]
+  // 规则都没命中的流量
+  catchAll: OpenboxShareAction
+  dns: OpenboxShareGroupDns
+}
+
+// 后端校验的上限(engine/share-regions.mjs);后端才是权威,这里只用来在界面上提前限制输入
+export const SHARE_REGION_LIMITS = {
+  groups: 12,
+  rulesPerGroup: 200,
+  nameMax: 30,
+  descriptionMax: 120,
+  ruleUrlMax: 2048,
+  id: /^[a-z0-9_-]{1,32}$/,
+} as const
+
+// ---- 路由器标识(档案 serverInfo,后端 engine/server-info.mjs)----
+// App 里共享网络的节点卡片、本地分流的配置卡片都整张显示它。四个字段都可以空:
+//   name    空 = 默认名称(接口 serverInfoDefaults.name,现在是「Open-Box」)
+//   icon    图标代码,和节点组图标同一套(国家代码 / globe:* / brand:* / misc:*);空 = App 画 Open-Box 的标志
+//   iconSvg 保存时存下的图标 SVG 原文(随包图标索引里没有时才用),以 <svg 开头,最大 64 KB
+//   region  两位国家代码(大写);空 = 按出口 IP 自动判
+export const SERVER_INFO_NAME_MAX = 40
+export interface OpenboxServerInfo {
+  name?: string
+  icon?: string
+  iconSvg?: string
+  region?: string
+}
 
 // 按出口 IP 判出的国家;没判过时接口回 null
 export interface OpenboxEgressCountry {
@@ -59,9 +139,9 @@ export interface OpenboxClientAppInfo {
   lanSubnets: string[]
   panelPort: number
   // 地区分流现值(没改过就是默认值)/ 是不是用户改过 / 默认值
-  shareRegions: OpenboxShareRegion[]
+  shareRegions: OpenboxShareRegionGroup[]
   shareRegionsCustomized: boolean
-  defaultShareRegions: OpenboxShareRegion[]
+  defaultShareRegions: OpenboxShareRegionGroup[]
   // 路由器标识:存着的原样(空对象 = 全用默认值);serverInfoDefaults 是默认名称
   serverInfo: OpenboxServerInfo
   serverInfoDefaults: { name: string }
@@ -74,6 +154,12 @@ export const fetchClientAppInfo = () =>
 // 按出口 IP 判一次国家。出口 IP 没变就直接用上次的;内核没起 / 面板不在路由器上时后端回 503
 export const detectEgressCountry = () =>
   requestJson<OpenboxEgressCountry>('/api/openbox/client-app/egress-country', { method: 'POST' })
+
+// 保存地区分流。整份覆盖;传 [] = 恢复默认三组。校验不过后端回 400,message 是英文原因(如 'region CN is in both cn and x')
+export const saveShareRegions = (shareRegions: OpenboxShareRegionGroup[]) => saveProfile({ shareRegions })
+
+// 保存路由器标识。整份覆盖(没给的字段就是没有);传 {} = 全用默认
+export const saveServerInfo = (serverInfo: OpenboxServerInfo) => saveProfile({ serverInfo })
 
 // ---- 本地分流(客户端配置,server/api/client-config.mjs)----
 
