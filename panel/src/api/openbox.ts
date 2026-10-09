@@ -1541,3 +1541,67 @@ export interface OpenboxChainLatencyResult {
 }
 export const testChainLatency = (payload: OpenboxChainLatencyPayload) =>
   requestJson<OpenboxChainLatencyResult>('/api/openbox/chain-proxies/latency', { method: 'POST', body: JSON.stringify(payload) })
+
+// 已保存节点的测速(代理页 / 订阅卡片):按节点名让服务端去测,优先交给内核,不用把含密码的节点配置送来送去。
+// 和上面 testNodeLatency 是同一个接口,服务端按请求体里有没有 url / urls / content 区分:有 = 预览,没有 = 这里的 jobs
+export interface OpenboxStoredLatencyJob {
+  tag: string
+  // 测速地址,不传用档案里的 testUrl
+  url?: string
+  // 是否记进延迟历史,默认记;传 false 只测不记
+  record?: boolean
+}
+export interface OpenboxStoredLatencyResult extends OpenboxLatencyResult {
+  // 没测成时的原因,如 invalid(生成不出这个节点的出站)、not-found(是组,或已不在订阅里)
+  reason?: string
+}
+export interface OpenboxStoredLatencyResponse {
+  // 顺序和请求里的 jobs 一一对应
+  results: OpenboxStoredLatencyResult[]
+  history?: OpenboxLatencyHistory
+}
+export const testStoredLatency = (jobs: OpenboxStoredLatencyJob[], timeoutMs?: number) =>
+  requestJson<OpenboxStoredLatencyResponse>('/api/openbox/nodes/latency', {
+    method: 'POST',
+    body: JSON.stringify({ jobs, ...(timeoutMs ? { timeoutMs } : {}) }),
+  })
+
+// 带进度的版本:服务端回 NDJSON,每测完一批报一行 { done: [jobs 下标] },最后一行才是完整结果。
+// onDone 拿到的下标是请求里 jobs 的下标,可以边测边把对应节点的延迟画出来
+export const testStoredLatencyStream = async (
+  jobs: OpenboxStoredLatencyJob[],
+  onDone: (indices: number[]) => void,
+  timeoutMs?: number,
+): Promise<OpenboxStoredLatencyResponse> => {
+  const response = await fetchServerApi('/api/openbox/nodes/latency', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/x-ndjson' },
+    body: JSON.stringify({ jobs, progress: true, ...(timeoutMs ? { timeoutMs } : {}) }),
+  })
+  if (!response.ok || !response.body) {
+    const data = await response.json().catch(() => null)
+    throw new Error(extractErrorMessage(data) || `request failed: ${response.status}`)
+  }
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  const state: { final: OpenboxStoredLatencyResponse | null } = { final: null }
+  const handle = (text: string) => {
+    if (!text.trim()) return
+    const msg = JSON.parse(text) as { done?: number[]; error?: string; results?: unknown }
+    if (Array.isArray(msg.done)) onDone(msg.done)
+    else if (msg.error) throw new Error(msg.error)
+    else if (Array.isArray(msg.results)) state.final = msg as unknown as OpenboxStoredLatencyResponse
+  }
+  for (;;) {
+    const { value, done } = await reader.read()
+    buffer += decoder.decode(value, { stream: !done })
+    const parts = buffer.split('\n')
+    buffer = parts.pop() ?? ''
+    parts.forEach(handle)
+    if (done) break
+  }
+  handle(buffer)
+  if (!state.final) throw new Error('latency stream ended without results')
+  return state.final
+}
