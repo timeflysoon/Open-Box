@@ -994,6 +994,10 @@ export interface OpenboxUpdateStatus {
   version: string
   singboxVersion: string
   builtAt: string
+  // 随包 Geo 规则集的版本 / 日期 / 条目数(GET /update/status 返回,见 server/api/updates.mjs)
+  geoVersion?: string
+  geoDate?: string
+  geoCounts?: { geosite: number; geoip: number }
   channel: { mode: 'direct' | 'mirror'; prefix: string }
   status: OpenboxUpdateProgress
   logTail: string
@@ -1311,6 +1315,94 @@ export const importBackup = (data: OpenboxBackup, subscriptionsMode: OpenboxBack
     method: 'POST',
     body: JSON.stringify(data),
   })
+
+// ---- 系统类接口(对照 server/api/{dns-upstream-test,reset,deploy}.mjs 和 server/system/dns-cache.mjs)
+
+// 「上游 DNS」:系统此刻的上游 DNS(接口上 DHCP 分配或手动指定的)
+export const fetchWanDns = async (): Promise<string[]> => {
+  const data = await requestJson<{ servers?: string[] }>('/api/openbox/dns/wan')
+  return Array.isArray(data.servers) ? data.servers : []
+}
+
+// 启动时那次后台判地区还没做完时 pending 为真;region 是档案里此刻的地区
+export interface OpenboxDnsRegionState {
+  pending: boolean
+  region: string
+}
+export const fetchDnsRegionState = () => requestJson<OpenboxDnsRegionState>('/api/openbox/dns/region-detect')
+
+// 按路由器出口公网 IP 判一次它在哪;判不出来 region 是 null
+export interface OpenboxDnsRegionDetect {
+  region: 'cn' | 'intl' | null
+  ip: string
+  error?: string
+}
+export const detectDnsRegion = () => requestJson<OpenboxDnsRegionDetect>('/api/openbox/dns/region-detect', { method: 'POST' })
+
+// DNS 上游测试:保存前真的用内核按选的协议向那台服务器查一次。
+// server 可以填「上游 DNS」记号 wan(固定直连,协议和端口跟着上游走),回的 server 是实际测的那台地址。
+// ok 为 false 看 error;ok 为 true 且带 warning,表示解析通了、取测速地址那步失败(DNS 本身没问题)
+export interface OpenboxDnsUpstreamTestPayload {
+  side: 'direct' | 'proxy'
+  server: string
+  protocol: string
+  port?: number
+}
+export interface OpenboxDnsUpstreamTestResult {
+  ok: boolean
+  ms: number
+  server: string
+  protocol: string
+  port: number
+  // 经哪个节点测的(空 = 从路由器直连测);chain 是逐跳线路,policy 是它属于哪个站点集
+  via: string
+  chain?: string[]
+  policy?: string
+  wan?: boolean
+  note?: string
+  warning?: string
+  error?: string
+}
+export const testDnsUpstream = (payload: OpenboxDnsUpstreamTestPayload) =>
+  requestJson<OpenboxDnsUpstreamTestResult>('/api/openbox/dns/upstream-test', { method: 'POST', body: JSON.stringify(payload) })
+
+// 清空 DNS 缓存:内核的,加上 dnsmasq / systemd-resolved 各自那一层,有一层清掉就算成功;
+// 全都清不掉时后端回 503,requestJson 会抛出它的 error 文字
+export interface OpenboxDnsFlushResult {
+  kernel: boolean
+  dnsmasq: boolean
+  resolved: boolean
+}
+export const flushDnsCache = () => requestJson<OpenboxDnsFlushResult>('/api/openbox/dns/flush-cache', { method: 'POST' })
+
+// 恢复默认:拿到默认值之后走正常的 saveNodeGroups / saveProfile 写回(校验、落库不另开一条路)
+export const fetchDefaultNodeGroups = async (): Promise<OpenboxUserGroup[]> => {
+  const data = await requestJson<{ groups: OpenboxUserGroup[] }>('/api/openbox/defaults/groups')
+  return data.groups
+}
+export const fetchDefaultRouting = async (): Promise<OpenboxProfileRouting> => {
+  const data = await requestJson<{ routing: OpenboxProfileRouting }>('/api/openbox/defaults/routing')
+  return data.routing
+}
+
+// 恢复出厂设置:整张表清空(订阅、节点、分流、面板设置、背景图、面板密码、登录会话)、统计数据清零,
+// 按随包默认重新播种,内核停掉;做完面板会像第一次那样让人设密码。不可恢复,调用前必须让用户二次确认
+export interface OpenboxFactoryResetResult {
+  ok: boolean
+  seeded: number
+  profileSeeded: boolean
+  kernelStopped: boolean
+}
+export const factoryReset = () => requestJson<OpenboxFactoryResetResult>('/api/openbox/factory-reset', { method: 'POST' })
+
+// 紧急回滚:撤销对系统的接管、恢复直连,并关掉内核开机自启。
+// 任何一步没成 ok 就是 false,failures 里是失败的步骤;整个请求出错时后端回 500 + message,requestJson 会抛
+export interface OpenboxRollbackResult {
+  ok: boolean
+  actions?: unknown
+  failures: Array<{ step: string; message: string }>
+}
+export const rollbackToDirect = () => requestJson<OpenboxRollbackResult>('/api/openbox/rollback', { method: 'POST' })
 
 // 共享网络 · 保存前的端口检测(server/api/servers.mjs)
 export interface OpenboxPortCheck {
