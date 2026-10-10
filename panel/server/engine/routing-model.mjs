@@ -122,6 +122,14 @@ const strList = (v) => (Array.isArray(v) ? v.filter(isNonEmptyString).map((s) =>
 
 const TARGETS = ['direct', 'proxy']
 
+// 随包规则库里有哪些 geosite / geoip 规则集。上游(MetaCubeX)会删掉 / 改名分类,换了新规则库之后档案里还引用着已经没有的
+// 那几个,部署就卡在「安装包缺少规则集」、内核起不来(2026-10-10 那次删了 github@ads 等三个)。面板 / 部署脚本启动时按随包清单
+// 登记一次(system/geodata-tags.mjs),这里规整站点集、前置自定义分流时把包里没有的去掉:只是不进配置,档案原样不动,界面上照样
+// 看得到;去掉了哪些记在 missingRulesets 里,部署时提示。没登记(测试、App 没传)就不筛,和以前一样
+let availableGeoTags = null
+export const setAvailableGeoTags = (tags) => { availableGeoTags = tags ? new Set(tags) : null }
+export const geoRulesetAvailable = (tag) => availableGeoTags === null || !/^(geoip|geosite)-/.test(String(tag)) || availableGeoTags.has(tag)
+
 // 规则集 tag:geosite/geoip 两类规则要下载对应的 .srs,其余类型没有 tag
 export const regionRuleTag = (rule) =>
   rule.type === 'geosite' || rule.type === 'geoip' ? `${rule.type}-${rule.value}` : ''
@@ -166,6 +174,8 @@ export const normalizePolicy = (raw, index = 0) => {
   // system/rule-lists.mjs)。这里就把它折算成规则集名字并进 rulesets——下游的路由规则、
   // DNS 规则、域名穿透一律按"这个站点集引用了哪些规则集"办事,不必各自再认一遍链接。
   const ruleUrls = strList(raw?.ruleUrls).filter((u) => /^https?:\/\//i.test(u))
+  const allRulesets = [...new Set([...strList(raw?.rulesets), ...ruleUrls.map(listTagForUrl)])]
+  const missingRulesets = allRulesets.filter((tag) => !geoRulesetAvailable(tag))
   return {
     id: isNonEmptyString(raw?.id) ? raw.id.trim() : `policy-${index}`,
     name: isNonEmptyString(raw?.name) ? raw.name.trim() : `策略-${index + 1}`,
@@ -176,12 +186,14 @@ export const normalizePolicy = (raw, index = 0) => {
     // 停用的站点集留在档案里、界面上能看到,但不进内核配置(没有 selector、没有规则)
     enabled: raw?.enabled !== false,
     ruleUrls,
-    rulesets: [...new Set([...strList(raw?.rulesets), ...ruleUrls.map(listTagForUrl)])],
+    rulesets: missingRulesets.length ? allRulesets.filter(geoRulesetAvailable) : allRulesets,
     domain: strList(raw?.domain),
     domainSuffix: strList(raw?.domainSuffix),
     domainKeyword: strList(raw?.domainKeyword),
     ipCidr: strList(raw?.ipCidr),
     notes: normalizeNotes(raw?.notes),
+    // 随包规则库里已经没有、上面去掉了的规则集(见 setAvailableGeoTags);没有就不带这个字段
+    ...(missingRulesets.length ? { missingRulesets } : {}),
   }
 }
 
@@ -234,13 +246,17 @@ const normalizeCustomRule = (raw) => {
 
 export const normalizeCustomPolicy = (raw) => {
   const r = raw && typeof raw === 'object' ? raw : {}
+  const rules = Array.isArray(r.rules) ? r.rules.map(normalizeCustomRule).filter(Boolean) : []
+  // 引用的 geosite / geoip 已经不在随包规则库里的行去掉(整行不进配置),记下来部署时提示
+  const missingRulesets = rules.map(customRuleTag).filter((tag) => tag && !geoRulesetAvailable(tag))
   return {
     name: isNonEmptyString(r.name) ? r.name.trim() : CUSTOM_POLICY_NAME,
     icon: isNonEmptyString(r.icon) ? r.icon.trim() : CUSTOM_POLICY_ICON,
     iconScale: Number.isInteger(r.iconScale) ? r.iconScale : 0,
     enabled: r.enabled !== false,
     // 顺序即匹配顺序(内核首条命中生效),所以是数组
-    rules: Array.isArray(r.rules) ? r.rules.map(normalizeCustomRule).filter(Boolean) : [],
+    rules: missingRulesets.length ? rules.filter((rule) => geoRulesetAvailable(customRuleTag(rule))) : rules,
+    ...(missingRulesets.length ? { missingRulesets } : {}),
   }
 }
 
@@ -438,8 +454,8 @@ export const normalizeRouting = (routing) => {
   const fallbackName = isNonEmptyString(raw.fallbackName) ? raw.fallbackName.trim() : FALLBACK_TAG
   const fallbackIcon = isNonEmptyString(raw.fallbackIcon) ? raw.fallbackIcon.trim() : FALLBACK_ICON
 
-  const policies = (Array.isArray(raw.policies) ? raw.policies : [])
-    .map(normalizePolicy)
+  const normalized = (Array.isArray(raw.policies) ? raw.policies : []).map(normalizePolicy)
+  const policies = normalized
     .filter(policyHasCondition)
     .filter((p) => p.name !== FALLBACK_TAG && p.name !== fallbackName)
   // 真正进内核的那部分:停用的不算
@@ -452,11 +468,19 @@ export const normalizeRouting = (routing) => {
     default: isNonEmptyString(raw.fallbackDefault) ? raw.fallbackDefault.trim() : '',
   }
 
+  const custom = normalizeCustomPolicy(raw.custom)
+  // 随包规则库里已经没有的规则集,按「谁引用的」列出来(停用的站点集 / 前置分流不进配置,不算);只剩这一项条件的站点集
+  // 上面已经因为没有条件被去掉了,这里照样列出来
+  const missingRulesets = [
+    ...(custom.enabled !== false ? (custom.missingRulesets || []).map((tag) => ({ tag, owner: custom.name })) : []),
+    ...normalized.filter((p) => p.enabled !== false).flatMap((p) => (p.missingRulesets || []).map((tag) => ({ tag, owner: p.name }))),
+  ]
   return {
-    custom: normalizeCustomPolicy(raw.custom),
+    custom,
     policies,
     activePolicies,
     fallback,
+    ...(missingRulesets.length ? { missingRulesets } : {}),
   }
 }
 

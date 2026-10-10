@@ -451,6 +451,16 @@ export const skippedNodesWarning = (store, skipped) => {
   return `有 ${items.length} 个节点内核不认,这次启动跳过了它们:${shown}${more}。其余照常;刷新订阅或修改这些节点后会重新检查`
 }
 
+// 站点集 / 前置自定义分流里引用着、随包规则库里已经没有的规则集(上游删掉的分类,engine/routing-model.mjs 的
+// setAvailableGeoTags):生成配置时已经跳过那几项,启动成功后照样弹黄色提示,告诉用户换成别的分类;多了只列前几个
+const MISSING_RULESETS_SHOWN = 5
+export const missingRulesetsWarning = (missing) => {
+  const items = missing.map(({ tag, owner }) => `${tag}(「${owner}」)`)
+  const shown = items.slice(0, MISSING_RULESETS_SHOWN).join('、')
+  const more = items.length > MISSING_RULESETS_SHOWN ? `等,另外还有 ${items.length - MISSING_RULESETS_SHOWN} 个` : ''
+  return `规则库更新后已经没有这些规则集,用到它们的那几项这次跳过了:${shown}${more}。其余照常;在站点集里换成别的分类就不再提示`
+}
+
 // 部署流水线(uci 写 dhcp/firewall、重启 dnsmasq、重启内核、等几秒验证)没法交错执行:
 // 两条同时跑,一条的验证会撞上另一条的重启窗口,回滚把对方刚接管好的 DNS 撤掉却报成功。
 // 面板的启动/重启、POST /deploy、Geo 刷新、计划任务、升级脚本的 CLI 都会调到这里,
@@ -633,6 +643,8 @@ const runDeployInner = async ({ store, ctx, paths, fetchImpl = globalThis.fetch,
         buildInputs = { ...buildInputs, skipNodes: [...skippedNodes.keys()] }
       }
       if (result.ok && skippedNodes.size) result.warning = [result.warning, skippedNodesWarning(store, skippedNodes)].filter(Boolean).join(';')
+      const missingRulesets = result.ok ? normalizeRouting((store.getProfile() || {}).routing).missingRulesets || [] : []
+      if (missingRulesets.length) result.warning = [result.warning, missingRulesetsWarning(missingRulesets)].filter(Boolean).join(';')
       // 跳过之后还是没起来(问题在别处):跳过的那几个也确实是坏的,和这次报出来的一起给界面标红
       else if (!result.ok && skippedNodes.size) result.badTags = [...new Set([...skippedNodes.keys(), ...(result.badTags || [])])]
       if (result.warning) console.warn(`[deploy] ${result.warning}`)

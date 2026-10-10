@@ -14,6 +14,7 @@ import { detectPlatform } from '../system/platform.mjs'
 import { runDeploy } from '../api/deploy-runner.mjs'
 import { settleRegionBeforeDeploy } from '../system/router-region.mjs'
 import { retryBusy } from '../system/sqlite-busy.mjs'
+import { registerBundledGeoTags } from '../system/geodata-tags.mjs'
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
 const dbPath = process.env.ZASHBOARD_DB_PATH || path.join(rootDir, 'data', 'zashboard.sqlite')
@@ -36,6 +37,8 @@ const store = createStore({
 
 const ctx = createRealContext()
 const paths = createPaths(openboxRoot, { platform })
+// 随包规则库里有哪些规则集:站点集引用着、包里已经没有的跳过并提示,不让内核起不来(system/geodata-tags.mjs)
+await registerBundledGeoTags(ctx, paths, { log: (m) => console.error(m) })
 // 路由器在哪还没判出来(新装 / 升级后第一次):部署之前先判一次,配置直接按那个地区的 DNS 默认值生成(system/router-region.mjs)。
 // 最多等 8 秒,判不出照常部署
 try {

@@ -67,6 +67,7 @@ import { registerPublicSubscriptionShareRoutes, registerSubscriptionShareRoutes 
 import { subscriptionFetch } from './system/insecure-fetch.mjs'
 import { createStore } from './store/openbox-store.mjs'
 import { createRealContext } from './system/context-real.mjs'
+import { registerBundledGeoTags } from './system/geodata-tags.mjs'
 import { createPaths } from './system/paths.mjs'
 import { detectPlatform } from './system/platform.mjs'
 
@@ -291,6 +292,9 @@ const revokeAccessSession = (id) => {
 // ctx 是真实的 exec/fs 抽象(与测试用的 createMockContext 同接口),两者都是无状态的纯对象/闭包,可安全全局复用。
 const obPaths = createPaths(process.env.OPENBOX_ROOT || '/opt/open-box', { platform: obPlatform })
 const obCtx = createRealContext()
+// 随包规则库里有哪些 geosite / geoip:站点集引用着、包里已经没有的(上游删掉的分类)生成配置时跳过并提示,规则页推算、
+// 发给 App 的配置也按同一份(system/geodata-tags.mjs)
+await registerBundledGeoTags(obCtx, obPaths, { log: (m) => console.log(m) })
 // 定时任务按路由器本地时间的钟点跑:OpenWrt 上时区名和系统实际的 POSIX 串对得上,就按时区名设面板自己的 TZ
 // (固件没装 zoneinfo、有夏令时的时区也算得对;见 system/timezone.mjs)。计划任务第一次跑在一分钟后,来得及
 void syncProcessTimezoneOnStartup(obCtx, obPlatform).catch(() => {})

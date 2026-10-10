@@ -355,3 +355,52 @@ test('runDeploy:校验报出是某个节点时,把内核不认的节点都找出
   assert.ok(checks <= 6, `一次把坏节点找全,不是一个个重新部署:check ${checks} 次`)
 })
 
+
+// 规则库换新之后,站点集 / 前置自定义分流里引用着、随包规则库已经没有的分类(上游删掉的):跳过那几项照常启动,提示是哪几个
+test('runDeploy:站点集引用的规则集随包规则库里已经没有了,跳过那几项照常启动并提示;没登记规则库清单时照旧报缺', async () => {
+  const { runDeploy } = await import('./deploy-runner.mjs')
+  const { setAvailableGeoTags } = await import('../engine/routing-model.mjs')
+  const setup = () => {
+    const m = new Map()
+    const store = createStore({ get: (k) => (m.has(k) ? m.get(k) : null), set: (k, v) => m.set(k, v), del: (k) => m.delete(k) })
+    const paths = createPaths('/opt/open-box')
+    store.setGroups([])
+    store.setProfile({
+      routing: {
+        fallbackDefault: 'direct',
+        custom: { rules: [{ type: 'geosite', value: 'whatsapp@ads', outbound: 'block' }, { type: 'domain', value: 'a.example.com', outbound: 'direct' }] },
+        policies: [
+          { id: 'cn', name: '国内', default: 'direct', rulesets: ['geosite-cn', 'geosite-github@ads'] },
+          { id: 'gh', name: 'GitHub 广告', default: 'block', rulesets: ['geosite-github-copilot@ads'] },
+          { id: 'off', name: '停用的', enabled: false, default: 'block', rulesets: ['geosite-nope@ads'] },
+        ],
+      },
+      clientRoutes: [], dns: { split: true, mode: 'off' }, tun: { autoRedirect: false },
+    })
+    store.setNodes([])
+    const ctx = createMockContext({ files: { [paths.singbox]: 'x', '/dev/net/tun': '', '/etc/resolv.conf': 'nameserver 223.5.5.5\n', [`${paths.geoDir}/geosite-cn.srs`]: 'SRS' }, execResults: { '/etc/init.d/openbox status': { code: 0, stdout: 'running' } } })
+    return { store, paths, ctx }
+  }
+  const fetchImpl = async () => new Response('{}', { status: 404 })
+  try {
+    setAvailableGeoTags(['geosite-cn', 'geoip-cn'])
+    const { store, paths, ctx } = setup()
+    const r = await runDeploy({ store, ctx, paths, fetchImpl, lateWatch: false })
+    assert.equal(r.ok, true, `${r.stage}: ${r.message}`)
+    assert.match(r.warning, /规则库更新后已经没有这些规则集,用到它们的那几项这次跳过了:geosite-whatsapp@ads\(「前置自定义分流」\)、geosite-github@ads\(「国内」\)、geosite-github-copilot@ads\(「GitHub 广告」\)。/)
+    assert.doesNotMatch(r.warning, /nope/, '停用的站点集不进配置,不提示')
+    const text = ctx.files[paths.configPath]
+    assert.doesNotMatch(text, /github|whatsapp/, '缺的规则集和只剩它的站点集都不进配置')
+    const config = JSON.parse(text)
+    assert.ok(config.route.rule_set.some((s) => s.tag === 'geosite-cn'))
+    assert.ok(config.route.rules.some((rule) => (rule.domain || []).includes('a.example.com')), '同一个前置分流里别的行照常')
+    // 没登记清单(读不到):和以前一样报缺,不悄悄改配置
+    setAvailableGeoTags(null)
+    const again = setup()
+    const failed = await runDeploy({ store: again.store, ctx: again.ctx, paths: again.paths, fetchImpl, lateWatch: false })
+    assert.equal(failed.ok, false)
+    assert.match(failed.message, /安装包缺少规则集 geosite-/)
+  } finally {
+    setAvailableGeoTags(null)
+  }
+})
