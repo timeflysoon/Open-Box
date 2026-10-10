@@ -386,6 +386,8 @@ export const parseShareLinkDetailed = (uri) => {
     const message = String((err && err.message) || '')
     if (err && err.code === 'unsupported-plugin') return { skip: { type, reason: 'unsupported-plugin', detail: err.detail || message } }
     if (/^unsupported transport:/.test(message)) return { skip: { type, reason: 'unsupported-transport', detail: message } }
+    // 内核会拒收的字段(engine/node-model.mjs 的 invalidField,比如 REALITY 公钥写坏了):说明是哪个字段
+    if (err && err.code === 'invalid-field') return { skip: { type, reason: 'invalid', detail: err.detail } }
     return { skip: { type, reason: 'invalid' } }
   }
 }

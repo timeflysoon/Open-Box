@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createMockContext } from './context.mjs'
 import { createPaths } from './paths.mjs'
-import { checkConfig, validateConfigObject, attributeBadNodes, describeConfigError } from './validate.mjs'
+import { checkConfig, validateConfigObject, attributeBadNodes, describeConfigError, kernelErrorText, kernelRejectedNodes } from './validate.mjs'
 
 test('错误索引映射到重命名后的节点、订阅和原名，不泄露节点配置', () => {
   const nodes = [{ tag: '机场A-香港01', originalTag: 'HK01', subscriptionId: 'a', password: 'never-show' }]
@@ -71,3 +71,48 @@ test('attributeBadNodes 定位坏节点', async () => {
   assert.deepEqual(r.badTags, ['bad'])
   assert.equal(r.checked, 2)   // 只检代理节点,不检 direct/selector
 })
+
+// GitHub #518:添加 / 刷新订阅、启动时让内核挑出它不认的节点
+test('kernelRejectedNodes:内核报哪个就剔掉再查,直到通过;编号跳过检查用的直连;不带 detour;临时文件用完删', async () => {
+  const node = (tag, extra = {}, more = {}) => ({ tag, type: 'shadowsocks', server: 'a.com', server_port: 8388, fields: { method: 'aes-256-gcm', password: 'p', ...extra }, source: 'clash', ...more })
+  const nodes = [node('good1'), node('bad1', { method: 'nope' }), node('good2'), node('bad2', { method: 'nope' }), node('chain', {}, { detour: 'up' })]
+  const ctx = createMockContext()
+  const seen = []
+  ctx.exec = async () => {
+    const probe = JSON.parse(ctx.files['/tmp/vet.json'])
+    seen.push(probe.outbounds.map((o) => o.tag))
+    if (probe.outbounds.some((o) => o.detour)) return { code: 1, stdout: '', stderr: 'FATAL[0000] initialize outbound[5]: outbound not found: up\n' }
+    const i = probe.outbounds.findIndex((o) => o.method === 'nope')
+    if (i >= 0) return { code: 1, stdout: '', stderr: `\x1b[31mFATAL\x1b[0m[0000] initialize outbound[${i}]: unknown method: nope\n` }
+    return { code: 0, stdout: '', stderr: '' }
+  }
+  const r = await kernelRejectedNodes(ctx, paths, nodes, '/tmp/vet.json')
+  assert.deepEqual(r, { rejected: [{ tag: 'bad1', error: 'unknown method: nope' }, { tag: 'bad2', error: 'unknown method: nope' }], unlocated: '' })
+  assert.equal(seen.length, 3)
+  assert.equal(seen[0][0], '__openbox_vet_direct')
+  assert.deepEqual(seen[2], ['__openbox_vet_direct', 'good1', 'good2', 'chain'])
+  assert.equal('/tmp/vet.json' in ctx.files, false, '临时配置里有节点凭据,用完删')
+})
+
+test('kernelRejectedNodes:wireguard 走 endpoint、按名字报的也认;认不出是哪个就停下,不乱剔', async () => {
+  const wg = { tag: 'wg', type: 'wireguard', server: 'w.com', server_port: 51820, fields: { private_key: 'k', peer_public_key: 'p', local_address: ['10.0.0.2/32'] }, source: 'clash' }
+  const ss = { tag: 'ss', type: 'shadowsocks', server: 'a.com', server_port: 8388, fields: { method: 'aes-256-gcm', password: 'p' }, source: 'clash' }
+  const ctx = createMockContext()
+  let round = 0
+  ctx.exec = async () => {
+    round += 1
+    const probe = JSON.parse(ctx.files['/tmp/w.json'])
+    if ((probe.endpoints || []).length) return { code: 1, stdout: '', stderr: 'FATAL[0000] initialize endpoint[0]: decode private key: bad\n' }
+    if (probe.outbounds.some((o) => o.tag === 'ss')) return { code: 1, stdout: '', stderr: 'FATAL[0000] start outbound/shadowsocks[ss]: boom\n' }
+    return { code: 0, stdout: '', stderr: '' }
+  }
+  const r = await kernelRejectedNodes(ctx, paths, [wg, ss], '/tmp/w.json')
+  assert.deepEqual(r.rejected.map((x) => x.tag), ['wg', 'ss'])
+  assert.equal(round, 2, '都剔完了就不再多查一轮')
+  const stuck = createMockContext({ defaultExec: { code: 1, stderr: 'FATAL[0000] duplicate outbound tag: x\n' } })
+  const r2 = await kernelRejectedNodes(stuck, paths, [ss], '/tmp/s.json')
+  assert.deepEqual(r2.rejected, [])
+  assert.match(r2.unlocated, /duplicate outbound tag/)
+  assert.equal(kernelErrorText('FATAL[0000] initialize outbound[72]: invalid public_key'), 'invalid public_key')
+})
+

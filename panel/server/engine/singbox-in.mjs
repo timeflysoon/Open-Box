@@ -23,8 +23,9 @@ export const parseSingboxOutbounds = (jsonText) => {
     const { type, tag, server, server_port, ...fields } = o
     try {
       nodes.push(createNode({ tag, type, server, server_port, fields, source: 'singbox' }))
-    } catch {
-      skipped.push({ name: tag, type })
+    } catch (err) {
+      // 类型是认识的,建不出来就是字段不对(缺服务器 / 端口不对 / 内核会拒收的字段,后者带上是哪个字段)
+      skipped.push({ name: tag, type, reason: 'invalid', ...(err && err.code === 'invalid-field' ? { detail: err.detail } : {}) })
     }
   }
   const endpoints = doc && Array.isArray(doc.endpoints) ? doc.endpoints : []
@@ -42,8 +43,8 @@ export const parseSingboxOutbounds = (jsonText) => {
         },
         source: 'singbox',
       }))
-    } catch {
-      skipped.push({ name: e.tag, type: 'wireguard' })
+    } catch (err) {
+      skipped.push({ name: e.tag, type: 'wireguard', reason: 'invalid', ...(err && err.code === 'invalid-field' ? { detail: err.detail } : {}) })
     }
   }
   return { nodes, skipped }

@@ -264,7 +264,8 @@ export const deployConfig = async (ctx, paths, { config, profile, userGroups, no
       const { badTags } = await attributeBadNodes(ctx, paths, config, `${paths.etc}/config.probe.json`)
       detail = describeError(validation.message, badTags)
     }
-    return { ok: false, stage: 'validate', message: detail.message, badTags: detail.badTags }
+    // error:内核的原始报错(部署入口跳过内核不认的节点时要用它说原因,api/deploy-runner.mjs)
+    return { ok: false, stage: 'validate', message: detail.message, badTags: detail.badTags, error: validation.message }
   }
 
   if (flipError) return withTimings({ ok: false, stage: 'error', message: flipError })

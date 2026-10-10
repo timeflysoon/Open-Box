@@ -1090,8 +1090,18 @@ packages:
   '@tailwindcss/postcss@4.2.1':
     resolution: {integrity: sha512-OEwGIBnXnj7zJeonOh6ZG9woofIjGrd2BORfvE5p9USYKDCZoQmfqLcfNiRWoJlRWLdNPn2IgVZuWAOM4iTYMw==}
 
+  '@tanstack/table-core@8.21.3':
+    resolution: {integrity: sha512-ldZXEhOBb8Is7xLs01fR3YEc3DERiz5silj8tnGkFZytt1abEvl/GhUmCE0PMLaMPTa3Jk4HbKmRlHmu+gCftg==}
+    engines: {node: '>=12'}
+
   '@tanstack/virtual-core@3.13.19':
     resolution: {integrity: sha512-/BMP7kNhzKOd7wnDeB8NrIRNLwkf5AhCYCvtfZV2GXWbBieFm/el0n6LOAXlTi6ZwHICSNnQcIxRCWHrLzDY+g==}
+
+  '@tanstack/vue-table@8.21.3':
+    resolution: {integrity: sha512-rusRyd77c5tDPloPskctMyPLFEQUeBzxdQ+2Eow4F7gDPlPOB1UnnhzfpdvqZ8ZyX2rRNGmqNnQWm87OI2OQPw==}
+    engines: {node: '>=12'}
+    peerDependencies:
+      vue: '>=3.2'
 
   '@tanstack/vue-virtual@3.13.19':
     resolution: {integrity: sha512-07Fp1TYuIziB4zIDA/moeDKHODePy3K1fN4c4VIAGnkxo1+uOvBJP7m54CoxKiQX6Q9a1dZnznrwOg9C86yvvA==}
@@ -2538,8 +2548,8 @@ packages:
     resolution: {integrity: sha512-VXJjc87FScF88uafS3JllDgvAm+c/Slfz06lorj2uAY34rlUu0Nt+v8wreiImcrgAjjIHp1rXpTDlLOGw29WwQ==}
     engines: {node: '>=18'}
 
-  open-box-panel@file:///private/tmp/claude-501/-Users-ange-Code-Open-Box/5b07c864-21be-4b68-8976-769d05c0974a/scratchpad/rel306/panel:
-    resolution: {directory: ../../../../../../../../private/tmp/claude-501/-Users-ange-Code-Open-Box/5b07c864-21be-4b68-8976-769d05c0974a/scratchpad/rel306/panel, type: directory}
+  open-box-panel@file:///private/tmp/claude-501/-Users-ange-Code-Open-Box/5b07c864-21be-4b68-8976-769d05c0974a/scratchpad/rel307/panel:
+    resolution: {directory: ../../../../../../../../private/tmp/claude-501/-Users-ange-Code-Open-Box/5b07c864-21be-4b68-8976-769d05c0974a/scratchpad/rel307/panel, type: directory}
 
   opencc-js@1.4.2:
     resolution: {integrity: sha512-EdcspgdROiCCZDM+jZR6Pa670xW+EW2QhctPBQ8gRjg6lrx4IHEl+2s+kt5izk/TkxVRgdWuFgaGkaEdIUfdaw==}
@@ -4615,7 +4625,14 @@ snapshots:
       postcss: 8.5.6
       tailwindcss: 4.2.1
 
+  '@tanstack/table-core@8.21.3': {}
+
   '@tanstack/virtual-core@3.13.19': {}
+
+  '@tanstack/vue-table@8.21.3(vue@3.5.28(typescript@5.9.3))':
+    dependencies:
+      '@tanstack/table-core': 8.21.3
+      vue: 3.5.28(typescript@5.9.3)
 
   '@tanstack/vue-virtual@3.13.19(vue@3.5.28(typescript@5.9.3))':
     dependencies:
@@ -6190,11 +6207,12 @@ snapshots:
     dependencies:
       mimic-function: 5.0.1
 
-  open-box-panel@file:///private/tmp/claude-501/-Users-ange-Code-Open-Box/5b07c864-21be-4b68-8976-769d05c0974a/scratchpad/rel306/panel:
+  open-box-panel@file:///private/tmp/claude-501/-Users-ange-Code-Open-Box/5b07c864-21be-4b68-8976-769d05c0974a/scratchpad/rel307/panel:
     dependencies:
       '@eslint/plugin-kit': 0.6.0
       '@fontsource/fira-sans': 5.2.7
       '@heroicons/vue': 2.2.0(vue@3.5.28(typescript@5.9.3))
+      '@tanstack/vue-table': 8.21.3(vue@3.5.28(typescript@5.9.3))
       '@tanstack/vue-virtual': 3.13.19(vue@3.5.28(typescript@5.9.3))
       '@types/reconnectingwebsocket': 1.0.10
       '@vueuse/core': 14.2.1(vue@3.5.28(typescript@5.9.3))

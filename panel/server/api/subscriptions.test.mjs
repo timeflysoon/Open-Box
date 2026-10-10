@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import net from 'node:net'
 import test from 'node:test'
 import express from 'express'
-import { registerSubscriptionRoutes, dedupeNodeTags, normalizeAutoUpdate, describeRejection } from './subscriptions.mjs'
+import { registerSubscriptionRoutes, dedupeNodeTags, normalizeAutoUpdate, describeRejection, resolveNodes, setNodeVetter } from './subscriptions.mjs'
 import { createStore } from '../store/openbox-store.mjs'
 
 const memStore = () => {
@@ -1445,3 +1445,28 @@ test('最后那跳自己带了流量信息时以它为准', async () => {
     assert.equal(rec.usage.download, 20)
   } finally { await close() }
 })
+
+// GitHub #518:添加 / 刷新订阅时内核不认的节点直接丢掉,记进「跳过」(原因 invalid、写明内核的报错)
+test('resolveNodes:内核不认的节点丢掉、记进跳过、预览里也去掉;全被拒就按「节点都用不了」报错;检查本身出错照常保存', async () => {
+  const content = [
+    'ss://YWVzLTI1Ni1nY206cHc=@a.com:8388#ok',
+    'ss://YWVzLTI1Ni1nY206cHc=@b.com:8388#broken',
+  ].join('\n')
+  try {
+    setNodeVetter(async (nodes) => ({ rejected: nodes.filter((n) => n.originalTag === 'broken').map((n) => ({ tag: n.tag, error: 'unknown method: x' })), unlocated: '' }))
+    const r = await resolveNodes({ content, name: 'S' }, null, {}, null)
+    assert.deepEqual(r.renamed.map((n) => n.originalTag), ['ok'])
+    assert.deepEqual(r.skipped, [{ name: 'broken', type: 'shadowsocks', reason: 'invalid', detail: 'unknown method: x' }])
+    assert.ok(r.preview.every((p) => p.originalTag !== 'broken'))
+
+    setNodeVetter(async (nodes) => ({ rejected: nodes.map((n) => ({ tag: n.tag, error: 'bad' })), unlocated: '' }))
+    await assert.rejects(() => resolveNodes({ content, name: 'S' }, null, {}, null), /节点都用不了:2 个 shadowsocks/)
+
+    setNodeVetter(async () => { throw new Error('spawn sing-box ENOENT') })
+    const kept = await resolveNodes({ content, name: 'S' }, null, {}, null)
+    assert.equal(kept.renamed.length, 2, '内核检查没做成就照常保存,启动时还有一道')
+  } finally {
+    setNodeVetter(null)
+  }
+})
+

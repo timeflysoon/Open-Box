@@ -1,3 +1,6 @@
+import { emitEndpoint } from '../engine/emit-endpoint.mjs'
+import { emitOutbound } from '../engine/emit-outbound.mjs'
+
 const NON_NODE_TYPES = new Set(['direct', 'block', 'dns', 'selector', 'urltest'])
 
 const cleanMessage = (text) => String(text || '').replace(/\x1b\[[0-9;]*m/g, '')
@@ -59,3 +62,66 @@ export const attributeBadNodes = async (ctx, paths, config, tmpPath) => {
   }
   return { badTags, checked }
 }
+
+// 内核认不认这些节点(GitHub #518:一个坏节点让整个内核起不来)。添加 / 刷新订阅时(api/subscriptions.mjs)把内核不认的
+// 直接丢掉,启动时(api/deploy-runner.mjs)跳过还查出来的。做法:只放这些节点自己的出站 / endpoint 起一次 sing-box check,
+// 内核报哪个初始化失败就剔掉它再查,直到通过。detour、domain_resolver 这类指向别的出站 / DNS 的字段先去掉——单独检查时
+// 它们找不到依赖、会误报成坏节点,而它们本身对不对要等完整配置才看得出(那时由启动时的完整校验兜)。
+// 返回 { rejected: [{ tag, error }], unlocated }:unlocated 是认不出是哪个节点的报错(这时停下,剩下的不再判)。
+// 临时配置里有节点凭据,用完就删
+const DETACHED_FIELDS = ['detour', 'domain_resolver']
+const VET_DIRECT_TAG = '__openbox_vet_direct'
+const withoutDependencies = (o) => {
+  const out = { ...o }
+  for (const key of DETACHED_FIELDS) delete out[key]
+  return out
+}
+// 内核报错去掉「FATAL[0000] initialize outbound[3]:」这类前缀,只留原因(给用户看的提示里用)
+export const kernelErrorText = (line) => cleanMessage(line).replace(/^.*?\b(?:initialize|parse)\s+(?:outbound|endpoint)s?\s*\[\s*\d+\s*\]\s*:\s*/i, '').replace(/^.*?FATAL\[\d+\]\s*/, '').trim()
+
+export const kernelRejectedNodes = async (ctx, paths, nodes, tmpPath, { maxRounds = 200 } = {}) => {
+  const rejected = []
+  const outbounds = []
+  const endpoints = []
+  for (const node of Array.isArray(nodes) ? nodes : []) {
+    if (!node || !node.tag) continue
+    try {
+      if (node.type === 'wireguard') endpoints.push(withoutDependencies(emitEndpoint(node)))
+      else outbounds.push(withoutDependencies(emitOutbound(node)))
+    } catch (err) {
+      rejected.push({ tag: node.tag, error: String((err && err.message) || err) })
+    }
+  }
+  if (!outbounds.length && !endpoints.length) return { rejected, unlocated: '' }
+  let unlocated = ''
+  try {
+    for (let round = 0; round < maxRounds; round++) {
+      const probe = {
+        log: { level: 'error' },
+        outbounds: [{ type: 'direct', tag: VET_DIRECT_TAG }, ...outbounds],
+        ...(endpoints.length ? { endpoints } : {}),
+      }
+      const r = await validateConfigObject(ctx, paths, probe, tmpPath)
+      if (r.ok) break
+      const text = cleanMessage(r.message)
+      // 报错里认是哪一个:按编号(initialize outbound[3])或按名字(outbound/vless[名字]),和 describeConfigError 同一套写法
+      const m = /\b(outbound|endpoint)s?\s*(?:\[\s*(\d+)\s*\]|\.(\d+)(?=[.:\s]))/i.exec(text)
+      const named = m ? null : /\b(outbound|endpoint)\/[^\s[]+\[([^\]]+)\]/i.exec(text)
+      const kind = (m || named) ? (m || named)[1].toLowerCase() : ''
+      const list = kind === 'outbound' ? outbounds : kind === 'endpoint' ? endpoints : null
+      // 出站的第 0 个是检查用的直连,节点从第 1 个起
+      const at = !list ? -1 : m ? (kind === 'outbound' ? Number(m[2] ?? m[3]) - 1 : Number(m[2] ?? m[3])) : list.findIndex((o) => o.tag === named[2])
+      if (!list || at < 0 || at >= list.length) {
+        unlocated = text
+        break
+      }
+      const [removed] = list.splice(at, 1)
+      rejected.push({ tag: removed.tag, error: kernelErrorText(text) || text })
+      if (!outbounds.length && !endpoints.length) break
+    }
+  } finally {
+    await ctx.remove(tmpPath).catch(() => {})
+  }
+  return { rejected, unlocated }
+}
+

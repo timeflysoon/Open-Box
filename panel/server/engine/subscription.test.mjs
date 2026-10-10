@@ -75,3 +75,30 @@ test('Clash 订阅里 XHTTP 传输的 vless 全被跳过时,提示写明是传�
   assert.equal(parsed.nodes.length, 0)
   assert.equal(describeEmptyResult(parsed), '订阅解析成功（clash 格式）,但节点都用不了:3 个 vless（XHTTP 传输,内核没有这种传输）。')
 })
+
+test('REALITY 公钥写坏的节点:三种订阅格式都记进「跳过」(原因 invalid,写明是哪个字段),好的照收', () => {
+  const yaml = `proxies:
+  - { name: good, type: vless, server: a.com, port: 443, uuid: 11111111-1111-1111-1111-111111111111, tls: true, servername: a.com, reality-opts: { public-key: WlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlo } }
+  - { name: bad, type: vless, server: b.com, port: 443, uuid: 11111111-1111-1111-1111-111111111111, tls: true, servername: b.com, reality-opts: { public-key: dfsdfI } }
+`
+  const clash = parseSubscription(yaml)
+  assert.deepEqual(clash.nodes.map((n) => n.originalTag), ['good'])
+  assert.deepEqual(clash.skipped, [{ name: 'bad', type: 'vless', reason: 'invalid', detail: 'invalid reality public_key' }])
+
+  const links = [
+    'vless://11111111-1111-1111-1111-111111111111@a.com:443?security=reality&sni=a.com&pbk=WlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlo&type=tcp#good',
+    'vless://11111111-1111-1111-1111-111111111111@b.com:443?security=reality&sni=b.com&pbk=111&type=tcp#bad',
+  ].join('\n')
+  const share = parseSubscription(links)
+  assert.deepEqual(share.nodes.map((n) => n.originalTag), ['good'])
+  assert.deepEqual(share.skipped, [{ name: 'bad', type: 'vless', reason: 'invalid', detail: 'invalid reality public_key' }], '跳过的链接用 # 后的节点名')
+
+  const json = JSON.stringify({ outbounds: [
+    { type: 'vless', tag: 'good', server: 'a.com', server_port: 443, uuid: 'u', tls: { enabled: true, reality: { enabled: true, public_key: 'WlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlo' } } },
+    { type: 'vless', tag: 'bad', server: 'b.com', server_port: 443, uuid: 'u', tls: { enabled: true, reality: { enabled: true } } },
+  ] })
+  const sb = parseSubscription(json)
+  assert.deepEqual(sb.nodes.map((n) => n.originalTag), ['good'])
+  assert.deepEqual(sb.skipped, [{ name: 'bad', type: 'vless', reason: 'invalid', detail: 'missing reality public_key' }])
+})
+

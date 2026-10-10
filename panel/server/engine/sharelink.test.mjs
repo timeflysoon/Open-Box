@@ -143,8 +143,8 @@ test('ss:// SIP002 IPv6 主机剥括号（修复3）', () => {
 })
 
 test('vless reality + utls + alpn 字段采集', () => {
-  const n = parseShareLink('vless://11111111-1111-1111-1111-111111111111@a.com:443?security=reality&pbk=abcPUBKEY&sid=0123&fp=chrome&type=tcp&flow=xtls-rprx-vision#R')
-  assert.equal(n.fields.tls.reality.public_key, 'abcPUBKEY')
+  const n = parseShareLink('vless://11111111-1111-1111-1111-111111111111@a.com:443?security=reality&pbk=WlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlo&sid=0123&fp=chrome&type=tcp&flow=xtls-rprx-vision#R')
+  assert.equal(n.fields.tls.reality.public_key, 'WlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlo')
   assert.equal(n.fields.tls.reality.short_id, '0123')
   assert.equal(n.fields.tls.utls.fingerprint, 'chrome')
   assert.equal(n.fields.tls.reality.enabled, true)
@@ -274,8 +274,8 @@ test('ss:// 带 SIP003 插件:obfs-local / v2ray-plugin 带过去,内核没有�
 })
 
 test('vless:// 的 flow=xtls-rprx-vision-udp443 归一成 vision,sid 为空不写 short_id', () => {
-  const n = parseShareLink('vless://22222222-2222-2222-2222-222222222222@v.example.com:443?encryption=none&security=reality&sni=v.example.com&pbk=PK&sid=&flow=xtls-rprx-vision-udp443&type=tcp#R')
+  const n = parseShareLink('vless://22222222-2222-2222-2222-222222222222@v.example.com:443?encryption=none&security=reality&sni=v.example.com&pbk=S0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0s&sid=&flow=xtls-rprx-vision-udp443&type=tcp#R')
   assert.equal(n.fields.flow, 'xtls-rprx-vision')
   assert.equal(n.fields.tls.reality.short_id, undefined)
-  assert.equal(n.fields.tls.reality.public_key, 'PK')
+  assert.equal(n.fields.tls.reality.public_key, 'S0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0s')
 })

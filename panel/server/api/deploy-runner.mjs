@@ -3,6 +3,7 @@ import { prepareDnsFilter, readFilterArtifact } from '../system/dns-filter.mjs'
 import { filterForwardPlan } from '../engine/dns-filter.mjs'
 import { randomBytes } from 'node:crypto'
 import { activeNodes } from './subscriptions.mjs'
+import { kernelErrorText, kernelRejectedNodes } from '../system/validate.mjs'
 import { chainNodes, resolveChainNodes } from '../engine/chain-proxy.mjs'
 import { readSystemDns } from '../system/resolv.mjs'
 import { normalizeDnsRewrite, rewriteForwardDomains } from '../engine/dns-rewrite.mjs'
@@ -348,13 +349,15 @@ export const regenerateIfPlanChanged = async ({ store, ctx, paths, selections, l
   return { regenerated: true, reason, result }
 }
 
-export const buildCurrentConfig = (store, systemDns, { geoDir = createPaths(process.env.OPENBOX_ROOT).geoDir, rulesetDir = createPaths(process.env.OPENBOX_ROOT).rulesetDir, cacheFilePath, selections, tlsCert, localSubnets = [], directHostCidrs = [], ruleLists = {}, profilePatch, nativeBypass, inlineDirectHosts = false } = {}) => {
+// skipNodes:这次不进配置的节点(内核不认,见下面 runDeploy 的说明)
+export const buildCurrentConfig = (store, systemDns, { geoDir = createPaths(process.env.OPENBOX_ROOT).geoDir, rulesetDir = createPaths(process.env.OPENBOX_ROOT).rulesetDir, cacheFilePath, selections, tlsCert, localSubnets = [], directHostCidrs = [], ruleLists = {}, profilePatch, nativeBypass, inlineDirectHosts = false, skipNodes = [] } = {}) => {
   const profile = profilePatch ? { ...store.getProfile(), ...profilePatch } : store.getProfile()
   // 计算本身在 engine/client-build.mjs(App 本地分流用同一份);这里只从 store 取输入。
-  // 停用的订阅的节点不进内核(api/subscriptions.mjs 的 activeNodes)
+  // 停用的订阅的节点不进内核(api/subscriptions.mjs 的 activeNodes);内核不认、这次跳过的也不进
+  const skip = new Set(Array.isArray(skipNodes) ? skipNodes : [])
   const { config, failover, dnsRuleOwners, directHosts } = buildConfigFromParts({
     profile,
-    nodes: activeNodes(store),
+    nodes: skip.size ? activeNodes(store).filter((n) => !skip.has(n.tag)) : activeNodes(store),
     groups: store.getGroups(),
     subscriptions: store.getSubscriptions ? store.getSubscriptions() : [],
     clashSecret: store.getClashSecret(),
@@ -390,6 +393,7 @@ export const configFromInputs = (store, paths, inputs = {}, { ruleLists = {} } =
     ruleLists,
     ...(inputs.nativeBypass && typeof inputs.nativeBypass === 'object' ? { nativeBypass: inputs.nativeBypass } : {}),
     ...(profilePatch ? { profilePatch } : {}),
+    ...(Array.isArray(inputs.skipNodes) && inputs.skipNodes.length ? { skipNodes: inputs.skipNodes } : {}),
   })
   applyProxyUpstreamRoutes(built.config, Array.isArray(inputs.dnsUpstreamRoutes) ? inputs.dnsUpstreamRoutes : [], builtinTags(store.getGroups ? store.getGroups() : []))
   return built
@@ -410,6 +414,41 @@ export const resolveDirectHostCidrs = async (store, systemDns, lookup) => {
   const domains = directHostDomains(store)
   if (!domains.length) return []
   return resolveHostsToCidrs(domains, lookup ? { lookup } : { servers: directResolverServers(store.getProfile(), systemDns) })
+}
+
+// 启动时跳过内核不认的节点最多重来几次(每次先把内核不认的一次找全,通常一次就够;完整配置里才暴露的问题——节点依赖的
+// 出站 / DNS 不对——每次多一个)
+const MAX_SKIP_NODE_ROUNDS = 5
+
+// 校验没过、报出来的是某个存着的节点时:内核不认的节点一次都找出来(system/validate.mjs 的 kernelRejectedNodes,只放节点
+// 自己的小配置);报出来的那个单独检查时没报(依赖了别的出站 / DNS,完整配置里才出错)也跳过,原因用完整校验的报错。
+// 报的不是节点(节点组、内置出站、共享网络……)就不跳,照原样失败
+const kernelRejectedForDeploy = async (ctx, paths, store, result, skipped) => {
+  const stored = activeNodes(store).filter((n) => !skipped.has(n.tag))
+  const storedTags = new Set(stored.map((n) => n.tag))
+  const located = (result.badTags || []).filter((tag) => storedTags.has(tag))
+  if (!located.length) return []
+  const dir = `${paths.etc}/probe`
+  await ctx.mkdirp(dir)
+  const { rejected } = await kernelRejectedNodes(ctx, paths, stored, `${dir}/vet-deploy-${process.pid}.json`)
+  const out = rejected.filter((r) => storedTags.has(r.tag))
+  for (const tag of located) if (!out.some((r) => r.tag === tag)) out.push({ tag, error: kernelErrorText(result.error || result.message) })
+  return out
+}
+
+// 跳过了哪些节点、为什么:启动成功后弹黄色提示(和 auto_redirect 降级同一条路),订阅名带上方便找;多了只列前几个
+const SKIPPED_NODES_SHOWN = 5
+export const skippedNodesWarning = (store, skipped) => {
+  const nodes = activeNodes(store)
+  const subscriptions = store.getSubscriptions ? store.getSubscriptions() : []
+  const items = [...skipped].map(([tag, error]) => {
+    const node = nodes.find((n) => n.tag === tag)
+    const sub = node && subscriptions.find((s) => s.id === node.subscriptionId)
+    return `「${tag}」${sub ? `(订阅「${sub.name}」)` : ''}:${error}`
+  })
+  const shown = items.slice(0, SKIPPED_NODES_SHOWN).join(';')
+  const more = items.length > SKIPPED_NODES_SHOWN ? `;另外还有 ${items.length - SKIPPED_NODES_SHOWN} 个` : ''
+  return `有 ${items.length} 个节点内核不认,这次启动跳过了它们:${shown}${more}。其余照常;刷新订阅或修改这些节点后会重新检查`
 }
 
 // 部署流水线(uci 写 dhcp/firewall、重启 dnsmasq、重启内核、等几秒验证)没法交错执行:
@@ -548,33 +587,54 @@ const runDeployInner = async ({ store, ctx, paths, fetchImpl = globalThis.fetch,
         ? await routeProxyDnsUpstreams({ store, ctx, paths, fetchImpl, systemDns }, profileNow)
         : []
       // 生成配置用到的、档案之外的输入:记进元数据(buildInputs),热替换按同样的输入重新生成、和运行中的比(configFromInputs)
-      const buildInputs = { systemDns, localSubnets, directHostCidrs, directHostDomains: directHostDomains(store), selections, nativeBypass, dnsUpstreamRoutes }
-      const { config, profile, failover, dnsRuleOwners, directHosts } = configFromInputs(store, paths, buildInputs, { ruleLists: ruleLists.lists })
+      let buildInputs = { systemDns, localSubnets, directHostCidrs, directHostDomains: directHostDomains(store), selections, nativeBypass, dnsUpstreamRoutes }
       for (const r of dnsUpstreamRoutes) {
         if (r.error) console.warn(`[deploy] 代理 DNS 上游 ${r.server} 按目标分流判不出线路,先走兜底:${r.error}`)
         else if (r.reject) console.warn(`[deploy] 代理 DNS 上游 ${r.server} 被目标分流拒绝(第 ${Number(r.ruleIndex) + 1} 条),走代理的域名解析会失败`)
       }
-      // 内核启动时每个本地规则集文件都必须已经在,所以热切换的开关 / 旁路动态集在这里按此刻的选择全套写好
-      // (system/flip-files.mjs)。这份状态一并交给 deployConfig 记进元数据,翻面时按它比
-      const entryMode = currentEntryMode(store, selections)
-      const flip = flipStateNow(store, selections, nativeBypass, entryMode)
-      const autoRedirect = Boolean(profile.tun && profile.tun.autoRedirect && ((profile.dns && profile.dns.mode) || 'hijack') !== 'off')
-      // 真正落盘交给 deployConfig 在「冲突检测之后、校验之前」做:别的代理在跑、这次部署不会进行时,一个文件都不写
-      // 订阅和节点站点直连的两份规则集文件(system/node-direct-files.mjs)同样要在内核启动之前写好
-      const writeFlip = async () => {
-        await writeFlipFiles(ctx, paths, flip, { dynamicBypass: autoRedirect })
-        if (directHosts) await writeNodeDirectSets(ctx, paths, directHosts)
+      // 内核不认的节点(GitHub #518:一个坏节点让整个内核起不来):校验报出是某个节点时,把内核不认的节点一次都找出来
+      // (只放节点的小配置,快),跳过它们重新生成、再部署一次,成功了提示跳过了哪几个、为什么。订阅添加 / 刷新时已经
+      // 挑掉过一遍(api/subscriptions.mjs),这里兜之前存下的和手动加的。跳过名单记进生成输入(元数据),在线更新节点时照样跳过
+      const skippedNodes = new Map() // tag → 内核报错
+      // 最后一次部署用的热切换状态(部署后按内核真实的选择对账要用)
+      let flip = null
+      for (let attempt = 0; ; attempt += 1) {
+        const { config, profile, failover, dnsRuleOwners, directHosts } = configFromInputs(store, paths, buildInputs, { ruleLists: ruleLists.lists })
+        // 内核启动时每个本地规则集文件都必须已经在,所以热切换的开关 / 旁路动态集在这里按此刻的选择全套写好
+        // (system/flip-files.mjs)。这份状态一并交给 deployConfig 记进元数据,翻面时按它比
+        const entryMode = currentEntryMode(store, selections)
+        flip = flipStateNow(store, selections, nativeBypass, entryMode)
+        const flipNow = flip
+        const autoRedirect = Boolean(profile.tun && profile.tun.autoRedirect && ((profile.dns && profile.dns.mode) || 'hijack') !== 'off')
+        // 真正落盘交给 deployConfig 在「冲突检测之后、校验之前」做:别的代理在跑、这次部署不会进行时,一个文件都不写
+        // 订阅和节点站点直连的两份规则集文件(system/node-direct-files.mjs)同样要在内核启动之前写好
+        const writeFlip = async () => {
+          await writeFlipFiles(ctx, paths, flipNow, { dynamicBypass: autoRedirect })
+          if (directHosts) await writeNodeDirectSets(ctx, paths, directHosts)
+        }
+        // 链式代理里没进配置的条目(上游没了 / 成环 / 重名)记一笔,界面上那条会显示上游不存在,这里给日志留个原因
+        if (attempt === 0) {
+          for (const s of resolveChainNodes({ chainProxies: profile.chainProxies, nodes: activeNodes(store), userGroups: store.getGroups() }).skipped) {
+            console.warn(`[deploy] 链式代理「${s.name}」没有进配置:${s.reason === 'cycle' ? `上游「${s.upstream}」绕回了它自己` : s.reason === 'duplicate' ? '名称和别的出站重复' : `上游「${s.upstream}」不存在或不可用`}`)
+          }
+        }
+        const prepMs = Date.now() - startedAt
+        const inputs = buildInputs
+        result = await deployConfig(ctx, paths, {
+          config, profile, userGroups: store.getGroups(), nodes: [...activeNodes(store), ...chainNodes(profile)], subscriptions: store.getSubscriptions(), selections, isCancelled, nativeBypass, failover, flip: flipNow, writeFlip, dnsRuleOwners, dnsUpstreamRoutes, buildInputs: inputs,
+          // auto_redirect 起不来时关掉它重新生成(system/deploy.mjs);元数据记下降过级,重新生成时照样关
+          rebuild: () => configFromInputs(store, paths, { ...inputs, autoRedirectFallback: true }, { ruleLists: ruleLists.lists }).config,
+        })
+        result.timings = { 准备: prepMs, ...(result.timings || {}) }
+        const more = attempt < MAX_SKIP_NODE_ROUNDS && !result.ok && result.stage === 'validate' ? await kernelRejectedForDeploy(ctx, paths, store, result, skippedNodes) : []
+        if (!more.length) break
+        for (const r of more) skippedNodes.set(r.tag, r.error)
+        console.warn(`[deploy] 内核不认,跳过 ${more.length} 个节点再试:${more.map((r) => `${r.tag}(${r.error})`).join('、')}`)
+        buildInputs = { ...buildInputs, skipNodes: [...skippedNodes.keys()] }
       }
-      // 链式代理里没进配置的条目(上游没了 / 成环 / 重名)记一笔,界面上那条会显示上游不存在,这里给日志留个原因
-      for (const s of resolveChainNodes({ chainProxies: profile.chainProxies, nodes: activeNodes(store), userGroups: store.getGroups() }).skipped) {
-        console.warn(`[deploy] 链式代理「${s.name}」没有进配置:${s.reason === 'cycle' ? `上游「${s.upstream}」绕回了它自己` : s.reason === 'duplicate' ? '名称和别的出站重复' : `上游「${s.upstream}」不存在或不可用`}`)
-      }
-      const prepMs = Date.now() - startedAt
-      result = await deployConfig(ctx, paths, {
-        config, profile, userGroups: store.getGroups(), nodes: [...activeNodes(store), ...chainNodes(profile)], subscriptions: store.getSubscriptions(), selections, isCancelled, nativeBypass, failover, flip, writeFlip, dnsRuleOwners, dnsUpstreamRoutes, buildInputs,
-        // auto_redirect 起不来时关掉它重新生成(system/deploy.mjs);元数据记下降过级,重新生成时照样关
-        rebuild: () => configFromInputs(store, paths, { ...buildInputs, autoRedirectFallback: true }, { ruleLists: ruleLists.lists }).config,
-      })
+      if (result.ok && skippedNodes.size) result.warning = [result.warning, skippedNodesWarning(store, skippedNodes)].filter(Boolean).join(';')
+      // 跳过之后还是没起来(问题在别处):跳过的那几个也确实是坏的,和这次报出来的一起给界面标红
+      else if (!result.ok && skippedNodes.size) result.badTags = [...new Set([...skippedNodes.keys(), ...(result.badTags || [])])]
       if (result.warning) console.warn(`[deploy] ${result.warning}`)
       // 热切换的开关是按「重启前」的选择写的,而内核重启后从缓存文件里恢复出来的选择可能不一样(换过缓存文件、
       // 缓存里的节点已经不在了……)。内核确认在跑之后立刻按它此刻真实的选择对一次账,只改写开关文件、不会再触发部署。
@@ -590,8 +650,6 @@ const runDeployInner = async ({ store, ctx, paths, fetchImpl = globalThis.fetch,
           console.warn(`[deploy] 部署后的热切换对账出错:${error instanceof Error ? error.message : String(error)}`)
         }
       }
-      // 准备阶段 = 读系统 DNS / 解析节点域名 / 拉当前选择 / 规则集链接 / 生成配置
-      result.timings = { 准备: prepMs, ...(result.timings || {}) }
     }
     store.setDeployState({
       stage: result.stage,
@@ -646,5 +704,6 @@ const runDeployInner = async ({ store, ctx, paths, fetchImpl = globalThis.fetch,
     )
   }
 
-  return { ok: result.ok, stage: result.stage, message: result.message || '', badTags: result.badTags || [] }
+  // warning:内核起来了但有降级 / 跳过了内核不认的节点,启动接口(api/service.mjs)交给前端弹黄色提示
+  return { ok: result.ok, stage: result.stage, message: result.message || '', badTags: result.badTags || [], ...(result.warning ? { warning: result.warning } : {}) }
 }

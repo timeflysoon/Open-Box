@@ -53,15 +53,15 @@ test('QUIC 出站（tuic / hysteria2）不写 utls:内核在这条路径上不�
 test('证书校验一律跳过:链接里没写 insecure 也跳过（机场证书自签 / 过期 / 张冠李戴是常态）;REALITY 例外', () => {
   const v = createNode({ tag: 'V', type: 'trojan', server: 'a.com', server_port: 443, fields: { password: 'pw', tls: { enabled: true, server_name: 'a.com' } }, source: 'sharelink' })
   assert.equal(emitOutbound(v).tls.insecure, true)
-  const r = createNode({ tag: 'R', type: 'vless', server: 'a.com', server_port: 443, fields: { uuid: 'u', tls: { enabled: true, server_name: 'a.com', reality: { enabled: true, public_key: 'PK', short_id: 'ab' } } }, source: 'sharelink' })
+  const r = createNode({ tag: 'R', type: 'vless', server: 'a.com', server_port: 443, fields: { uuid: 'u', tls: { enabled: true, server_name: 'a.com', reality: { enabled: true, public_key: 'WlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlo', short_id: 'ab' } } }, source: 'sharelink' })
   assert.equal(emitOutbound(r).tls.insecure, undefined, 'REALITY 靠公钥验证,不该写 insecure')
 })
 
 test('vless reality emit 强制补 utls', () => {
-  const n = createNode({ tag: 'R-01', type: 'vless', server: 'a.com', server_port: 443, fields: { uuid: 'u', flow: 'xtls-rprx-vision', tls: { enabled: true, server_name: 'a.com', reality: { enabled: true, public_key: 'PK', short_id: 'ab' } } }, source: 'sharelink' })
+  const n = createNode({ tag: 'R-01', type: 'vless', server: 'a.com', server_port: 443, fields: { uuid: 'u', flow: 'xtls-rprx-vision', tls: { enabled: true, server_name: 'a.com', reality: { enabled: true, public_key: 'WlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlo', short_id: 'ab' } } }, source: 'sharelink' })
   const o = emitOutbound(n)
   assert.equal(o.flow, 'xtls-rprx-vision')
-  assert.equal(o.tls.reality.public_key, 'PK')
+  assert.equal(o.tls.reality.public_key, 'WlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlo')
   assert.equal(o.tls.utls.enabled, true)          // 强制补
   assert.equal(o.tls.utls.fingerprint, 'chrome')
 })
@@ -95,11 +95,11 @@ test('socks emit:只出版本 / 账号 / 密码,没有 tls 与 transport', () =>
 })
 
 test('库里存的老节点:short_id "null" 不写、flow -udp443 归一成 vision（GitHub #19 #23）', () => {
-  const n = createNode({ tag: 'R-old', type: 'vless', server: 'a.com', server_port: 443, fields: { uuid: 'u', flow: 'xtls-rprx-vision-udp443', tls: { enabled: true, server_name: 'a.com', reality: { enabled: true, public_key: 'PK', short_id: 'null' } } }, source: 'clash' })
+  const n = createNode({ tag: 'R-old', type: 'vless', server: 'a.com', server_port: 443, fields: { uuid: 'u', flow: 'xtls-rprx-vision-udp443', tls: { enabled: true, server_name: 'a.com', reality: { enabled: true, public_key: 'WlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlo', short_id: 'null' } } }, source: 'clash' })
   const o = emitOutbound(n)
   assert.equal(o.flow, 'xtls-rprx-vision')
   assert.equal(o.tls.reality.short_id, undefined)
-  assert.equal(o.tls.reality.public_key, 'PK')
+  assert.equal(o.tls.reality.public_key, 'WlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlo')
   const d = createNode({ tag: 'R-direct', type: 'vless', server: 'a.com', server_port: 443, fields: { uuid: 'u', flow: 'xtls-rprx-direct' }, source: 'clash' })
   assert.equal(emitOutbound(d).flow, undefined)
 })

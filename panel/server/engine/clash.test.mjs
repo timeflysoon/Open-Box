@@ -168,7 +168,7 @@ proxies:
     servername: r.com
     network: h2
     h2-opts: { path: /h2, host: [cdn.com] }
-    reality-opts: { public-key: PUBK, short-id: "01ab" }
+    reality-opts: { public-key: WlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlo, short-id: "01ab" }
     client-fingerprint: chrome
     flow: xtls-rprx-vision
   - name: "SS-Plugin"
@@ -194,12 +194,12 @@ proxies:
     uuid: 11111111-1111-1111-1111-111111111111
     tls: true
     servername: r2.com
-    reality-opts: { public-key: PUBK2, short-id: null }
+    reality-opts: { public-key: S0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0s, short-id: null }
     flow: xtls-rprx-vision-udp443
 `
   const { nodes, skipped } = parseClashProxies(doc)
   const r = nodes.find((n) => n.originalTag === 'R-VLESS')
-  assert.equal(r.fields.tls.reality.public_key, 'PUBK')
+  assert.equal(r.fields.tls.reality.public_key, 'WlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlo')
   assert.equal(r.fields.tls.reality.short_id, '01ab')
   assert.equal(r.fields.tls.utls.fingerprint, 'chrome')
   assert.equal(r.fields.transport.type, 'http')

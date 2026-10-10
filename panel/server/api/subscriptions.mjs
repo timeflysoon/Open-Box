@@ -189,10 +189,35 @@ export const activeNodes = (store) => activeNodesOf(
 
 // curlFetch:Node fetch 全被拒后的兜底(system/curl-fetch.mjs)。只在真实网络路径上默认开——测试注入的
 // fetchImpl 不该悄悄去跑系统 curl;要测兜底就显式传
+// 添加 / 刷新订阅时让内核把节点过一遍,它不认的直接丢掉、记进「跳过」(GitHub #518:一个坏节点让整个内核起不来)。
+// index.mjs 接上 system/validate.mjs 的 kernelRejectedNodes;没接(测试)就只靠解析时的字段校验(engine/node-model.mjs)
+let nodeVetter = null
+export const setNodeVetter = (fn) => { nodeVetter = typeof fn === 'function' ? fn : null }
+
+const vetResolved = async (resolved) => {
+  if (!nodeVetter || !resolved.renamed.length) return resolved
+  let verdict
+  try {
+    verdict = await nodeVetter(resolved.renamed)
+  } catch (err) {
+    console.warn(`[subscription] 内核检查节点没做成,先照常保存:${errorMessage(err)}`)
+    return resolved
+  }
+  if (verdict && verdict.unlocated) console.warn(`[subscription] 内核检查节点时报错,认不出是哪个节点:${verdict.unlocated}`)
+  const bad = new Map(((verdict && verdict.rejected) || []).map((r) => [r.tag, r.error]))
+  if (!bad.size) return resolved
+  const dropped = resolved.renamed.filter((n) => bad.has(n.tag))
+  const renamed = resolved.renamed.filter((n) => !bad.has(n.tag))
+  const skipped = [...resolved.skipped, ...dropped.map((n) => ({ name: n.originalTag || n.tag, type: n.type, reason: 'invalid', detail: bad.get(n.tag) }))]
+  console.log(`[subscription] 内核不认,丢掉 ${dropped.length} 个节点:${dropped.map((n) => `${n.tag}(${bad.get(n.tag)})`).join('、')}`)
+  if (!renamed.length) throw new Error(describeEmptyResult({ format: resolved.format, skipped }))
+  return { ...resolved, renamed, skipped, preview: (resolved.preview || []).filter((p) => !bad.has(p.newTag)) }
+}
+
 export const resolveNodes = async ({ url, urls, content, name }, fetchImpl, renameOptions, lookup, { curlFetch } = {}) => {
   const curl = curlFetch !== undefined ? curlFetch : (fetchImpl === subscriptionFetch ? curlFetchText : null)
-  // 过滤、改名、多个地址合并(engine/subscription-fetch.mjs,和 App 本地分流同一份)
-  const finish = (parts) => finishSubscription({ parts, renameOptions, name })
+  // 过滤、改名、多个地址合并(engine/subscription-fetch.mjs,和 App 本地分流同一份);最后让内核挑出它不认的节点
+  const finish = (parts) => vetResolved(finishSubscription({ parts, renameOptions, name }))
 
   if (typeof content === 'string' && content.trim()) {
     const parsed = parseSubscription(content)

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { createNode, NODE_TYPES, isNodeType } from './node-model.mjs'
+import { createNode, NODE_TYPES, isNodeType, normalizeRealityPublicKey } from './node-model.mjs'
 
 test('createNode 规范化端口为整数并回填 originalTag', () => {
   const n = createNode({ tag: '美国 01', type: 'shadowsocks', server: 'a.com', server_port: '443', source: 'clash' })
@@ -46,3 +46,19 @@ test('NODE_TYPES 覆盖十协议,isNodeType 判定', () => {
   // 换一个确实不支持的类型继续守住"未知类型判 false"这条
   assert.equal(isNodeType('ssh'), false)
 })
+
+// GitHub #518:REALITY 公钥写坏的节点内核一读就整个起不来,建节点时就挡掉(解析订阅时记进「跳过」)
+test('createNode:REALITY 公钥要是 32 字节的 base64url;标准 base64 写法换过来,写坏 / 没写的抛 invalid-field', () => {
+  const reality = (publicKey) => ({ tls: { enabled: true, server_name: 'a.com', reality: { enabled: true, ...(publicKey === undefined ? {} : { public_key: publicKey }) } } })
+  const make = (publicKey) => createNode({ tag: 'R', type: 'vless', server: 'a.com', server_port: 443, fields: { uuid: 'u', ...reality(publicKey) }, source: 'clash' })
+  assert.equal(make('WlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlo').fields.tls.reality.public_key, 'WlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlo')
+  assert.equal(make('+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/s=').fields.tls.reality.public_key, '-_v7-_v7-_v7-_v7-_v7-_v7-_v7-_v7-_v7-_v7-_s', '+ / 和末尾的 = 换成 base64url')
+  for (const [bad, detail] of [['111111111111111111111111111111111111111', 'invalid reality public_key'], ['dfsdfI', 'invalid reality public_key'], ['WlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlo!', 'invalid reality public_key'], [undefined, 'missing reality public_key']]) {
+    assert.throws(() => make(bad), (err) => err.code === 'invalid-field' && err.detail === detail, String(bad))
+  }
+  // 没开 TLS 的不管(生成出站时根本不带 reality)
+  assert.doesNotThrow(() => createNode({ tag: 'T', type: 'vless', server: 'a.com', server_port: 443, fields: { uuid: 'u', tls: { enabled: false, reality: { enabled: true, public_key: 'x' } } }, source: 'clash' }))
+  assert.equal(normalizeRealityPublicKey(' WlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlo '), 'WlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlo')
+  assert.equal(normalizeRealityPublicKey(''), null)
+})
+

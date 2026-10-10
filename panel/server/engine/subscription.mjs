@@ -23,6 +23,18 @@ export const detectSubscriptionFormat = (text) => {
   return 'unknown'
 }
 
+// 跳过的链接在提示里叫什么:有 #节点名 就用它(要写进提示给人看,GitHub #518);没有(vmess:// 这种整段 base64)才用链接开头
+const shareLinkName = (line) => {
+  const hash = line.lastIndexOf('#')
+  if (hash > 0 && hash < line.length - 1) {
+    try {
+      const name = decodeURIComponent(line.slice(hash + 1)).trim()
+      if (name) return name.slice(0, 80)
+    } catch { /* 转义写坏了:用链接开头 */ }
+  }
+  return line.slice(0, 40)
+}
+
 const parseSharelinkLines = (text) => {
   const nodes = []
   const skipped = []
@@ -32,7 +44,7 @@ const parseSharelinkLines = (text) => {
     // 解析不了的记下协议和原因(内核没有的传输 / 插件、不认识的协议、写法不对),提示里按原因说清楚
     const result = parseShareLinkDetailed(line)
     if (result.node) nodes.push(result.node)
-    else skipped.push({ name: line.slice(0, 40), ...result.skip })
+    else skipped.push({ name: shareLinkName(line), ...result.skip })
   }
   return { nodes, skipped }
 }
