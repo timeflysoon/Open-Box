@@ -48,8 +48,13 @@ export default defineConfig({
   server: {
     proxy: {
       '/api': {
-        target: `http://127.0.0.1:${resolvedDevProxyPort}`,
+        // 默认转到本机;要看真实数据时设 ZASHBOARD_DEV_PROXY_TARGET=http://路由器地址:面板端口
+        target:
+          process.env.ZASHBOARD_DEV_PROXY_TARGET || `http://127.0.0.1:${resolvedDevProxyPort}`,
         changeOrigin: true,
+        // 实时图表(流量 / 内存 / 连接)走 /api/controller-ws 的 WebSocket
+        ws: true,
+        secure: false,
       },
     },
   },
