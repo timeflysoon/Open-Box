@@ -2,6 +2,7 @@
 // 和一张背景图(server/defaults/background-image.txt,data URL)。面板第一次启动、app_storage
 // 里还没有任何 config/* 时把它们写进去,新装用户打开面板就是这套主题、圆角、透明度和背景。
 // 已经在用的安装(有 config/*)一律不动。
+import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -71,6 +72,22 @@ export const seedDefaultStorage = ({ countConfigEntries, insert, hasKey = () => 
   }
   if (seeded || profile) log(`[defaults] 全新安装:写入 ${seeded} 项默认面板设置${background ? '(含背景图)' : ''}${profile ? `,以及默认目标分流(${profileDefaults.routing.policies.length} 个站点集)` : ''}`)
   return { seeded, profile }
+}
+
+// 以前随包发过的默认背景(按 data URL 的 sha256):e2957c28 那张 3000×5333(文件 353 KB,浏览器 / App 一解就是 64 MB)。
+// 2026-10-10 换成现在随包的这张(用户选的方形图,压到 540×540 的 JPEG:画面极度模糊,4K 横屏铺满也看不出区别,解开 1.1 MB)
+const RETIRED_DEFAULT_BACKGROUNDS = new Set(['ad4b53e9d8bbcfb76fe0f502d2a92f6ff6fc45c77db4e5f613cf4d5af03e15d2'])
+
+// 升级后启动时:存着的背景图还是以前随包的那张(用户没换过)就换成现在随包的。自己上传的图、已经是新图、没有图都不动。
+// 面板(浏览器打开时先从路由器取图)和 App(按图片字节的版本号判断要不要重下)都跟着换,不用另外处理
+export const upgradeDefaultBackground = ({ get, set, log = () => {}, dir = DEFAULTS_DIR, retired = RETIRED_DEFAULT_BACKGROUNDS }) => {
+  const image = String(get(BACKGROUND_IMAGE_KEY) ?? '').trim()
+  if (!image || !retired.has(createHash('sha256').update(image).digest('hex'))) return false
+  const { background } = loadStorageDefaults(dir)
+  if (!background || background === image) return false
+  set(BACKGROUND_IMAGE_KEY, background)
+  log('[defaults] 默认背景换成新版(用户没换过背景)')
+  return true
 }
 
 // 2026-10-02(45d9ee11)起到 53cd459e 之前,面板设置同步有个 bug:设密码页 / 登录页上拉不到路由器上的设置,前端把出厂

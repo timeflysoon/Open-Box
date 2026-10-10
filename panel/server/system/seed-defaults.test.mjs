@@ -3,7 +3,8 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
-import { loadStorageDefaults, LOGIN_DEFAULTS_REPAIR_KEY, repairLoginDefaultsBurst, seedDefaultStorage } from './seed-defaults.mjs'
+import { createHash } from 'node:crypto'
+import { loadStorageDefaults, LOGIN_DEFAULTS_REPAIR_KEY, repairLoginDefaultsBurst, seedDefaultStorage, upgradeDefaultBackground } from './seed-defaults.mjs'
 
 const tmpDir = () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ob-defaults-'))
@@ -31,6 +32,25 @@ test('seedDefaultStorage:全新安装写入默认值和背景;已有 config/* �
   const rows2 = {}
   assert.deepEqual(seedDefaultStorage({ countConfigEntries: () => 5, insert: (k, v) => { rows2[k] = v }, dir }), { seeded: 0, profile: false })
   assert.deepEqual(rows2, {})
+})
+
+test('upgradeDefaultBackground:存着的是以前随包的默认图就换成现在随包的;自己上传的、已经是新图的、没有图的都不动', () => {
+  const dir = tmpDir()
+  const old = 'data:image/jpeg;base64,OLD'
+  const retired = new Set([createHash('sha256').update(old).digest('hex')])
+  const run = (stored) => {
+    const rows = { __background_image__: stored }
+    const changed = upgradeDefaultBackground({ get: (k) => rows[k] ?? null, set: (k, v) => { rows[k] = v }, dir, retired })
+    return { changed, image: rows.__background_image__ }
+  }
+  assert.deepEqual(run(old), { changed: true, image: 'data:image/jpeg;base64,AAAA' })
+  assert.deepEqual(run(`${old}\n`), { changed: true, image: 'data:image/jpeg;base64,AAAA' }, '前后空白不影响认图')
+  assert.deepEqual(run('data:image/png;base64,MINE'), { changed: false, image: 'data:image/png;base64,MINE' })
+  assert.deepEqual(run('data:image/jpeg;base64,AAAA'), { changed: false, image: 'data:image/jpeg;base64,AAAA' })
+  assert.deepEqual(run(null), { changed: false, image: null })
+  // 随包的新图本身不在「以前的」名单里(不然每次启动都换一遍)
+  const { background } = loadStorageDefaults()
+  assert.equal(upgradeDefaultBackground({ get: () => background, set: () => assert.fail('不该写'), }), false)
 })
 
 test('随包的默认值文件本身合法:有主题等关键项,背景是 data:image', () => {

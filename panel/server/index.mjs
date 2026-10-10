@@ -54,7 +54,7 @@ import { registerBackupBodyParser, registerBackupRoutes } from './api/backup.mjs
 import { registerDiagnosticsRoutes } from './api/diagnostics.mjs'
 import { readMeta, readUpdateStatus } from './system/updater.mjs'
 import { createMemoryWatchdog, recordWatchdogRestart } from './system/memory-watchdog.mjs'
-import { repairLoginDefaultsBurst, seedDefaultStorage } from './system/seed-defaults.mjs'
+import { repairLoginDefaultsBurst, seedDefaultStorage, upgradeDefaultBackground } from './system/seed-defaults.mjs'
 import { fetchSelections, resolveSelections, regenerateIfPlanChanged, isDeployLocked, runExclusive } from './api/deploy-runner.mjs'
 import { ensureShareRegionLists } from './system/share-region-lists.mjs'
 import { flushDnsCache, registerDnsCacheRoutes } from './system/dns-cache.mjs'
@@ -182,6 +182,16 @@ seedDefaultStorage({
   hasKey: (key) => Boolean(getStorageValueStatement.get(key)),
   log: (m) => console.log(m),
 })
+// 还是以前随包的默认背景(用户没换过)就换成现在随包的;放在下面的修复前面:修复按「图就是随包那张」认新装用户
+try {
+  upgradeDefaultBackground({
+    get: (key) => getStorageValueStatement.get(key)?.value ?? null,
+    set: (key, value) => upsertStorageValueStatement.run(key, value),
+    log: (m) => console.log(m),
+  })
+} catch (err) {
+  console.log(`[defaults] 换默认背景失败:${err instanceof Error ? err.message : err}`)
+}
 // 老版本设密码 / 登录时把路由器上的面板设置冲成了前端出厂值(默认背景没了):升级后第一次启动修一次(同上文件)
 try {
   repairLoginDefaultsBurst({
