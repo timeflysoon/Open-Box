@@ -1328,6 +1328,7 @@ const zhTW: LANG_MESSAGE = {
   failoverRecheckStarted: '「{name}」開始重新檢測',
   failoverRecheckFailed: '重新檢測沒能開始:{error}',
   probeOverloaded: '測速跟不上:每秒要測約 {demand} 個,核心每秒測完約 {done} 個,檢測會變慢;可減少組裡的節點或加大檢測間隔。',
+  listSeparator: '、',
 }
 
 export default zhTW

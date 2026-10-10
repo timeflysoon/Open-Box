@@ -1332,6 +1332,7 @@ const en = {
   failoverRecheckStarted: 'Re-checking "{name}"',
   failoverRecheckFailed: 'Could not start the re-check: {error}',
   probeOverloaded: 'Tests cannot keep up: about {demand} needed per second, the core finishes about {done}. Checks will lag; use fewer nodes or longer intervals.',
+  listSeparator: ', ',
 }
 
 export type LANG_MESSAGE = typeof en

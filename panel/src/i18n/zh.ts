@@ -1328,6 +1328,7 @@ const zh: LANG_MESSAGE = {
   failoverRecheckStarted: '「{name}」开始重新检测',
   failoverRecheckFailed: '重新检测没能开始:{error}',
   probeOverloaded: '测速跟不上:每秒要测约 {demand} 个,内核每秒测完约 {done} 个,检测会变慢;可减少组里的节点或加大检测间隔。',
+  listSeparator: '、',
 }
 
 export default zh
