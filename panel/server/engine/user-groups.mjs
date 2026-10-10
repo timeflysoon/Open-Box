@@ -350,6 +350,14 @@ export const emitUserGroups = (groups, nodes, options = {}) => {
   const droppedByCycle = active.filter((g) => !g.kind && !withoutCycles.includes(g))
 
   const groupNameSet = new Set(withoutCycles.map((g) => g.name))
+  // 静态组的成员还能是内置的直连 / 拒绝:节点组编辑器的候选是整张节点管理列表,选进来存的是它们当时的名字(#539:以前
+  // 这里只认节点和别的组,选了「直连」生成配置时被当成悬空引用悄悄丢掉)。停用的不认——拒绝停用时配置里根本没有它,
+  // 直连停用的意思是「选不到它」
+  const memberNameSet = new Set([
+    ...groupNameSet,
+    ...(builtin.directEnabled ? [builtin.direct] : []),
+    ...(builtin.blockEnabled ? [builtin.block] : []),
+  ])
   const outbounds = []
   const dropped = droppedByCycle.map((g) => ({ name: g.name, reason: 'cycle' }))
 
@@ -430,7 +438,7 @@ export const emitUserGroups = (groups, nodes, options = {}) => {
     if (g.kind === 'block') { outbounds.push({ type: 'block', tag: g.name }); continue }
     if (!withoutCycles.includes(g)) continue
     if (g.type === 'failover') { emitFailover(g); continue }
-    let members = resolveMembers(g, nodeTags, groupNameSet, matchText, dynamicNodeTags)
+    let members = resolveMembers(g, nodeTags, memberNameSet, matchText, dynamicNodeTags)
     if (!members.length) {
       // 空组不能原样写进配置——内核会 FATAL(1.13.14 实测:
       // "initialize outbound[N]: missing tags")。但也不该把整个组丢掉:用户建

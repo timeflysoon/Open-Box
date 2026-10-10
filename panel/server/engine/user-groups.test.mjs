@@ -166,6 +166,25 @@ test('悬空成员被剔除,但不连累整个组', () => {
   assert.deepEqual(outbounds[0].outbounds, ['香港-01'])
 })
 
+test('静态组能选内置的直连 / 拒绝(#539):按当时的名字认,改过名照新名字;停用的不认', () => {
+  const groups = (directEnabled, blockEnabled) => [
+    { id: BUILTIN_IDS.direct, name: 'DIRECT', enabled: directEnabled },
+    { id: BUILTIN_IDS.block, name: '拒绝', enabled: blockEnabled },
+    { id: 'g', name: '节点选择', type: 'selector', members: ['DIRECT', '香港-01', '拒绝'] },
+    { id: 'u', name: '自动', type: 'urltest', members: ['DIRECT', '美国-01'] },
+  ]
+  const pick = (outbounds, tag) => outbounds.find((o) => o.tag === tag).outbounds
+  let { outbounds } = emitUserGroups(groups(true, true), nodes)
+  assert.deepEqual(pick(outbounds, '节点选择'), ['DIRECT', '香港-01', '拒绝'])
+  assert.deepEqual(pick(outbounds, '自动'), ['DIRECT', '美国-01'])
+  ;({ outbounds } = emitUserGroups(groups(false, false), nodes))
+  assert.deepEqual(pick(outbounds, '节点选择'), ['香港-01'], '停用的直连 / 拒绝不进组')
+  assert.deepEqual(pick(outbounds, '自动'), ['美国-01'])
+  // 旧名字(改名之前存的)不再认:按悬空引用剔掉
+  ;({ outbounds } = emitUserGroups([...groups(true, true).slice(0, 2), { id: 'g', name: 'G', type: 'selector', members: ['直连', '香港-01'] }], nodes))
+  assert.deepEqual(pick(outbounds, 'G'), ['香港-01'])
+})
+
 test('自引用成员被剔除', () => {
   const { outbounds } = emitUser(
     [{ id: 'g', name: 'G', type: 'selector', members: ['G', '美国-01'] }], nodes,

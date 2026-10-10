@@ -233,6 +233,49 @@ swap_failed "替换 meta.json 失败。"`
   assert.match(r.stdout, /die: 替换 meta\.json 失败。 已把 .*整体回退到升级前的版本.*;内核已重新生成配置并启动。请检查/)
 })
 
+// #535:每日自动升级后起内核,部署脚本和刚起来的面板抢数据库写锁失败(database is locked),以前只试一次,内核停了 9 小时。
+// 现在输出里有 database is locked 就隔 5 秒再试,最多 3 次;别的失败照旧只跑一次
+test('升级后起内核:数据库被面板占着(database is locked)时重试,最多 3 次;别的失败不重试', () => {
+  const run = (failures, message) => {
+    const root = tmp()
+    fs.mkdirSync(path.join(root, 'node/bin'), { recursive: true })
+    fs.mkdirSync(path.join(root, 'panel/server/cli'), { recursive: true })
+    // 假 node:前 failures 次按 message 失败,之后成功;每次都记一笔
+    fs.writeFileSync(path.join(root, 'node/bin/node'), `#!/bin/sh
+echo run >> '${root}/log'
+n=$(wc -l < '${root}/log' | tr -d ' ')
+if [ "$n" -le ${failures} ]; then echo "Error: ${message}" >&2; exit 1; fi
+echo '{"ok":true}'
+`, { mode: 0o755 })
+    fs.writeFileSync(path.join(root, 'panel/server/cli/deploy.mjs'), '')
+    const script = `set -eu
+INSTALL_ROOT='${root}'; CORE_WAS_RUNNING=1; TMPDIR='${root}'
+write_status() { :; }; info() { :; }; warn() { echo "[warn] $*"; }
+sleep() { echo "sleep $1" >> '${root}/sleeps'; }
+${fn(update, 'restart_core')}
+restart_core
+echo "MSG:$CORE_MSG"`
+    const r = sh(script)
+    const runs = fs.readFileSync(path.join(root, 'log'), 'utf8').trim().split('\n').length
+    const sleeps = fs.existsSync(path.join(root, 'sleeps')) ? fs.readFileSync(path.join(root, 'sleeps'), 'utf8').trim().split('\n') : []
+    return { r, runs, sleeps }
+  }
+  let { r, runs, sleeps } = run(1, 'database is locked')
+  assert.equal(r.status, 0)
+  assert.equal(runs, 2)
+  assert.deepEqual(sleeps, ['sleep 5'])
+  assert.match(r.stdout, /MSG:内核已重新生成配置并启动。/)
+  ;({ r, runs, sleeps } = run(5, 'database is locked'))
+  assert.equal(r.status, 0, 'set -eu 下失败也不能让升级脚本退出')
+  assert.equal(runs, 3, '最多 3 次')
+  assert.equal(sleeps.length, 2)
+  assert.match(r.stdout, /MSG:内核启动失败,请到面板查看原因后重新启动。/)
+  ;({ r, runs, sleeps } = run(5, 'invalid config'))
+  assert.equal(runs, 1, '别的失败不重试')
+  assert.deepEqual(sleeps, [])
+  assert.match(r.stdout, /内核启动失败\(部署退出码 1\)/)
+})
+
 // 2026-09-30 别的路由器上全新安装:opkg update 失败(软件源不通),kmod-nft-queue 没装上,脚本提示「可稍后手动执行:
 // opkg install kmod-nft-queue」,照着敲只得到 Unknown package——软件源不通时 opkg 没有包列表,什么包都不认识。
 // 现在按装不上的原因提示;install / update 两份依赖检查逐字一样
