@@ -1868,16 +1868,29 @@ restart_core() {
     _deploy_out="${TMPDIR:-/tmp}/openbox-update-deploy.log"
     # 先 cd /:升级是在 panel/ 里发起的话(比如在那个目录下敲 open-box update),当前目录已经随旧版本删掉,
     # Node 加载依赖时 process.cwd() 直接 ENOENT 崩掉,部署一步没走(开发路由器上复现过)
-    if (cd / && OPENBOX_ROOT="$INSTALL_ROOT" ZASHBOARD_DB_PATH="$INSTALL_ROOT/data/openbox.sqlite" \
-       LD_PRELOAD="$(cat "$INSTALL_ROOT/data/node-preload" 2>/dev/null)" \
-       OPENSSL_CONF=/dev/null LD_LIBRARY_PATH="$INSTALL_ROOT/node/lib" "$INSTALL_ROOT/node/bin/node" "$DEPLOY_CLI") >"$_deploy_out" 2>&1; then
-      CORE_MSG="内核已重新生成配置并启动。"
-    else
-      _deploy_rc=$?
+    # 部署脚本和刚起来的面板抢同一个数据库的写锁、没抢到(输出里有 database is locked)时隔几秒再试,最多 3 次(#535:
+    # 以前失败一次就放弃,内核停到有人手动启动);别的失败照旧只跑一次
+    _deploy_try=1
+    while :; do
+      if (cd / && OPENBOX_ROOT="$INSTALL_ROOT" ZASHBOARD_DB_PATH="$INSTALL_ROOT/data/openbox.sqlite" \
+         LD_PRELOAD="$(cat "$INSTALL_ROOT/data/node-preload" 2>/dev/null)" \
+         OPENSSL_CONF=/dev/null LD_LIBRARY_PATH="$INSTALL_ROOT/node/lib" "$INSTALL_ROOT/node/bin/node" "$DEPLOY_CLI") >"$_deploy_out" 2>&1; then
+        CORE_MSG="内核已重新生成配置并启动。"
+        break
+      else
+        _deploy_rc=$?
+      fi
+      if [ "$_deploy_try" -lt 3 ] && grep -q "database is locked" "$_deploy_out" 2>/dev/null; then
+        warn "起内核时数据库正被面板占用,5 秒后重试(第 $_deploy_try 次失败)..."
+        _deploy_try=$((_deploy_try + 1))
+        sleep 5
+        continue
+      fi
       warn "内核启动失败(部署退出码 $_deploy_rc),部署输出的最后几行(全文在 $_deploy_out):"
       tail -n 15 "$_deploy_out" 2>/dev/null | sed 's/^/    /' >&2
       CORE_MSG="内核启动失败,请到面板查看原因后重新启动。"
-    fi
+      break
+    done
   else
     warn "这个版本没有自动启动内核的脚本,请到面板重新启动内核。"
     CORE_MSG="这个版本没有自动启动内核的脚本,请到面板重新启动内核。"
