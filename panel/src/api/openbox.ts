@@ -453,7 +453,7 @@ export const fetchSubscriptionShares = async (): Promise<OpenboxSubscriptionShar
   return Array.isArray(data.shares) ? data.shares : []
 }
 
-export const createSubscriptionShare = async (payload: { name: string; host: string; protocol: 'http' | 'https'; subscriptionIds: string[] }): Promise<OpenboxSubscriptionShare> => {
+export const createSubscriptionShare = async (payload: { name: string; host: string; protocol: 'http' | 'https'; subscriptionIds: string[]; token?: string }): Promise<OpenboxSubscriptionShare> => {
   const data = await requestJson<{ share: OpenboxSubscriptionShare }>('/api/openbox/subscription-shares', {
     method: 'POST',
     body: JSON.stringify(payload),
