@@ -6,7 +6,7 @@
        图下面那行图例常驻写着某个小时的进站 / 出站——默认是峰值那个小时,鼠标(或手指)在图上移到
        哪个小时就换成哪个小时,离开又回到峰值;悬停时还在光标旁弹「时段 + 进站 / 出站」的浮层。
        点某个小时会告诉父组件(select),下面的明细就只看那个小时;选中的小时画一根虚线。 -->
-  <div class="flex flex-col gap-2">
+  <div class="border-base-300/60 bg-base-100 flex flex-col gap-2 rounded-xl border p-2">
     <div class="relative h-44 w-full">
       <div
         ref="chartEl"

@@ -2,7 +2,7 @@ import { NOT_CONNECTED, PROXY_CHAIN_DIRECTION, PROXY_TYPE, ROUTE_NAME } from '@/
 import { showNotification } from '@/helper/notification'
 import { timeSaved } from '@/store/overview'
 import { hiddenGroupMap, proxyMap } from '@/store/proxies'
-import { lowLatency, mediumLatency, proxyChainDirection, splitOverviewPage } from '@/store/settings'
+import { lowLatency, mediumLatency, proxyChainDirection } from '@/store/settings'
 import type { Connection, Proxy } from '@/types'
 import dayjs from 'dayjs'
 import * as ipaddr from 'ipaddr.js'
@@ -163,7 +163,6 @@ export const renderRoutes = computed(() => {
       ROUTE_NAME.subscriptions,
       ROUTE_NAME.routing,
       ROUTE_NAME.kernel,
-      !splitOverviewPage.value && ROUTE_NAME.overview,
     ].includes(r)
   })
 })

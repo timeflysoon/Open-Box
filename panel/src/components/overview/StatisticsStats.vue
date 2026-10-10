@@ -5,7 +5,7 @@
       :key="stat"
       :class="className.item"
     >
-      <div :class="className.label">{{ $t(stat) }}</div>
+      <div :class="className.label">{{ $t(labelKey(stat)) }}</div>
       <div :class="className.value">{{ statisticsMap[stat] }}</div>
     </div>
   </div>
@@ -21,7 +21,7 @@ const props = defineProps<{
 
 const classMap = {
   overview: {
-    list: 'grid grid-cols-2 gap-2 rounded-lg bg-base-200/50 px-4 py-2 lg:grid-cols-6',
+    list: 'grid grid-cols-2 gap-2 rounded-xl border border-base-300/60 bg-base-100 px-4 py-2 lg:grid-cols-6',
     item: 'flex h-12 flex-col items-start justify-center lg:gap-0.5 lg:items-center',
     label: 'text-xs text-base-content/70',
     value: 'text-lg lg:text-xl font-bold',
@@ -70,4 +70,12 @@ const orderMap = {
 
 const className = computed(() => classMap[props.type])
 const order = computed(() => orderMap[props.type])
+
+// 概览和侧边栏用「连接数 / 进站流量 / 出站流量」这几个标签;设置页保持原样
+const LABEL_KEY: Record<string, string> = {
+  [STATISTICS_TYPE.CONNECTIONS]: 'statConnections',
+  [STATISTICS_TYPE.DOWNLOAD]: 'statDownloadTotal',
+  [STATISTICS_TYPE.UPLOAD]: 'statUploadTotal',
+}
+const labelKey = (stat: string) => (props.type === 'settings' ? stat : (LABEL_KEY[stat] ?? stat))
 </script>

@@ -5,7 +5,7 @@
     <div class="flex flex-wrap items-center gap-2 px-4 pt-4">
       <div class="min-w-0">
         <div class="flex flex-wrap items-center gap-2">
-          <h2 class="text-base font-semibold">{{ $t('dailyTraffic') }}</h2>
+          <h2 class="text-base font-semibold">{{ $t('trafficInsight') }}</h2>
           <span
             v-if="loading"
             class="loading loading-spinner loading-xs"
@@ -84,7 +84,7 @@
            滚动容器在 Windows 上会冒出横竖两条占位的滚动条,很难看 -->
       <div
         v-if="days.length"
-        class="relative px-2 pt-6"
+        class="border-base-300/60 bg-base-100 relative rounded-xl border px-2 pt-6 pb-2"
       >
         <div class="relative">
           <div
@@ -246,7 +246,7 @@
             :clearable="true"
           />
         </div>
-        <div class="app-plain-table bg-base-200/50 overflow-x-auto rounded-lg">
+        <div class="app-plain-table border-base-300/60 bg-base-100 overflow-x-auto rounded-xl border">
           <table class="table-sm table">
             <thead>
               <tr>
