@@ -44,6 +44,10 @@
                 v-tip="$t('groupNodeCountHint')"
                 class="text-base-content/60 shrink-0 text-xs tabular-nums"
               >({{ nodeStats.valid }}/{{ nodeStats.total }})</span>
+              <span
+                v-if="isRejected"
+                class="text-error shrink-0 text-xs"
+              >{{ $t('failoverRejected') }}</span>
             </div>
             <button
               v-if="manageHiddenGroup"
@@ -180,6 +184,7 @@
         <!-- 故障转移组展开:和策略穿透里同一套上下两栏——上栏各主备页签一张卡(点哪张下栏看哪个),
              下栏当前选中页签的明细节点。主备由服务端按检测结果切,节点卡片点了不会改内核的选择 -->
         <template v-if="isFailover">
+          <FailoverStatusBar :group-name="name" />
           <FailoverLaneCards
             :group-name="name"
             :selected-lane-id="selectedLaneId"
@@ -230,7 +235,7 @@ import {
 } from '@/store/settings'
 import { EyeIcon, EyeSlashIcon } from '@heroicons/vue/24/outline'
 import { managedOutbounds, siteSetNames } from '@/store/openboxSiteSets'
-import { failoverCurrentLaneId, failoverLanesOf, failoverLastSwitchText, failoverMembersOf, isFailoverGroup, watchFailoverStatus } from '@/store/openboxFailover'
+import { failoverCurrentLaneId, failoverLanesOf, failoverLastSwitchText, failoverMembersOf, isFailoverGroup, isFailoverRejected, watchFailoverStatus } from '@/store/openboxFailover'
 import { openPenetrationDialog } from '@/store/proxyGroupRulePenetration'
 import { DARK_THEME, theme } from '@/store/settings'
 import { twMerge } from 'tailwind-merge'
@@ -242,6 +247,7 @@ import ProxiesByProvider from './ProxiesByProvider.vue'
 import ProxiesContent from './ProxiesContent.vue'
 import FailoverLaneCards from './FailoverLaneCards.vue'
 import FailoverLaneDetail from './FailoverLaneDetail.vue'
+import FailoverStatusBar from './FailoverStatusBar.vue'
 import ProxyGroupNow from './ProxyGroupNow.vue'
 import ProxyIcon from './ProxyIcon.vue'
 import ProxyPenetrationSection from './ProxyPenetrationSection.vue'
@@ -253,6 +259,8 @@ const props = defineProps<{
 const proxyGroup = computed(() => proxyMap.value[props.name])
 // 故障转移组:成员是各页签的引用加末尾的兜底拒绝,拒绝不是候选,圆点 / 计数里不算它
 const isFailover = computed(() => isFailoverGroup(props.name))
+// 所有页签都没通过测速、流量被拒绝:标题旁给个「已拒绝」标记
+const isRejected = computed(() => isFailover.value && isFailoverRejected(props.name))
 const allProxies = computed(() => (isFailover.value ? failoverMembersOf(props.name, proxyGroup.value.all ?? []) : proxyGroup.value.all ?? []))
 const { renderProxies } = useRenderProxies(allProxies, props.name)
 // 标题后的「有效 / 总数」

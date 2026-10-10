@@ -1,5 +1,6 @@
 import type { OpenboxFailoverGroupStatus, OpenboxFailoverStatus } from '@/api/openbox'
-import { fetchFailoverStatus } from '@/api/openbox'
+import { fetchFailoverStatus, recheckFailover } from '@/api/openbox'
+import { showNotification } from '@/helper/notification'
 import { i18n } from '@/i18n'
 import { managedOutbounds } from '@/store/openboxSiteSets'
 import { computed, ref } from 'vue'
@@ -171,4 +172,64 @@ export const failoverLaneOfTag = (tag: string) => {
     return { group: g, lane: g.lanes[index], index }
   }
   return null
+}
+
+// ---- 兜底拒绝 / 重新检测 / 测速跟不上(v0.1.305)----
+
+// 这个组此刻是不是在兜底拒绝上(所有页签都没通过测速,流量被拒绝;服务端每分钟复查一次)
+export const isFailoverRejected = (groupName: string) => failoverGroupByTag.value.get(groupName)?.status === 'reject'
+
+// 失败类别的文案:复用测速失败原因那一套(latencyReasonTimeout 等),没有对应文案就原样显示
+const failKindLabel = (kind: string) => {
+  const camel = kind.replace(/[-_ ]+(.)/g, (_m, c: string) => c.toUpperCase())
+  const key = `latencyReason${camel.charAt(0).toUpperCase()}${camel.slice(1)}`
+  return i18n.global.te(key) ? i18n.global.t(key) : kind
+}
+
+// 「状态码 404(2 个)、超时(1 个)」:这个组所有失败节点按原因归类、多的在前。没有失败节点就是空串
+export const failoverFailReasons = (groupName: string) => {
+  const group = failoverGroupByTag.value.get(groupName)
+  if (!group) return ''
+  const t = i18n.global.t
+  const counts = new Map<string, number>()
+  const seen = new Set<string>()
+  for (const lane of group.lanes) {
+    for (const [tag, node] of Object.entries(lane.nodes)) {
+      if (seen.has(tag) || !node || node.ok !== false) continue
+      seen.add(tag)
+      const code = node.kind === 'status' ? /unexpected status (\d{3})/.exec(node.error || '')?.[1] : undefined
+      const label = code ? t('failoverFailStatusCode', { code }) : failKindLabel(node.kind || (node.reason === 'timeout' ? 'timeout' : 'error'))
+      counts.set(label, (counts.get(label) || 0) + 1)
+    }
+  }
+  return [...counts]
+    .sort((a, b) => b[1] - a[1])
+    .map(([reason, n]) => t('failoverFailItem', { reason, n }))
+    .join(t('listSeparator'))
+}
+
+// 测速需求长期超过吞吐(名额已经占满)= 测不过来;界面提示减少节点或加大间隔。没数据 / 没占满就是 null
+export const failoverProbeOverload = computed(() => {
+  const p = failoverStatus.value?.probes
+  if (!p || p.throughputPerSec == null || p.demandPerSec == null) return null
+  if (!(p.demandPerSec > p.throughputPerSec * 1.2)) return null
+  if (p.interactive + p.background < p.limit) return null
+  return { demand: p.demandPerSec, done: p.throughputPerSec }
+})
+
+// 点「重新检测」:通知服务端马上把这个组的节点全部重测一遍,再刷新一次状态
+export const recheckFailoverGroup = async (groupName: string) => {
+  const group = failoverGroupByTag.value.get(groupName)
+  if (!group) return
+  try {
+    await recheckFailover(group.id)
+    showNotification({ content: 'failoverRecheckStarted', params: { name: groupName }, type: 'alert-success' })
+  } catch (error) {
+    showNotification({
+      content: 'failoverRecheckFailed',
+      params: { error: error instanceof Error ? error.message : String(error) },
+      type: 'alert-error',
+    })
+  }
+  await loadFailoverStatus()
 }

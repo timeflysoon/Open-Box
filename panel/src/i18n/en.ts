@@ -1321,6 +1321,17 @@ const en = {
   clientAppDetectEgress: 'Detect from egress IP',
   clientAppDetected: 'Egress {ip} → {country}',
   clientAppDetectFailed: 'Detection failed: {message}',
+  failoverRejected: 'Rejected',
+  failoverRejectedHint: 'No lane passed its test, so traffic is rejected. Re-checks every minute and switches back once a lane passes.',
+  failoverFailReason: 'Reasons: {reasons}',
+  failoverFailItem: '{reason} ({n})',
+  failoverFailStatusCode: 'status {code}',
+  failoverChecking: 'Checking {done}/{total}',
+  failoverRecheck: 'Re-check',
+  failoverRecheckHint: 'Test every node in this group again now',
+  failoverRecheckStarted: 'Re-checking "{name}"',
+  failoverRecheckFailed: 'Could not start the re-check: {error}',
+  probeOverloaded: 'Tests cannot keep up: about {demand} needed per second, the core finishes about {done}. Checks will lag; use fewer nodes or longer intervals.',
 }
 
 export type LANG_MESSAGE = typeof en

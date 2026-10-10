@@ -1317,6 +1317,17 @@ const zhTW: LANG_MESSAGE = {
   clientAppDetectEgress: '按出口 IP 判斷',
   clientAppDetected: '出口 {ip} → {country}',
   clientAppDetectFailed: '判斷失敗:{message}',
+  failoverRejected: '已拒絕',
+  failoverRejectedHint: '所有頁籤都沒通過測速,流量被拒絕;每分鐘複查一次,有頁籤通過就切回。',
+  failoverFailReason: '原因:{reasons}',
+  failoverFailItem: '{reason}({n} 個)',
+  failoverFailStatusCode: '狀態碼 {code}',
+  failoverChecking: '檢測中 {done}/{total}',
+  failoverRecheck: '重新檢測',
+  failoverRecheckHint: '馬上把這個組的節點全部重測一遍',
+  failoverRecheckStarted: '「{name}」開始重新檢測',
+  failoverRecheckFailed: '重新檢測沒能開始:{error}',
+  probeOverloaded: '測速跟不上:每秒要測約 {demand} 個,核心每秒測完約 {done} 個,檢測會變慢;可減少組裡的節點或加大檢測間隔。',
 }
 
 export default zhTW

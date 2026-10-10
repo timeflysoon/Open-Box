@@ -1317,6 +1317,17 @@ const zh: LANG_MESSAGE = {
   clientAppDetectEgress: '按出口 IP 判断',
   clientAppDetected: '出口 {ip} → {country}',
   clientAppDetectFailed: '判断失败:{message}',
+  failoverRejected: '已拒绝',
+  failoverRejectedHint: '所有页签都没通过测速,流量被拒绝;每分钟复查一次,有页签通过就切回。',
+  failoverFailReason: '原因:{reasons}',
+  failoverFailItem: '{reason}({n} 个)',
+  failoverFailStatusCode: '状态码 {code}',
+  failoverChecking: '检测中 {done}/{total}',
+  failoverRecheck: '重新检测',
+  failoverRecheckHint: '马上把这个组的节点全部重测一遍',
+  failoverRecheckStarted: '「{name}」开始重新检测',
+  failoverRecheckFailed: '重新检测没能开始:{error}',
+  probeOverloaded: '测速跟不上:每秒要测约 {demand} 个,内核每秒测完约 {done} 个,检测会变慢;可减少组里的节点或加大检测间隔。',
 }
 
 export default zh

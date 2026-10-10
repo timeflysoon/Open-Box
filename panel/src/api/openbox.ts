@@ -620,7 +620,8 @@ export interface OpenboxFailoverLaneStatus {
   // 多节点页签:内核子组此刻选中的节点,以及它是否被确认可用
   kernelNow: string | null
   confirmed: boolean | null
-  nodes: Record<string, { ok: boolean | null; delay: number | null; at: number; reason: string | null } | null>
+  // kind / error:失败的类别和原始错误(v0.1.305 起;旧服务端没有)。「状态码 404」就是 kind = 'status' + error = 'unexpected status 404'
+  nodes: Record<string, { ok: boolean | null; delay: number | null; at: number; reason: string | null; kind?: string | null; error?: string | null } | null>
 }
 export interface OpenboxFailoverGroupStatus {
   id: string
@@ -639,20 +640,40 @@ export interface OpenboxFailoverGroupStatus {
   laneOrder?: string[]
   reorder?: { since: number; reason: 'priority-changed' | 'order-unknown'; evaluated: boolean } | null
   inFlight: boolean
+  // 正在跑的这一轮:节点测了几个(界面显示「检测中 x / y」);manualRecheck:点了「重新检测」还没做完(v0.1.305 起)
+  round?: { startedAt: number; done: number; total: number } | null
+  manualRecheck?: boolean
   settings: { interval?: string; intervalMs?: number; tolerance?: number; testUrl?: string } & Partial<OpenboxFailoverSettings>
   lanes: OpenboxFailoverLaneStatus[]
+}
+// 面板全局测速名额此刻的情况(v0.1.305 起):在测 / 排队的数量、上限、最近每秒测完几个、按各组间隔每秒要测几个
+export interface OpenboxProbeStats {
+  interactive: number
+  background: number
+  limit: number
+  throughputPerSec: number | null
+  demandPerSec: number | null
 }
 export interface OpenboxFailoverStatus {
   version: string | null
   paused: string
   lastError?: string
   running?: boolean
+  probes?: OpenboxProbeStats | null
   groups: OpenboxFailoverGroupStatus[]
 }
 export const fetchFailoverStatus = async (): Promise<OpenboxFailoverStatus> =>
   requestJson<OpenboxFailoverStatus>('/api/openbox/failover/status')
 export const refreshFailover = async (): Promise<void> => {
   await requestJson<{ ok: boolean }>('/api/openbox/failover/refresh', { method: 'POST' })
+}
+// 「重新检测」一个故障转移组:正在跑的那轮作废,马上把这个组的节点全部强制测一遍。组不存在回 404
+export const recheckFailover = async (id: string): Promise<void> => {
+  await requestJson<{ ok: boolean }>('/api/openbox/failover/recheck', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id }),
+  })
 }
 
 export interface OpenboxGroupsPayload {
