@@ -49,6 +49,8 @@
           v-if="pageTab === 'groups'"
           ref="groupsPanel"
         />
+        <!-- 链式代理:经另一个节点 / 节点组再去连的节点,和节点组同在「出站节点」页签 -->
+        <ChainProxiesCard v-if="pageTab === 'groups'" />
 
         <template v-if="pageTab === 'subs'">
         <SubscriptionShareCard
@@ -170,6 +172,7 @@ import type { OpenboxSubscription, OpenboxSubscriptionShare } from '@/api/openbo
 import { deleteSubscription, fetchSubscriptions, fetchSubscriptionShares, refreshSubscription, reorderSubscriptions, updateSubscription } from '@/api/openbox'
 import DialogWrapper from '@/components/common/DialogWrapper.vue'
 import AddSubscriptionDialog from '@/components/subscription/AddSubscriptionDialog.vue'
+import ChainProxiesCard from '@/components/subscription/ChainProxiesCard.vue'
 import NodeGroupsPanel from '@/components/subscription/NodeGroupsPanel.vue'
 import SubscriptionCard from '@/components/subscription/SubscriptionCard.vue'
 import SubscriptionShareCard from '@/components/subscription/SubscriptionShareCard.vue'

@@ -198,17 +198,33 @@ export interface OpenboxClientRoute {
   macs?: string[]
 }
 
+// 链式代理:一个节点不直接拨号,而是经另一个节点 / 节点组去连(内核里的 detour),见 server/engine/chain-proxy.mjs。
+// 名字也是内核里的出站名,和节点、节点组、站点集同一个命名空间
+export interface OpenboxChainProxy {
+  id: string
+  enabled: boolean
+  name: string
+  // 节点本体:一条分享链接,或一小段 Clash / sing-box 节点配置
+  link: string
+  // 上游:某个节点或节点组的名字
+  upstream: string
+  // 保存时服务端按 link 解析出来的摘要,只读(界面列表显示用)
+  node?: { type: string; server: string; port: number }
+}
+
 export interface OpenboxProfile {
   updates?: OpenboxUpdatePlans
   servers?: OpenboxServer[]
   clientRoutes?: OpenboxClientRoute[]
+  chainProxies?: OpenboxChainProxy[]
   // 订阅链接和节点服务器的地址一律直连(默认开)
   directForNodes?: boolean
   region: string
   ipv6: boolean
   // IPv6 开着时走代理的目标怎么处理:node 交给节点(默认)/ ipv4 降为 IPv4(走代理的域名不给 AAAA,裸 v6 明确拒绝)
   ipv6Proxy?: 'node' | 'ipv4' | 'bypass'
-  tun?: { autoRedirect?: boolean }
+  // tun 参数(server/engine/tun-options.mjs):stack 默认 mixed;mtu / tcpMss 为 0 = 内核默认 / 不钳制
+  tun?: { autoRedirect?: boolean; stack?: 'mixed' | 'gvisor' | 'system'; mtu?: number; tcpMss?: number }
   dns: OpenboxProfileDns
   routing: OpenboxProfileRouting
   // 测速地址:testUrl 给自动择优组和面板延迟测试用;directTestUrl 只给内置直连用

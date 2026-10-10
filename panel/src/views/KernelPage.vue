@@ -21,6 +21,10 @@
             :profile="profile"
             :patch-profile="patchProfile"
           />
+          <TunOptionsCard
+            :profile="profile"
+            :patch-profile="patchProfile"
+          />
           <TestUrlCard
             :profile="profile"
             :patch-profile="patchProfile"
@@ -29,6 +33,8 @@
             :profile="profile"
             :patch-profile="patchProfile"
           />
+          <!-- 路由器系统时区:定时任务按路由器本地时间跑 -->
+          <TimezoneCard />
           <!-- 导出 / 导入:导入后档案换了,重新拉一遍状态和档案 -->
           <BackupCard
             :profile="profile"
@@ -59,7 +65,9 @@ import NodeDirectCard from '@/components/kernel/NodeDirectCard.vue'
 import OpenboxUpdateCard from '@/components/kernel/OpenboxUpdateCard.vue'
 import BackupCard from '@/components/kernel/BackupCard.vue'
 import TrafficRetentionCard from '@/components/kernel/TrafficRetentionCard.vue'
+import TimezoneCard from '@/components/kernel/TimezoneCard.vue'
 import DiagnosticsCard from '@/components/kernel/DiagnosticsCard.vue'
+import TunOptionsCard from '@/components/kernel/TunOptionsCard.vue'
 import Ipv6Card from '@/components/routing/Ipv6Card.vue'
 import TestUrlCard from '@/components/routing/TestUrlCard.vue'
 import { usePaddingForViews } from '@/composables/paddingViews'
