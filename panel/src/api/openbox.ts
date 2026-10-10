@@ -101,6 +101,15 @@ export interface OpenboxProfileDns {
   filter?: DnsFilterSettings
   split?: boolean
   mode?: OpenboxDnsMode
+  // DNS 上游(server/engine/dns-upstream.mjs):地址只收 IP 或记号 'wan'(路由器系统的上游 DNS),协议只有 udp / tcp,
+  // 端口默认 53;extras 是备用上游(每侧最多 3 个,和主上游并发查询)。region:路由器在中国大陆(cn)还是之外(intl)
+  region?: 'cn' | 'intl'
+  directProtocol?: 'udp' | 'tcp'
+  directPort?: number
+  directExtras?: { server: string; protocol?: 'udp' | 'tcp'; port?: number }[]
+  proxyProtocol?: 'udp' | 'tcp'
+  proxyPort?: number
+  proxyExtras?: { server: string; protocol?: 'udp' | 'tcp'; port?: number }[]
   direct?: string
   proxy?: string
   // 走代理的域名由内核发占位地址(FakeIP 原型):域名交给选中的节点解析,解析和连接落在同一个节点

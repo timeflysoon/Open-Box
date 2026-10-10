@@ -30,6 +30,11 @@
           :patch-profile="patchProfile"
           @needs-restart="restartPending = true"
         />
+        <DnsUpstreamCard
+          :profile="profile"
+          :patch-profile="patchProfile"
+          @needs-restart="restartPending = true"
+        />
         <DnsRewriteCard
           :profile="profile"
           :patch-profile="patchProfile"
@@ -67,6 +72,7 @@ import {
 } from '@/api/openbox'
 import DnsFilterCard from '@/components/dns/DnsFilterCard.vue'
 import DnsFilterRecords from '@/components/dns/DnsFilterRecords.vue'
+import DnsUpstreamCard from '@/components/dns/DnsUpstreamCard.vue'
 import DnsModeCard from '@/components/kernel/DnsModeCard.vue'
 import DnsRewriteCard from '@/components/kernel/DnsRewriteCard.vue'
 import { usePaddingForViews } from '@/composables/paddingViews'

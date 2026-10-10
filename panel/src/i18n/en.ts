@@ -1,6 +1,8 @@
 import { dnsFilterEn } from './dns-filter'
+import { dnsUpstreamEn } from './dns-upstream'
 const en = {
   ...dnsFilterEn,
+  ...dnsUpstreamEn,
   overview: 'Overview',
   proxies: 'Proxies',
   rules: 'Rules',

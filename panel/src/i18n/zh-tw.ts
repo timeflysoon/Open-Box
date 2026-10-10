@@ -1,8 +1,10 @@
 import type { LANG_MESSAGE } from './en'
 import { dnsFilterTw } from './dns-filter'
+import { dnsUpstreamZhTw } from './dns-upstream'
 
 const zhTW: LANG_MESSAGE = {
   ...dnsFilterTw,
+  ...dnsUpstreamZhTw,
   overview: '概覽',
   proxies: '代理',
   rules: '規則',
