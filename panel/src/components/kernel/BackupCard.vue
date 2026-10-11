@@ -201,7 +201,7 @@ const available = computed<OpenboxBackupOptions>(() => ({
 watch(
   () => JSON.stringify(available.value),
   () => {
-    for (const key of Object.keys(include) as (keyof OpenboxBackupOptions)[]) include[key] = available.value[key]
+    for (const key of Object.keys(include) as (keyof OpenboxBackupOptions)[]) include[key] = available.value[key] ?? false
   },
   { immediate: true },
 )

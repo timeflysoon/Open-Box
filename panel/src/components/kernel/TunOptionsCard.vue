@@ -133,7 +133,7 @@ const saveNumber = async (key: 'mtu' | 'tcpMss') => {
   const value = raw === '' ? 0 : Number(raw)
   const [min, max] = key === 'mtu' ? [MTU_MIN, MTU_MAX] : [MSS_MIN, MSS_MAX]
   if (!(value === 0 || (Number.isInteger(value) && value >= min && value <= max))) {
-    showNotification({ content: key === 'mtu' ? 'tunMtuInvalid' : 'tunTcpMssInvalid', params: { min, max }, type: 'alert-error' })
+    showNotification({ content: key === 'mtu' ? 'tunMtuInvalid' : 'tunTcpMssInvalid', params: { min: String(min), max: String(max) }, type: 'alert-error' })
     mtuText.value = String(tun.value.mtu ?? 0)
     mssText.value = String(tun.value.tcpMss ?? 0)
     return
