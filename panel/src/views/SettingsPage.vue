@@ -56,6 +56,7 @@ import { SETTINGS_MENU_KEY, SETTINGS_TAB } from '@/constant'
 import { settingsMenuOrder } from '@/store/settings'
 import ClientAppPage from '@/views/ClientAppPage.vue'
 import ClientRoutingPage from '@/views/ClientRoutingPage.vue'
+import ChainProxiesPage from '@/views/ChainProxiesPage.vue'
 import KernelPage from '@/views/KernelPage.vue'
 import DnsPage from '@/views/DnsPage.vue'
 import RoutingPage from '@/views/RoutingPage.vue'
@@ -66,11 +67,12 @@ import {
   ServerStackIcon,
   DevicePhoneMobileIcon,
   HomeIcon,
+  LinkIcon,
   MapIcon,
-  QrCodeIcon,
   RectangleStackIcon,
   RssIcon,
   ShareIcon,
+  Squares2X2Icon,
 } from '@heroicons/vue/24/outline'
 import { useStorage } from '@vueuse/core'
 import type { Component } from 'vue'
@@ -94,8 +96,9 @@ const tabItems: { key: SETTINGS_TAB; label: string; icon: Component }[] = [
   { key: SETTINGS_TAB.groups, label: 'groupsTab', icon: RectangleStackIcon },
   { key: SETTINGS_TAB.routing, label: 'routingSettings', icon: MapIcon },
   { key: SETTINGS_TAB.clients, label: 'clientRoutingTab', icon: DevicePhoneMobileIcon },
-  { key: SETTINGS_TAB.clientApp, label: 'clientAppTab', icon: QrCodeIcon },
+  { key: SETTINGS_TAB.chain, label: 'chainTitle', icon: LinkIcon },
   { key: SETTINGS_TAB.share, label: 'shareNetworkTab', icon: ShareIcon },
+  { key: SETTINGS_TAB.clientApp, label: 'clientAppTab', icon: Squares2X2Icon },
   { key: SETTINGS_TAB.dns, label: 'dnsSettingsTab', icon: ServerStackIcon },
   { key: SETTINGS_TAB.kernel, label: 'kernelSettings', icon: CpuChipIcon },
 ]
@@ -105,6 +108,7 @@ const TAB_COMPONENTS: Partial<Record<SETTINGS_TAB, Component>> = {
   [SETTINGS_TAB.groups]: SubscriptionsPage,
   [SETTINGS_TAB.routing]: RoutingPage,
   [SETTINGS_TAB.clients]: ClientRoutingPage,
+  [SETTINGS_TAB.chain]: ChainProxiesPage,
   [SETTINGS_TAB.clientApp]: ClientAppPage,
   [SETTINGS_TAB.kernel]: KernelPage,
   [SETTINGS_TAB.dns]: DnsPage,
