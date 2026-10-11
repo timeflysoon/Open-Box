@@ -171,12 +171,16 @@ onMounted(async () => {
 .kernel-group > .card + .card {
   border-top: 1px solid color-mix(in oklab, currentColor 10%, transparent) !important;
 }
-/* 这一页的按钮、输入框、下拉统一用胶囊形,和上游一致 */
+/* 这一页的按钮、输入框、下拉、黑白名单切换统一用胶囊形,和上游一致。
+   主题自己也在管这些控件的圆角,不加 !important 压不住 */
 .kernel-top .btn,
 .kernel-group .btn,
 .kernel-top .select,
 .kernel-group .select,
-.kernel-group .input {
-  border-radius: 9999px;
+.kernel-top .input,
+.kernel-group .input,
+.kernel-group .tabs-box,
+.kernel-group .tabs-box .tab {
+  border-radius: 9999px !important;
 }
 </style>
