@@ -11,47 +11,71 @@
         class="loading loading-spinner loading-xs"
       />
       <template v-else-if="state">
-        <p class="text-base-content/70 text-sm">
-          {{ $t('timezoneCurrent') }}: {{ state.zone || $t('timezoneUnknown') }}
-          <template v-if="state.offset"> (UTC{{ state.offset }})</template>
-          <template v-if="state.local"> · {{ $t('timezoneLocalTime') }}: {{ state.local }}</template>
-        </p>
-        <div class="flex flex-wrap items-center gap-2">
-          <input
-            v-model.trim="keyword"
-            type="search"
-            class="input input-sm w-56 max-w-full"
-            :placeholder="$t('timezoneSearchPlaceholder')"
-          />
-          <select
-            v-model="selected"
-            class="select select-sm min-w-0 flex-1 basis-56"
-          >
-            <option
-              v-for="zone in options"
-              :key="zone"
-              :value="zone"
-            >
-              {{ label(zone) }}
-            </option>
-          </select>
+        <!-- 一个下拉:点开有搜索框,选中即生效 -->
+        <div
+          ref="rootEl"
+          class="relative w-full max-w-md"
+        >
           <button
             type="button"
-            class="btn btn-primary btn-sm"
-            :disabled="saving || !selected || selected === state.zone"
-            @click="save"
+            class="input input-sm flex h-10 w-full items-center justify-between gap-2 text-left"
+            :disabled="saving"
+            :aria-expanded="open"
+            @click="toggle"
           >
-            <span
-              v-if="saving"
-              class="loading loading-spinner loading-xs"
-            />{{ $t('timezoneSave') }}
+            <span class="truncate font-mono">{{ state.zone || $t('timezoneUnknown') }}</span>
+            <span class="text-base-content/60 flex shrink-0 items-center gap-1 font-mono text-xs">
+              <span v-if="state.offset">UTC{{ state.offset }}</span>
+              <span
+                v-if="saving"
+                class="loading loading-spinner loading-xs"
+              />
+              <ChevronDownIcon class="h-4 w-4" />
+            </span>
           </button>
+          <div
+            v-if="open"
+            class="bg-base-100 border-base-300 absolute z-30 mt-1 w-full rounded-lg border shadow-lg"
+          >
+            <div class="p-2">
+              <input
+                ref="searchEl"
+                v-model.trim="keyword"
+                type="search"
+                class="input input-sm w-full"
+                :placeholder="$t('timezoneSearch')"
+                @keydown.esc="open = false"
+              />
+            </div>
+            <ul class="max-h-64 overflow-y-auto pb-1">
+              <li
+                v-for="zone in filtered"
+                :key="zone"
+              >
+                <button
+                  type="button"
+                  class="hover:bg-base-200 flex w-full items-center justify-between gap-2 px-3 py-1.5 text-left text-sm"
+                  :class="{ 'bg-base-200 font-medium': zone === state.zone }"
+                  @click="pick(zone)"
+                >
+                  <span class="truncate">{{ label(zone) }}</span>
+                  <span class="text-base-content/50 shrink-0 font-mono text-xs">{{ zoneOffset(zone) }}</span>
+                </button>
+              </li>
+              <li
+                v-if="!filtered.length"
+                class="text-base-content/50 px-3 py-2 text-xs"
+              >
+                {{ $t('timezoneNoMatch') }}
+              </li>
+            </ul>
+          </div>
         </div>
         <p
-          v-if="noMatch"
-          class="text-base-content/50 text-xs"
+          v-if="state.local"
+          class="text-base-content/60 text-xs"
         >
-          {{ $t('timezoneNoMatch') }}
+          {{ $t('timezoneNow', { time: localTime, offset: state.offset }) }}
         </p>
       </template>
     </div>
@@ -61,13 +85,16 @@
 <script setup lang="ts">
 import { fetchTimezone, saveTimezone, type OpenboxTimezoneState } from '@/api/openbox'
 import { showNotification } from '@/helper/notification'
-import { computed, onMounted, ref } from 'vue'
+import { ChevronDownIcon } from '@heroicons/vue/24/outline'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 
 const state = ref<OpenboxTimezoneState | null>(null)
 const loading = ref(true)
 const saving = ref(false)
+const open = ref(false)
 const keyword = ref('')
-const selected = ref('')
+const rootEl = ref<HTMLElement | null>(null)
+const searchEl = ref<HTMLInputElement | null>(null)
 
 // 国家 / 地区名按浏览器语言显示,只用来在下拉里标注和搜索
 const regionNames = (() => {
@@ -91,48 +118,83 @@ const label = (zone: string) => {
   return country ? `${zone} · ${country}` : zone
 }
 
+// 每个时区现在的 UTC 偏移(带夏令时),只用浏览器自带的时区库算
+const offsetCache = new Map<string, string>()
+const zoneOffset = (zone: string) => {
+  const cached = offsetCache.get(zone)
+  if (cached !== undefined) return cached
+  let text = ''
+  try {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: zone,
+      timeZoneName: 'longOffset' as 'long',
+    }).formatToParts(new Date())
+    const name = parts.find((part) => part.type === 'timeZoneName')?.value ?? ''
+    text = name === 'GMT' ? 'UTC+00:00' : name.replace('GMT', 'UTC')
+  } catch {
+    text = ''
+  }
+  offsetCache.set(zone, text)
+  return text
+}
+
 const filtered = computed(() => {
   const zones = state.value?.zones ?? []
   const query = keyword.value.toLowerCase()
   if (!query) return zones
   return zones.filter((zone) => {
-    const text = label(zone).toLowerCase()
+    const text = `${label(zone)} ${zoneOffset(zone)}`.toLowerCase()
     return text.includes(query) || text.replace(/_/g, ' ').includes(query)
   })
 })
-// 当前选中的永远留在列表里,免得搜索把它筛掉后下拉框显示空白
-const options = computed(() =>
-  selected.value && !filtered.value.includes(selected.value) ? [selected.value, ...filtered.value] : filtered.value,
-)
-const noMatch = computed(() => Boolean(keyword.value) && !filtered.value.length)
+
+// 路由器时间不显示秒
+const localTime = computed(() => (state.value?.local ?? '').replace(/^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}):\d{2}$/, '$1'))
 
 const errorMessage = (error: unknown) => (error instanceof Error ? error.message : String(error))
 
-const apply = (next: OpenboxTimezoneState) => {
-  state.value = next
-  selected.value = next.zone
+const toggle = async () => {
+  open.value = !open.value
+  if (open.value) {
+    keyword.value = ''
+    await nextTick()
+    searchEl.value?.focus()
+  }
 }
 
-const save = async () => {
+const save = async (zone: string) => {
   saving.value = true
   try {
-    const next = await saveTimezone(selected.value)
-    apply(next)
-    showNotification({ content: 'timezoneSaved', params: { zone: next.zone }, type: 'alert-success' })
+    const next = await saveTimezone(zone)
+    state.value = next
+    showNotification({ content: 'timezoneSaved', params: { zone: next.zone, offset: next.offset }, type: 'alert-success' })
   } catch (error) {
-    showNotification({ content: 'routingSaveFailed', params: { message: errorMessage(error) }, type: 'alert-error' })
+    showNotification({ content: 'timezoneSaveFailed', params: { message: errorMessage(error) }, type: 'alert-error' })
   } finally {
     saving.value = false
   }
 }
 
+// 选中即生效;选的就是当前时区时只收起
+const pick = (zone: string) => {
+  open.value = false
+  if (zone && zone !== state.value?.zone) void save(zone)
+}
+
+const onDocumentClick = (event: MouseEvent) => {
+  if (open.value && rootEl.value && !rootEl.value.contains(event.target as Node)) open.value = false
+}
+
 onMounted(async () => {
+  document.addEventListener('click', onDocumentClick)
   try {
-    apply(await fetchTimezone())
+    state.value = await fetchTimezone()
   } catch (error) {
-    showNotification({ content: 'routingLoadFailed', params: { message: errorMessage(error) }, type: 'alert-error' })
+    showNotification({ content: 'timezoneLoadFailed', params: { message: errorMessage(error) }, type: 'alert-error' })
   } finally {
     loading.value = false
   }
 })
+
+onBeforeUnmount(() => document.removeEventListener('click', onDocumentClick))
 </script>

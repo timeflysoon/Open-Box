@@ -1,10 +1,12 @@
 import type { LANG_MESSAGE } from './en'
 import { dnsFilterTw } from './dns-filter'
 import { dnsUpstreamZhTw } from './dns-upstream'
+import { kernelSettingsZhTw } from './kernel-settings'
 
 const zhTW: LANG_MESSAGE = {
   ...dnsFilterTw,
   ...dnsUpstreamZhTw,
+  ...kernelSettingsZhTw,
   overview: '概覽',
   proxies: '代理',
   rules: '規則',
@@ -75,7 +77,7 @@ const zhTW: LANG_MESSAGE = {
   backupExport: '匯出',
   backupExportHint: '不含面板密碼。',
   backupImport: '匯入',
-  backupImportHint: '選一個匯出的 .json 檔案,或直接把檔案拖到這張卡片上;匯入後重啟核心生效。',
+  backupImportHint: '選一個匯出的 .json 檔案,或直接把檔案拖到這張卡片上。',
   backupDropHint: '放開,匯入這個檔案',
   backupImportConfirmTitle: '匯入備份',
   backupImportConfirm: '匯入「{file}」(匯出於 {exportedAt})?會覆蓋這台路由器上的{parts}。',
@@ -362,7 +364,7 @@ const zhTW: LANG_MESSAGE = {
   obUpdateInstalledChannel: '安裝時通道:{channel}',
   obUpdateAuto: '自動更新',
   obUpdateAutoAt: '每天',
-  obUpdateAutoHint: '到點先探最新版,有新版才升級;按設定的間隔探,一天最多一次。',
+  obUpdateAutoHint: '到點先探最新版,有新版才升級;按設定的間隔探,一天最多一次。鐘點按路由器的時區(下面「時區」裡可改)。',
   obUpdateStage_starting: '正在啟動…',
   obUpdateStage_probing: '正在探測下載通道…',
   obUpdateStage_downloading: '正在下載升級包…',
@@ -834,19 +836,19 @@ const zhTW: LANG_MESSAGE = {
   ipv6ProxyNode: '交給節點',
   ipv6ProxyIpv4: '降為 IPv4',
   // 核心頁 · 系統時區卡片
-  timezoneTitle: '系統時區',
-  timezoneDescription: '路由器的系統時區。訂閱定時更新、自動更新這些排程任務,都按路由器本地時間的鐘點來跑。',
+  timezoneTitle: '時區',
+  timezoneDescription: '路由器的系統時區,和 LuCI「系統 → 時區」是同一個設定。自動更新、訂閱定時更新都按這個時區的鐘點執行。',
   timezoneCurrent: '目前時區',
   timezoneLocalTime: '路由器本地時間',
   timezoneSearchPlaceholder: '依時區名稱或國家 / 地區搜尋',
   timezoneNoMatch: '沒有符合的時區',
   timezoneSave: '套用時區',
-  timezoneSaved: '時區已改為 {zone}',
+  timezoneSaved: '時區已改成 {zone}(UTC{offset}),排程任務按新時區的鐘點執行',
   timezoneUnknown: '未識別',
   ipv6ProxyBypass: '不進核心,直連放行',
   // 核心頁 · TUN 參數卡片
   tunTitle: 'TUN 參數',
-  tunDescription: 'sing-box 虛擬網卡的底層參數。改動寫進檔案,重啟核心後生效;不清楚時保持預設。',
+  tunDescription: '核心 tun 介面的幾個底層參數,一般不用改。',
   tunAutoRedirect: '自動重新導向(auto_redirect)',
   tunAutoRedirectNote: '開著時在入口用 nft 把流量重新導向進核心(預設);關掉退回純 tun 相容模式。依 MAC 放行的終端分流依賴它。',
   tunStack: '協定堆疊',

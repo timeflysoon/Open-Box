@@ -1,23 +1,18 @@
 <template>
   <div class="card bg-base-100 border-base-300/60 border">
     <div class="card-body gap-3 p-4">
-      <div class="flex items-center justify-between gap-2">
-        <div>
+      <div>
+        <div class="flex items-center gap-2">
           <h2 class="text-base font-semibold">{{ $t('ipv6Title') }}</h2>
-          <p class="text-base-content/60 text-xs">{{ $t('ipv6Description') }}</p>
+          <input
+            type="checkbox"
+            class="toggle shrink-0"
+            :checked="profile.ipv6"
+            @change="onToggle"
+          />
         </div>
-        <input
-          type="checkbox"
-          class="toggle shrink-0"
-          :checked="profile.ipv6"
-          @change="onToggle"
-        />
+        <p class="text-base-content/60 text-xs">{{ $t('ipv6Description') }}</p>
       </div>
-
-      <!-- 关闭是默认状态,不该用告警色渲染:两种状态都是普通说明 -->
-      <p class="text-base-content/50 text-xs">
-        {{ profile.ipv6 ? $t('ipv6OnNote') : $t('ipv6OffWarning') }}
-      </p>
       <!-- IPv6 分层:开着时,走代理的目标交给节点还是降为 IPv4(直连的 v6 两种都照常) -->
       <div
         v-if="profile.ipv6"

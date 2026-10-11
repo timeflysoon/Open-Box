@@ -1,10 +1,12 @@
 import type { LANG_MESSAGE } from './en'
 import { dnsFilterZh } from './dns-filter'
 import { dnsUpstreamZh } from './dns-upstream'
+import { kernelSettingsZh } from './kernel-settings'
 
 const zh: LANG_MESSAGE = {
   ...dnsFilterZh,
   ...dnsUpstreamZh,
+  ...kernelSettingsZh,
   overview: '概览',
   proxies: '代理',
   rules: '规则',
@@ -76,7 +78,7 @@ const zh: LANG_MESSAGE = {
   backupExport: '导出',
   backupExportHint: '不含面板密码。',
   backupImport: '导入',
-  backupImportHint: '选一个导出的 .json 文件,或直接把文件拖到这张卡片上;导入后重启内核生效。',
+  backupImportHint: '选一个导出的 .json 文件,或直接把文件拖到这张卡片上。',
   backupDropHint: '松开,导入这个文件',
   backupImportConfirmTitle: '导入备份',
   backupImportConfirm: '导入「{file}」(导出于 {exportedAt})?会覆盖这台路由器上的{parts}。',
@@ -380,7 +382,7 @@ const zh: LANG_MESSAGE = {
   obUpdateInstalledChannel: '安装时通道:{channel}',
   obUpdateAuto: '自动更新',
   obUpdateAutoAt: '每天',
-  obUpdateAutoHint: '到点先探最新版,有新版才升级;按设定的间隔探,一天最多一次。',
+  obUpdateAutoHint: '到点先探最新版,有新版才升级;按设定的间隔探,一天最多一次。钟点按路由器的时区(下面「时区」里可改)。',
   obUpdateStage_starting: '正在启动…',
   obUpdateStage_probing: '正在探测下载通道…',
   obUpdateStage_downloading: '正在下载升级包…',
@@ -852,19 +854,19 @@ const zh: LANG_MESSAGE = {
   ipv6ProxyNode: '交给节点',
   ipv6ProxyIpv4: '降为 IPv4',
   // 内核页 · 系统时区卡片
-  timezoneTitle: '系统时区',
-  timezoneDescription: '路由器的系统时区。订阅定时更新、自动更新这些定时任务,都按路由器本地时间的钟点来跑。',
+  timezoneTitle: '时区',
+  timezoneDescription: '路由器的系统时区,和 LuCI「系统 → 时区」是同一个设置。自动更新、订阅定时更新都按这个时区的钟点执行。',
   timezoneCurrent: '当前时区',
   timezoneLocalTime: '路由器本地时间',
   timezoneSearchPlaceholder: '按时区名或国家 / 地区搜索',
   timezoneNoMatch: '没有匹配的时区',
   timezoneSave: '应用时区',
-  timezoneSaved: '时区已改为 {zone}',
+  timezoneSaved: '时区已改成 {zone}(UTC{offset}),定时任务按新时区的钟点执行',
   timezoneUnknown: '未识别',
   ipv6ProxyBypass: '不进内核,直连放行',
   // 内核页 · TUN 参数卡片
   tunTitle: 'TUN 参数',
-  tunDescription: 'sing-box 虚拟网卡的底层参数。改动写进档案,重启内核后生效;不清楚时保持默认。',
+  tunDescription: '内核 tun 接口的几个底层参数,一般不用改。',
   tunAutoRedirect: '自动重定向(auto_redirect)',
   tunAutoRedirectNote: '开着时在入口用 nft 把流量重定向进内核(默认);关掉退回纯 tun 兼容模式。按 MAC 放行的终端分流依赖它。',
   tunStack: '协议栈',

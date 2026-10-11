@@ -854,6 +854,12 @@ export interface OpenboxServiceStatus {
   core: OpenboxServiceInfo
   panel: OpenboxServiceInfo
   conflicts: OpenboxConflictService[]
+  // 以下几项新版服务端才带(server/api/service.mjs):跑在哪种系统上('openwrt' / 'systemd')、
+  // 发行版信息、CPU 架构、还没重启生效的改动。老服务端没有,界面按没有处理。
+  platform?: string
+  osRelease?: string | Record<string, unknown> | null
+  arch?: string
+  pendingRestart?: { pending: boolean; reasons: string[] }
 }
 
 export type OpenboxServiceAction = 'start' | 'stop' | 'restart' | 'enable' | 'disable'

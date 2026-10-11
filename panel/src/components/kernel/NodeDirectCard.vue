@@ -1,21 +1,18 @@
 <template>
   <div class="card bg-base-100 border-base-300/60 border">
     <div class="card-body gap-3 p-4">
-      <div class="flex items-center justify-between gap-2">
-        <div>
+      <div>
+        <div class="flex items-center gap-2">
           <h2 class="text-base font-semibold">{{ $t('nodeDirectTitle') }}</h2>
-          <p class="text-base-content/60 text-xs">{{ $t('nodeDirectDescription') }}</p>
+          <input
+            type="checkbox"
+            class="toggle shrink-0"
+            :checked="profile.directForNodes !== false"
+            @change="onToggle"
+          />
         </div>
-        <input
-          type="checkbox"
-          class="toggle shrink-0"
-          :checked="profile.directForNodes !== false"
-          @change="onToggle"
-        />
+        <p class="text-base-content/60 text-xs">{{ $t('nodeDirectDescription') }}</p>
       </div>
-      <p class="text-base-content/50 text-xs">
-        {{ profile.directForNodes !== false ? $t('nodeDirectOnNote') : $t('nodeDirectOffNote') }}
-      </p>
     </div>
   </div>
 </template>

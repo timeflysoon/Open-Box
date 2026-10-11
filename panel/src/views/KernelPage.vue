@@ -5,63 +5,73 @@
       :style="padding"
     >
       <div class="flex flex-col gap-2 px-2 md:py-2">
+        <!-- 顶部总卡片:标识、平台、版本、状态、启停、更新都在这一张里 -->
         <KernelServiceCard
           :status="status"
           :kernel-version="kernelVersion"
+          :profile="profile"
+          :patch-profile="patchProfile"
           @refresh="loadStatus"
         />
 
-        <!-- 内核参数:DNS 劫持、直连、IPv6、测速地址。改动写进档案,重启内核后生效。 -->
+        <!-- 内核参数:DNS 劫持、直连、IPv6、测速地址。改动写进档案,重启内核后生效。
+             相邻的设置合成三张大卡片,卡片之间用分隔线隔开。 -->
         <template v-if="profile">
-          <NodeDirectCard
-            :profile="profile"
-            :patch-profile="patchProfile"
-          />
-          <DirectBypassCard
-            :profile="profile"
-            :patch-profile="patchProfile"
-          />
-          <BlockQuicCard
-            :profile="profile"
-            :patch-profile="patchProfile"
-          />
-          <BypassPortsCard
-            :profile="profile"
-            :patch-profile="patchProfile"
-          />
-          <Ipv6Card
-            :profile="profile"
-            :patch-profile="patchProfile"
-          />
-          <TunOptionsCard
-            :profile="profile"
-            :patch-profile="patchProfile"
-          />
-          <TestUrlCard
-            :profile="profile"
-            :patch-profile="patchProfile"
-          />
-          <TrafficRetentionCard
-            :profile="profile"
-            :patch-profile="patchProfile"
-          />
-          <!-- 路由器系统时区:定时任务按路由器本地时间跑 -->
-          <TimezoneCard />
-          <!-- 导出 / 导入:导入后档案换了,重新拉一遍状态和档案 -->
-          <BackupCard
-            :profile="profile"
-            @imported="onImported"
-          />
-          <!-- 导出诊断包:反馈问题用,和备份放一起 -->
-          <DiagnosticsCard />
-        </template>
+          <div class="card bg-base-100 border-base-300/60 border">
+            <div class="kernel-group">
+              <NodeDirectCard
+                :profile="profile"
+                :patch-profile="patchProfile"
+              />
+              <DirectBypassCard
+                :profile="profile"
+                :patch-profile="patchProfile"
+              />
+              <BlockQuicCard
+                :profile="profile"
+                :patch-profile="patchProfile"
+              />
+              <BypassPortsCard
+                :profile="profile"
+                :patch-profile="patchProfile"
+              />
+              <Ipv6Card
+                :profile="profile"
+                :patch-profile="patchProfile"
+              />
+              <TunOptionsCard
+                :profile="profile"
+                :patch-profile="patchProfile"
+              />
+            </div>
+          </div>
 
-        <!-- 程序、内核、Geo 数据统一更新 -->
-        <template v-if="profile">
-          <OpenboxUpdateCard
-            :profile="profile"
-            :patch-profile="patchProfile"
-          />
+          <div class="card bg-base-100 border-base-300/60 border">
+            <div class="kernel-group">
+              <TestUrlCard
+                :profile="profile"
+                :patch-profile="patchProfile"
+              />
+              <TrafficRetentionCard
+                :profile="profile"
+                :patch-profile="patchProfile"
+              />
+              <!-- 路由器系统时区:定时任务按路由器本地时间跑 -->
+              <TimezoneCard />
+            </div>
+          </div>
+
+          <div class="card bg-base-100 border-base-300/60 border">
+            <div class="kernel-group">
+              <!-- 导出 / 导入:导入后档案换了,重新拉一遍状态和档案 -->
+              <BackupCard
+                :profile="profile"
+                @imported="onImported"
+              />
+              <!-- 导出诊断包:反馈问题用,和备份放一起 -->
+              <DiagnosticsCard />
+            </div>
+          </div>
         </template>
       </div>
     </div>
@@ -77,7 +87,6 @@ import NodeDirectCard from '@/components/kernel/NodeDirectCard.vue'
 import DirectBypassCard from '@/components/kernel/DirectBypassCard.vue'
 import BlockQuicCard from '@/components/kernel/BlockQuicCard.vue'
 import BypassPortsCard from '@/components/kernel/BypassPortsCard.vue'
-import OpenboxUpdateCard from '@/components/kernel/OpenboxUpdateCard.vue'
 import BackupCard from '@/components/kernel/BackupCard.vue'
 import TrafficRetentionCard from '@/components/kernel/TrafficRetentionCard.vue'
 import TimezoneCard from '@/components/kernel/TimezoneCard.vue'
@@ -143,3 +152,20 @@ onMounted(async () => {
   await Promise.all([loadStatus(), loadProfile()])
 })
 </script>
+
+<style>
+/* 把相邻的设置卡片拼成一张:去掉各自的外框和底色,中间只留一条分隔线 */
+.kernel-group {
+  display: flex;
+  flex-direction: column;
+}
+.kernel-group > .card {
+  border-width: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+.kernel-group > .card + .card {
+  border-top: 1px solid color-mix(in oklab, currentColor 10%, transparent);
+}
+</style>

@@ -1,15 +1,21 @@
 <template>
-  <div class="card bg-base-100 border-base-300/60 border">
-    <div class="card-body gap-3 p-4 text-sm">
-      <div>
+  <!-- embedded:嵌在顶部总卡片里时不带外框、标题和「当前版本」(版本号在标题行) -->
+  <div :class="embedded ? undefined : 'card bg-base-100 border-base-300/60 border'">
+    <div :class="embedded ? 'flex flex-col gap-3 text-sm' : 'card-body gap-3 p-4 text-sm'">
+      <div v-if="!embedded">
         <h2 class="text-base font-semibold">{{ $t('obUpdateTitle') }}</h2>
         <p class="text-base-content/60 text-xs">{{ $t('obUpdateDescription') }}</p>
       </div>
 
       <!-- 版本一行:当前 / 最新 -->
-      <div class="flex flex-wrap items-center gap-x-4 gap-y-1">
-        <span class="text-base-content/70">{{ $t('obUpdateCurrent') }}:</span>
-        <span class="font-mono">{{ updateInfo?.version || '—' }}</span>
+      <div
+        v-if="!embedded || latest"
+        class="flex flex-wrap items-center gap-x-4 gap-y-1"
+      >
+        <template v-if="!embedded">
+          <span class="text-base-content/70">{{ $t('obUpdateCurrent') }}:</span>
+          <span class="font-mono">{{ updateInfo?.version || '—' }}</span>
+        </template>
         <template v-if="latest">
           <span class="text-base-content/70">{{ $t('obUpdateLatest') }}:</span>
           <span class="font-mono">{{ latest.latest }}</span>
@@ -148,6 +154,7 @@ import { computed, onMounted, ref, watch } from 'vue'
 const props = defineProps<{
   profile: OpenboxProfile
   patchProfile: (patch: Record<string, unknown>) => Promise<OpenboxProfile>
+  embedded?: boolean
 }>()
 
 const latest = ref<{ latest: string; hasUpdate: boolean } | null>(null)

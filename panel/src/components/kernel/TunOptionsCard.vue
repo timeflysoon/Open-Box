@@ -6,63 +6,78 @@
         <p class="text-base-content/60 text-xs">{{ $t('tunDescription') }}</p>
       </div>
 
-      <div class="flex items-center justify-between gap-2">
-        <div>
-          <p class="text-sm">{{ $t('tunAutoRedirect') }}</p>
-          <p class="text-base-content/50 text-xs">{{ $t('tunAutoRedirectNote') }}</p>
-        </div>
-        <input
-          type="checkbox"
-          class="toggle shrink-0"
-          :checked="autoRedirect"
-          @change="onAutoRedirect"
-        />
-      </div>
-
-      <div class="border-base-300/60 flex items-center justify-between gap-2 border-t pt-3">
-        <div>
-          <p class="text-sm">{{ $t('tunStack') }}</p>
-          <p class="text-base-content/50 text-xs">{{ $t(`tunStackNote_${stack}`) }}</p>
-        </div>
-        <select
-          class="select select-sm w-32 shrink-0"
-          :value="stack"
-          @change="onStack"
+      <div>
+        <button
+          type="button"
+          class="btn btn-sm"
+          :aria-expanded="advancedOpen"
+          @click="advancedOpen = !advancedOpen"
         >
-          <option value="mixed">mixed</option>
-          <option value="gvisor">gvisor</option>
-          <option value="system">system</option>
-        </select>
+          <AdjustmentsHorizontalIcon class="h-4 w-4" />
+          {{ $t('tunAdvancedButton') }}
+        </button>
       </div>
 
-      <div class="border-base-300/60 grid gap-3 border-t pt-3 sm:grid-cols-2">
-        <div class="flex min-w-0 flex-col gap-1">
-          <label class="text-xs font-medium">{{ $t('tunMtu') }}</label>
+      <!-- 点「高级设置」才展开:一般不用改 -->
+      <template v-if="advancedOpen">
+        <div class="flex items-center justify-between gap-2">
+          <div>
+            <p class="text-sm">{{ $t('tunAutoRedirect') }}</p>
+            <p class="text-base-content/50 text-xs">{{ $t('tunAutoRedirectNote') }}</p>
+          </div>
           <input
-            v-model="mtuText"
-            type="number"
-            min="0"
-            :max="MTU_MAX"
-            class="input input-sm w-full"
-            placeholder="0"
-            @change="saveNumber('mtu')"
+            type="checkbox"
+            class="toggle shrink-0"
+            :checked="autoRedirect"
+            @change="onAutoRedirect"
           />
-          <p class="text-base-content/50 text-xs">{{ $t('tunMtuHint', { min: MTU_MIN, max: MTU_MAX }) }}</p>
         </div>
-        <div class="flex min-w-0 flex-col gap-1">
-          <label class="text-xs font-medium">{{ $t('tunTcpMss') }}</label>
-          <input
-            v-model="mssText"
-            type="number"
-            min="0"
-            :max="MSS_MAX"
-            class="input input-sm w-full"
-            placeholder="0"
-            @change="saveNumber('tcpMss')"
-          />
-          <p class="text-base-content/50 text-xs">{{ $t('tunTcpMssHint', { min: MSS_MIN, max: MSS_MAX }) }}</p>
+
+        <div class="border-base-300/60 flex items-center justify-between gap-2 border-t pt-3">
+          <div>
+            <p class="text-sm">{{ $t('tunStack') }}</p>
+            <p class="text-base-content/50 text-xs">{{ $t(`tunStackNote_${stack}`) }}</p>
+          </div>
+          <select
+            class="select select-sm w-32 shrink-0"
+            :value="stack"
+            @change="onStack"
+          >
+            <option value="mixed">mixed</option>
+            <option value="gvisor">gvisor</option>
+            <option value="system">system</option>
+          </select>
         </div>
-      </div>
+
+        <div class="border-base-300/60 grid gap-3 border-t pt-3 sm:grid-cols-2">
+          <div class="flex min-w-0 flex-col gap-1">
+            <label class="text-xs font-medium">{{ $t('tunMtu') }}</label>
+            <input
+              v-model="mtuText"
+              type="number"
+              min="0"
+              :max="MTU_MAX"
+              class="input input-sm w-full"
+              placeholder="0"
+              @change="saveNumber('mtu')"
+            />
+            <p class="text-base-content/50 text-xs">{{ $t('tunMtuHint', { min: MTU_MIN, max: MTU_MAX }) }}</p>
+          </div>
+          <div class="flex min-w-0 flex-col gap-1">
+            <label class="text-xs font-medium">{{ $t('tunTcpMss') }}</label>
+            <input
+              v-model="mssText"
+              type="number"
+              min="0"
+              :max="MSS_MAX"
+              class="input input-sm w-full"
+              placeholder="0"
+              @change="saveNumber('tcpMss')"
+            />
+            <p class="text-base-content/50 text-xs">{{ $t('tunTcpMssHint', { min: MSS_MIN, max: MSS_MAX }) }}</p>
+          </div>
+        </div>
+      </template>
     </div>
   </div>
 </template>
@@ -70,6 +85,7 @@
 <script setup lang="ts">
 import type { OpenboxProfile } from '@/api/openbox'
 import { showNotification } from '@/helper/notification'
+import { AdjustmentsHorizontalIcon } from '@heroicons/vue/24/outline'
 import { computed, ref, watch } from 'vue'
 
 const props = defineProps<{
@@ -82,6 +98,9 @@ const MTU_MIN = 1280
 const MTU_MAX = 65535
 const MSS_MIN = 536
 const MSS_MAX = 65495
+
+// 底层参数默认折起来
+const advancedOpen = ref(false)
 
 const tun = computed(() => props.profile.tun ?? {})
 const autoRedirect = computed(() => tun.value.autoRedirect !== false)

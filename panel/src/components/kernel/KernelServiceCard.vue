@@ -1,15 +1,14 @@
 <template>
-  <!-- 外观和下面的测速地址 / IPv6 卡片同一套:同样的描边、同样的 p-4 内边距 -->
+  <!-- 顶部总卡片:标识 / 平台 / 版本 / 状态 / 启停 / 更新 都在这一张里 -->
   <div class="card bg-base-100 border-base-300/60 border">
     <div class="card-body gap-3 p-4 text-sm">
-      <!-- 标题行右边:Open-Box 标识 + 面板版本号 + GitHub,整块是一个链接,新开页签跳到仓库 -->
-      <div class="flex flex-wrap items-center gap-3">
-        <h2 class="text-base font-semibold">{{ $t('kernelServiceTitle') }}</h2>
+      <!-- 标题行:Open-Box 标识 + 面板版本号 + GitHub(整块是链接)、使用教程;右边是需要注意的提示 -->
+      <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
         <a
           href="https://github.com/liandu2024/Open-Box"
           target="_blank"
           rel="noopener noreferrer"
-          class="hover:bg-base-200 ml-auto inline-flex items-center gap-2 rounded-lg px-2 py-1"
+          class="hover:bg-base-200 inline-flex items-center gap-2 rounded-lg px-2 py-1"
           v-tip="$t('openboxGithubHint')"
         >
           <img
@@ -18,17 +17,71 @@
             alt="Open-Box"
           />
           <span class="font-mono text-sm">{{ updateInfo?.version || '—' }}</span>
-          <svg
-            viewBox="0 0 16 16"
-            class="h-4 w-4"
-            fill="currentColor"
-            aria-hidden="true"
-          >
-            <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z" />
-          </svg>
+          <GithubIcon class="h-4 w-4" />
           <span class="text-sm">GitHub</span>
           <ArrowTopRightOnSquareIcon class="text-base-content/50 h-3.5 w-3.5" />
         </a>
+        <a
+          :href="TUTORIAL_URL"
+          target="_blank"
+          rel="noopener noreferrer"
+          class="hover:bg-base-200 inline-flex items-center gap-2 rounded-lg px-2 py-1"
+          v-tip="$t('tutorialHint')"
+        >
+          <svg
+            viewBox="0 0 24 24"
+            class="h-5 w-5"
+            aria-hidden="true"
+          >
+            <rect
+              x="1"
+              y="4.5"
+              width="22"
+              height="15"
+              rx="4.5"
+              fill="#ff0000"
+            />
+            <path
+              d="M10 8.8v6.4l5.4-3.2z"
+              fill="#fff"
+            />
+          </svg>
+          <span class="text-sm">{{ $t('tutorialButton') }}</span>
+        </a>
+        <ExclamationTriangleIcon
+          v-if="warnTip"
+          class="text-warning ml-auto h-5 w-5 shrink-0"
+          v-tip="warnTip"
+        />
+      </div>
+
+      <!-- 平台:本机跑在哪种系统上高亮,另一种只列支持的系统 -->
+      <div
+        v-if="serviceStatus"
+        class="flex flex-wrap gap-3"
+      >
+        <div
+          v-for="p in platformCards"
+          :key="p.id"
+          class="flex min-w-0 flex-1 basis-64 items-center gap-3 rounded-2xl border px-4 py-2"
+          :class="p.current ? 'border-base-300 bg-base-200/70' : 'border-base-300/60'"
+          v-tip="p.hint"
+        >
+          <component
+            :is="p.icon"
+            class="text-base-content/70 h-8 w-8 shrink-0"
+          />
+          <div class="min-w-0">
+            <div class="flex flex-wrap items-baseline gap-x-2">
+              <span class="font-medium">{{ p.title }}</span>
+              <span
+                v-if="p.current && thisDevice"
+                class="text-base-content/70 text-xs"
+              >{{ thisDevice }}</span>
+            </div>
+            <p class="text-base-content/50 text-xs">{{ p.req }}</p>
+          </div>
+        </div>
       </div>
 
       <div
@@ -49,11 +102,58 @@
         </ul>
       </div>
 
-      <div class="flex items-center gap-2">
+      <!-- 内核版本 + sing-box 项目链接 -->
+      <div class="flex flex-wrap items-center gap-x-2 gap-y-1">
         <CpuChipIcon class="text-base-content/60 h-4 w-4 shrink-0" />
         <span class="text-base-content/70">{{ $t('kernelVersionLabel') }}:</span>
-        <span class="font-medium">{{ kernelVersion?.version || $t('kernelVersionUnknown') }}</span>
+        <span class="font-medium">{{ kernelText }}</span>
+        <a
+          href="https://github.com/SagerNet/sing-box"
+          target="_blank"
+          rel="noopener noreferrer"
+          class="hover:bg-base-200 inline-flex items-center gap-1.5 rounded-lg px-2 py-0.5"
+          v-tip="$t('singboxGithubHint')"
+        >
+          <GithubIcon class="h-4 w-4" />
+          <span>{{ $t('singboxGithubLabel') }}</span>
+          <ArrowTopRightOnSquareIcon class="text-base-content/50 h-3.5 w-3.5" />
+        </a>
       </div>
+
+      <!-- Geo 数据:份数、数据日期、数据来源 -->
+      <div
+        v-if="updateInfo?.geoCounts || updateInfo?.geoDate"
+        class="text-base-content/70 flex flex-wrap items-center gap-x-4 gap-y-1"
+      >
+        <span
+          v-if="updateInfo.geoCounts"
+          class="inline-flex items-center gap-1.5"
+        >
+          <MapIcon class="h-4 w-4 shrink-0" />
+          {{ $t('geoSiteCount', { count: updateInfo.geoCounts.geosite }) }}
+        </span>
+        <span
+          v-if="updateInfo.geoCounts"
+          class="inline-flex items-center gap-1.5"
+        >
+          <CircleStackIcon class="h-4 w-4 shrink-0" />
+          {{ $t('geoIpCount', { count: updateInfo.geoCounts.geoip }) }}
+        </span>
+        <span v-if="updateInfo.geoDate">{{ updateInfo.geoDate }}</span>
+        <a
+          href="https://github.com/MetaCubeX/meta-rules-dat"
+          target="_blank"
+          rel="noopener noreferrer"
+          class="hover:bg-base-200 inline-flex items-center gap-1.5 rounded-lg px-2 py-0.5"
+          v-tip="$t('geoGithubHint')"
+        >
+          <GithubIcon class="h-4 w-4" />
+          <span>{{ $t('geoGithubLabel') }}</span>
+          <ArrowTopRightOnSquareIcon class="text-base-content/50 h-3.5 w-3.5" />
+        </a>
+      </div>
+
+      <div class="bg-base-content/10 h-px" />
 
       <!-- 内核 / 面板 / 开机自启三项状态放同一行,标签用全局统一的 StatusBadge -->
       <div class="flex flex-wrap items-center gap-x-4 gap-y-1">
@@ -156,13 +256,25 @@
           {{ $t('kernelActionRestart') }}
         </button>
       </div>
+
+      <!-- Open-Box 更新:通道 / 检查更新 / 自动更新(档案还在加载时先不显示) -->
+      <template v-if="profile && patchProfile">
+        <div class="bg-base-content/10 h-px" />
+        <OpenboxUpdateCard
+          embedded
+          :profile="profile"
+          :patch-profile="patchProfile"
+        />
+      </template>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import type { OpenboxKernelVersion, OpenboxServiceStatus } from '@/api/openbox'
+import type { OpenboxKernelVersion, OpenboxProfile, OpenboxServiceStatus } from '@/api/openbox'
+import GithubIcon from '@/components/common/GithubIcon.vue'
 import StatusBadge from '@/components/common/StatusBadge.vue'
+import OpenboxUpdateCard from '@/components/kernel/OpenboxUpdateCard.vue'
 import {
   isRestartDisabled,
   isStartDisabled,
@@ -173,18 +285,37 @@ import {
 } from '@/composables/kernelService'
 import { refreshUpdateInfo, updateInfo } from '@/composables/openboxUpdate'
 import logoUrl from '@/assets/logo.png'
-import { ArrowPathIcon, ArrowTopRightOnSquareIcon, CpuChipIcon, ExclamationTriangleIcon, PlayIcon, StopIcon } from '@heroicons/vue/24/outline'
-import { onMounted } from 'vue'
+import {
+  ArrowPathIcon,
+  ArrowTopRightOnSquareIcon,
+  CircleStackIcon,
+  ComputerDesktopIcon,
+  CpuChipIcon,
+  ExclamationTriangleIcon,
+  MapIcon,
+  PlayIcon,
+  StopIcon,
+  WifiIcon,
+} from '@heroicons/vue/24/outline'
+import { computed, onMounted } from 'vue'
+import { useI18n } from 'vue-i18n'
 
-// 标题行右边的版本号来自更新状态(同页的更新卡片也会拉;这里没有就自己拉一次)
+// 「使用教程」跳转的地址:上游是一个 YouTube 操作演示列表,这里先指向仓库说明,换成视频列表地址即可
+const TUTORIAL_URL = 'https://github.com/liandu2024/Open-Box#readme'
+
+const { t } = useI18n()
+
+// 标题行右边的版本号、Geo 数据、安装通道都来自更新状态(同卡的更新区也会拉;这里没有就自己拉一次)
 onMounted(() => {
   if (!updateInfo.value) void refreshUpdateInfo()
 })
 
 // status 仍作为 prop 保留给页面传入(刷新时序由页面掌握),卡片本身只读共享状态
-defineProps<{
+const props = defineProps<{
   status: OpenboxServiceStatus | null
   kernelVersion: OpenboxKernelVersion | null
+  profile?: OpenboxProfile | null
+  patchProfile?: (patch: Record<string, unknown>) => Promise<OpenboxProfile>
 }>()
 
 const emit = defineEmits<{
@@ -200,4 +331,61 @@ const runKernelAction = async (action: Parameters<typeof run>[0]) => {
   await run(action)
   emit('refresh')
 }
+
+// 内核版本:新服务端读到的是「1.14.1-xxx」,界面统一写成「sing-box version …」
+const kernelText = computed(() => {
+  const raw = (props.kernelVersion?.ok === false ? '' : props.kernelVersion?.version) || updateInfo.value?.singboxVersion || ''
+  if (!raw) return t('kernelVersionUnknown')
+  return /^sing-box/i.test(raw) ? raw : `sing-box version ${raw}`
+})
+
+// 需要用户注意的事:有冲突的代理工具、或有改动还没重启生效
+const warnTip = computed(() => {
+  if (props.status?.conflicts.length) return t('kernelConflictTitle')
+  if (serviceStatus.value?.pendingRestart?.pending) return t('kernelPendingRestart')
+  return ''
+})
+
+// 本机系统:发行版名 + 版本 + 架构。osRelease 的形状随服务端版本不同,按几种常见写法读
+const osName = computed(() => {
+  const release = serviceStatus.value?.osRelease
+  if (!release) return ''
+  if (typeof release === 'string') return release
+  const pick = (...keys: string[]) => {
+    for (const key of keys) {
+      const value = release[key]
+      if (typeof value === 'string' && value) return value
+    }
+    return ''
+  }
+  const pretty = pick('prettyName', 'PRETTY_NAME', 'DISTRIB_DESCRIPTION')
+  if (pretty) return pretty
+  return [pick('name', 'NAME', 'DISTRIB_ID', 'id', 'ID'), pick('version', 'VERSION_ID', 'DISTRIB_RELEASE', 'versionId')]
+    .filter(Boolean)
+    .join(' ')
+})
+const thisDevice = computed(() => {
+  const arch = serviceStatus.value?.arch || ''
+  const text = [osName.value, arch].filter(Boolean).join(' · ')
+  return text ? t('routerPlatformThisVersion', { version: text }) : ''
+})
+const isSystemd = computed(() => serviceStatus.value?.platform === 'systemd')
+const platformCards = computed(() => [
+  {
+    id: 'openwrt',
+    title: 'OpenWrt',
+    icon: WifiIcon,
+    req: t('routerPlatformReqOpenwrt'),
+    hint: t('routerPlatformHintOpenwrt'),
+    current: !isSystemd.value,
+  },
+  {
+    id: 'linux',
+    title: 'Linux',
+    icon: ComputerDesktopIcon,
+    req: t('routerPlatformReqLinux'),
+    hint: t('routerPlatformHintLinux'),
+    current: isSystemd.value,
+  },
+])
 </script>
