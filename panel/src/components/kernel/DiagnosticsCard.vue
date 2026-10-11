@@ -5,7 +5,16 @@
     <div class="card-body gap-3 p-4">
       <div>
         <h2 class="text-base font-semibold">{{ $t('diagnosticsTitle') }}</h2>
-        <p class="text-base-content/60 text-xs">{{ $t('diagnosticsDescription') }}</p>
+        <!-- 说明里的「GitHub issue」做成指向仓库 issue 页的绿色链接(按文案里出现的位置切开,各语言通用) -->
+        <p class="text-base-content/60 text-xs">
+          {{ descParts[0] }}<a
+            v-if="descParts[1]"
+            href="https://github.com/liandu2024/Open-Box/issues"
+            target="_blank"
+            rel="noopener noreferrer"
+            class="text-success font-medium hover:underline"
+          >{{ descParts[1] }}</a>{{ descParts[2] }}
+        </p>
       </div>
       <div class="flex flex-wrap items-center gap-3">
         <button
@@ -34,7 +43,16 @@
 import { fetchDiagnostics } from '@/api/openbox'
 import { showNotification } from '@/helper/notification'
 import { ArrowDownTrayIcon } from '@heroicons/vue/24/outline'
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
+import { useI18n } from 'vue-i18n'
+
+const { t } = useI18n()
+const LINK_TEXT = 'GitHub issue'
+const descParts = computed(() => {
+  const text = t('diagnosticsDescription')
+  const i = text.indexOf(LINK_TEXT)
+  return i < 0 ? [text, '', ''] : [text.slice(0, i), LINK_TEXT, text.slice(i + LINK_TEXT.length)]
+})
 
 const exporting = ref(false)
 const pad2 = (n: number) => String(n).padStart(2, '0')

@@ -8,13 +8,13 @@
         </div>
         <div
           role="tablist"
-          class="tabs-box tabs tabs-sm shrink-0"
+          class="tabs-box tabs tabs-sm shrink-0 rounded-full"
         >
           <a
             v-for="m in MODES"
             :key="m.value"
             role="tab"
-            class="tab"
+            class="tab rounded-full"
             :class="mode === m.value && 'tab-active'"
             @click="switchMode(m.value)"
           >
