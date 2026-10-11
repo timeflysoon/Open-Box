@@ -183,16 +183,18 @@ const props = defineProps<{ profile: OpenboxProfile | null }>()
 const emit = defineEmits<{ imported: [] }>()
 const { t } = useI18n()
 
-// 导出时可勾可不勾的三块,默认都带
+// 导出时可勾可不勾的四块,默认都带
 const EXPORT_OPTIONS: { key: keyof OpenboxBackupOptions; label: string }[] = [
   { key: 'subscriptions', label: 'backupIncludeSubscriptions' },
+  { key: 'chainProxies', label: 'backupIncludeChainProxies' },
   { key: 'clientRoutes', label: 'backupIncludeClientRoutes' },
   { key: 'servers', label: 'backupIncludeServers' },
 ]
-const include = reactive<OpenboxBackupOptions>({ subscriptions: true, clientRoutes: true, servers: true })
-// 这台路由器上有没有这三块:订阅看订阅列表,终端分流 / 共享网络看档案。没有的置灰、不勾
+const include = reactive<OpenboxBackupOptions>({ subscriptions: true, chainProxies: true, clientRoutes: true, servers: true })
+// 这台路由器上有没有这四块:订阅看订阅列表,链式代理 / 终端分流 / 共享网络看档案。没有的置灰、不勾
 const available = computed<OpenboxBackupOptions>(() => ({
   subscriptions: openboxSubscriptions.value.length > 0,
+  chainProxies: (props.profile?.chainProxies?.length ?? 0) > 0,
   clientRoutes: (props.profile?.clientRoutes?.length ?? 0) > 0,
   servers: (props.profile?.servers?.length ?? 0) > 0,
 }))
@@ -293,6 +295,8 @@ const pendingParts = computed(() => {
   if (Array.isArray(p.subscriptions)) {
     s += t('backupPartsSubscriptions', { subs: p.subscriptions.length, nodes: Array.isArray(p.nodes) ? p.nodes.length : 0 })
   }
+  const chains = p.profile?.chainProxies
+  if (Array.isArray(chains)) s += t('backupPartsChainProxies', { n: chains.length })
   const routes = p.profile?.clientRoutes
   if (Array.isArray(routes)) s += t('backupPartsClientRoutes', { n: routes.length })
   const servers = p.profile?.servers

@@ -23,7 +23,7 @@
         <template v-if="usage && usage.days">
           {{ $t('trafficRetentionUsage', { days: usage.days, size: fmt(usage.bytes), perDay: fmt(usage.perDay) }) }}
           <template v-if="usage.perDay">
-            {{ $t('trafficRetentionForecast', { size: fmt(usage.perDay * 30 * months + (usage.hourPerDay || 0) * (usage.hourKeepDays || 7)) }) }}
+            {{ $t('trafficRetentionForecast', { size: fmt(forecast) }) }}
           </template>
         </template>
         <template v-else>{{ $t('trafficRetentionNoData') }}</template>
@@ -35,7 +35,7 @@
 <script setup lang="ts">
 import { fetchTrafficUsage, type OpenboxProfile, type OpenboxTrafficUsage } from '@/api/openbox'
 import { showNotification } from '@/helper/notification'
-import { onMounted, ref, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 
 const MIN_MONTHS = 1
 const MAX_MONTHS = 36
@@ -49,6 +49,15 @@ const props = defineProps<{
 const monthsOf = (p: OpenboxProfile) => p.traffic?.keepMonths ?? DEFAULT_MONTHS
 const months = ref(monthsOf(props.profile))
 const usage = ref<OpenboxTrafficUsage | null>(null)
+
+// 存满设定时长的预估:超过 collapseAfterDays 的日子按合并后的日增量算(老服务端没有这两个字段就按原来的算法)
+const forecast = computed(() => {
+  const u = usage.value
+  if (!u) return 0
+  const total = 30 * months.value
+  const recent = Math.min(total, u.collapseAfterDays || total)
+  return u.perDay * recent + (u.oldPerDay ?? u.perDay) * (total - recent) + (u.hourPerDay || 0) * (u.hourKeepDays || 7)
+})
 
 watch(() => props.profile, (p) => (months.value = monthsOf(p)))
 

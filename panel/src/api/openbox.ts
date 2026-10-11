@@ -219,6 +219,14 @@ export interface OpenboxProfile {
   chainProxies?: OpenboxChainProxy[]
   // 订阅链接和节点服务器的地址一律直连(默认开)
   directForNodes?: boolean
+  // 直连不进内核(默认开):入口旁路 / 默认放行 / 直连应答放行整套开关;关掉后所有流量进内核,连接页和统计才看得到直连流量
+  directBypass?: boolean
+  // 屏蔽 QUIC(默认开):走代理线路的 UDP 443 拒绝,浏览器退回 TCP;直连的站点不受影响
+  rejectQuic?: boolean
+  // 进内核前放行的端口,写法「21114-21119, 2233」,空 = 不放行。黑名单、白名单各存一份,只有 bypassPortsMode 选中的那份生效
+  bypassPorts?: string
+  bypassPortsWhitelist?: string
+  bypassPortsMode?: 'blacklist' | 'whitelist'
   region: string
   ipv6: boolean
   // IPv6 开着时走代理的目标怎么处理:node 交给节点(默认)/ ipv4 降为 IPv4(走代理的域名不给 AAAA,裸 v6 明确拒绝)
@@ -230,6 +238,8 @@ export interface OpenboxProfile {
   // 测速地址:testUrl 给自动择优组和面板延迟测试用;directTestUrl 只给内置直连用
   testUrl?: string
   directTestUrl?: string
+  // 全局的「可接受状态码」:测速回的状态码在这里面才算通,如 200-399 或 204(用 / 连接多段);空 / * = 不限
+  testExpectedStatus?: string
   // 每日流量这些分析数据留多久(月,1~36)
   traffic?: { keepMonths?: number }
   rulesetDir?: string
@@ -1274,6 +1284,9 @@ export interface OpenboxTrafficUsage {
   perDay: number
   hourPerDay?: number
   hourKeepDays?: number
+  // 超过这么多天的日子只保留当天流量最大的那些访问目标,其余合并成「其他」;oldPerDay 是合并之后每天的增量(新服务端才有)
+  collapseAfterDays?: number
+  oldPerDay?: number
   oldestDay: string
   newestDay: string
 }
@@ -1322,7 +1335,7 @@ export interface OpenboxBackup {
   exportedAt: string
   openboxVersion?: string
   // 导出时勾了哪些可选部分(老文件没有这个字段)
-  includes?: { subscriptions: boolean; clientRoutes: boolean; servers: boolean }
+  includes?: { subscriptions: boolean; chainProxies?: boolean; clientRoutes: boolean; servers: boolean }
   profile: OpenboxProfile
   groups: unknown[]
   subscriptions?: unknown[]
@@ -1333,6 +1346,8 @@ export interface OpenboxBackup {
 }
 export interface OpenboxBackupOptions {
   subscriptions: boolean
+  // 链式代理(老调用方不传按带上算)
+  chainProxies?: boolean
   clientRoutes: boolean
   servers: boolean
 }
@@ -1354,7 +1369,7 @@ export const fetchDiagnostics = () => requestJson<Record<string, unknown>>('/api
 
 export const fetchBackup = (opts: OpenboxBackupOptions) =>
   requestJson<OpenboxBackup>(
-    `/api/openbox/backup?subscriptions=${opts.subscriptions ? 1 : 0}&clientRoutes=${opts.clientRoutes ? 1 : 0}&servers=${opts.servers ? 1 : 0}`,
+    `/api/openbox/backup?subscriptions=${opts.subscriptions ? 1 : 0}&chainProxies=${opts.chainProxies === false ? 0 : 1}&clientRoutes=${opts.clientRoutes ? 1 : 0}&servers=${opts.servers ? 1 : 0}`,
   )
 export const importBackup = (data: OpenboxBackup, subscriptionsMode: OpenboxBackupSubscriptionsMode = 'replace') =>
   requestJson<OpenboxBackupImportResult>(`/api/openbox/backup/import?subscriptions=${subscriptionsMode}`, {

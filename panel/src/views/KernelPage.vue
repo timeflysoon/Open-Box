@@ -17,6 +17,18 @@
             :profile="profile"
             :patch-profile="patchProfile"
           />
+          <DirectBypassCard
+            :profile="profile"
+            :patch-profile="patchProfile"
+          />
+          <BlockQuicCard
+            :profile="profile"
+            :patch-profile="patchProfile"
+          />
+          <BypassPortsCard
+            :profile="profile"
+            :patch-profile="patchProfile"
+          />
           <Ipv6Card
             :profile="profile"
             :patch-profile="patchProfile"
@@ -62,6 +74,9 @@ import type { OpenboxKernelVersion, OpenboxProfile, OpenboxServiceStatus } from 
 import { fetchKernelVersion, fetchProfile, saveProfile } from '@/api/openbox'
 import KernelServiceCard from '@/components/kernel/KernelServiceCard.vue'
 import NodeDirectCard from '@/components/kernel/NodeDirectCard.vue'
+import DirectBypassCard from '@/components/kernel/DirectBypassCard.vue'
+import BlockQuicCard from '@/components/kernel/BlockQuicCard.vue'
+import BypassPortsCard from '@/components/kernel/BypassPortsCard.vue'
 import OpenboxUpdateCard from '@/components/kernel/OpenboxUpdateCard.vue'
 import BackupCard from '@/components/kernel/BackupCard.vue'
 import TrafficRetentionCard from '@/components/kernel/TrafficRetentionCard.vue'
