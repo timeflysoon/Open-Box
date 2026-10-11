@@ -154,18 +154,29 @@ onMounted(async () => {
 </script>
 
 <style>
-/* 把相邻的设置卡片拼成一张:去掉各自的外框和底色,中间只留一条分隔线 */
+/* 把相邻的设置卡片拼成一张:去掉各自的外框、底色、毛玻璃,中间只留一条分隔线。
+   主题(背景图模式)会给所有 .card 强加半透明底和模糊,所以这里要用 !important 压住 */
 .kernel-group {
   display: flex;
   flex-direction: column;
 }
 .kernel-group > .card {
-  border-width: 0;
-  border-radius: 0;
-  background: transparent;
-  box-shadow: none;
+  border-width: 0 !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
 }
 .kernel-group > .card + .card {
-  border-top: 1px solid color-mix(in oklab, currentColor 10%, transparent);
+  border-top: 1px solid color-mix(in oklab, currentColor 10%, transparent) !important;
+}
+/* 这一页的按钮、输入框、下拉统一用胶囊形,和上游一致 */
+.kernel-top .btn,
+.kernel-group .btn,
+.kernel-top .select,
+.kernel-group .select,
+.kernel-group .input {
+  border-radius: 9999px;
 }
 </style>

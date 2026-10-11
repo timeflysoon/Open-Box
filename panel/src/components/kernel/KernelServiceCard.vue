@@ -1,6 +1,6 @@
 <template>
   <!-- 顶部总卡片:标识 / 平台 / 版本 / 状态 / 启停 / 更新 都在这一张里 -->
-  <div class="card bg-base-100 border-base-300/60 border">
+  <div class="kernel-top card bg-base-100 border-base-300/60 border">
     <div class="card-body gap-3 p-4 text-sm">
       <!-- 标题行:Open-Box 标识 + 面板版本号 + GitHub(整块是链接)、使用教程;右边是需要注意的提示 -->
       <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
@@ -63,13 +63,13 @@
         <div
           v-for="p in platformCards"
           :key="p.id"
-          class="flex min-w-0 flex-1 basis-64 items-center gap-3 rounded-2xl border px-4 py-2"
+          class="flex w-96 max-w-full flex-none items-center gap-3 rounded-full border py-2 pr-6 pl-4"
           :class="p.current ? 'border-base-300 bg-base-200/70' : 'border-base-300/60'"
           v-tip="p.hint"
         >
-          <component
-            :is="p.icon"
-            class="text-base-content/70 h-8 w-8 shrink-0"
+          <PlatformIcon
+            :name="p.id"
+            class="h-9 w-9 shrink-0"
           />
           <div class="min-w-0">
             <div class="flex flex-wrap items-baseline gap-x-2">
@@ -275,6 +275,7 @@ import type { OpenboxKernelVersion, OpenboxProfile, OpenboxServiceStatus } from 
 import GithubIcon from '@/components/common/GithubIcon.vue'
 import StatusBadge from '@/components/common/StatusBadge.vue'
 import OpenboxUpdateCard from '@/components/kernel/OpenboxUpdateCard.vue'
+import PlatformIcon from '@/components/kernel/PlatformIcon.vue'
 import {
   isRestartDisabled,
   isStartDisabled,
@@ -289,13 +290,11 @@ import {
   ArrowPathIcon,
   ArrowTopRightOnSquareIcon,
   CircleStackIcon,
-  ComputerDesktopIcon,
   CpuChipIcon,
   ExclamationTriangleIcon,
   MapIcon,
   PlayIcon,
   StopIcon,
-  WifiIcon,
 } from '@heroicons/vue/24/outline'
 import { computed, onMounted } from 'vue'
 import { useI18n } from 'vue-i18n'
@@ -372,17 +371,15 @@ const thisDevice = computed(() => {
 const isSystemd = computed(() => serviceStatus.value?.platform === 'systemd')
 const platformCards = computed(() => [
   {
-    id: 'openwrt',
+    id: 'openwrt' as const,
     title: 'OpenWrt',
-    icon: WifiIcon,
     req: t('routerPlatformReqOpenwrt'),
     hint: t('routerPlatformHintOpenwrt'),
     current: !isSystemd.value,
   },
   {
-    id: 'linux',
+    id: 'linux' as const,
     title: 'Linux',
-    icon: ComputerDesktopIcon,
     req: t('routerPlatformReqLinux'),
     hint: t('routerPlatformHintLinux'),
     current: isSystemd.value,

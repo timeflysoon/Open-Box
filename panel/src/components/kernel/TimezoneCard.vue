@@ -18,7 +18,7 @@
         >
           <button
             type="button"
-            class="input input-sm flex h-10 w-full items-center justify-between gap-2 text-left"
+            class="input input-sm flex h-10 w-full items-center justify-between gap-2 rounded-full px-4 text-left"
             :disabled="saving"
             :aria-expanded="open"
             @click="toggle"
@@ -35,7 +35,7 @@
           </button>
           <div
             v-if="open"
-            class="bg-base-100 border-base-300 absolute z-30 mt-1 w-full rounded-lg border shadow-lg"
+            class="bg-base-100 border-base-300 absolute z-30 mt-1 w-full overflow-hidden rounded-2xl border shadow-lg"
           >
             <div class="p-2">
               <input
