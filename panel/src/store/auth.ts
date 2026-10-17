@@ -9,7 +9,6 @@ export const PASSWORD_TOO_SHORT_CODE = 'PASSWORD_TOO_SHORT'
 
 const AUTH_STATUS_API_URL = '/api/auth/status'
 const AUTH_LOGIN_API_URL = '/api/auth/login'
-const AUTH_LOGOUT_API_URL = '/api/auth/logout'
 const AUTH_SETUP_API_URL = '/api/auth/setup'
 const AUTH_CHANGE_PASSWORD_API_URL = '/api/auth/change-password'
 
@@ -108,9 +107,6 @@ const getAuthFlowHash = (routeName: ROUTE_NAME, redirectPath?: string) => {
 
   return `#/${routeName}${params.size ? `?${params.toString()}` : ''}`
 }
-
-export const getLoginHash = (redirectPath?: string) => getAuthFlowHash(ROUTE_NAME.login, redirectPath)
-export const getSetupHash = (redirectPath?: string) => getAuthFlowHash(ROUTE_NAME.setup, redirectPath)
 
 const redirectToAuthFlow = (routeName: ROUTE_NAME, redirectPath: string) => {
   const nextHash = getAuthFlowHash(routeName, redirectPath)
@@ -273,24 +269,6 @@ export const loginWithAccessPassword = async (password: string) => {
   return {
     ok: true as const,
   }
-}
-
-export const logoutAccessPassword = async () => {
-  try {
-    await fetch(AUTH_LOGOUT_API_URL, {
-      method: 'POST',
-      credentials: 'same-origin',
-    })
-  } catch (error) {
-    console.warn('Failed to logout access password session', error)
-  }
-
-  return fetchServerAuthStatus().catch(() =>
-    applyServerAuthStatus({
-      enabled: true,
-      authenticated: false,
-    }),
-  )
 }
 
 export type PasswordFormFailureCode =

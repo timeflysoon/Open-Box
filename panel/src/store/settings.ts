@@ -86,8 +86,6 @@ export const IPInfoAPI = useStorage('config/geoip-info-api', IP_INFO_API.IPSB)
 export const autoDisconnectIdleUDP = useStorage('config/auto-disconnect-idle-udp', false)
 export const autoDisconnectIdleUDPTime = useStorage('config/auto-disconnect-idle-udp-time', 300)
 
-// overview
-export const autoIPCheck = useStorage('config/auto-ip-check', true)
 export const autoConnectionCheck = useStorage('config/auto-connection-check', true)
 const defaultOverviewCardOrder: { card: OVERVIEW_CARD; visible: boolean }[] = [
   {
@@ -188,14 +186,7 @@ export const providerProxyCategoryFeatureEnabled = useStorage(
   'config/provider-proxy-category-feature-enabled',
   true,
 )
-export const providerProxyCategoryWildcard = useStorage(
-  'config/provider-proxy-category-wildcard',
-  '',
-)
-export const providerProxyCategoryEnabled = useStorage(
-  'config/provider-proxy-category-enabled',
-  false,
-)
+
 export const providerProxyCategoryWildcardMap = useStorage<Record<string, string>>(
   'config/provider-proxy-category-wildcard-map',
   {},
@@ -259,14 +250,6 @@ export const sourceIPLabelList = useStorage<SourceIPLabel[]>('config/source-ip-l
 
 // logs
 export const logSearchHistory = useStorage<string[]>('config/log-search-history', [])
-
-// settings visibility
-// 使用扁平结构，key 格式为 "大设置项.小设置项" 或 "大设置项"（仅大设置项）
-// 默认所有项都可见，只有隐藏的项才会记录在此对象中
-export const hiddenSettingsItems = useStorage<Record<string, boolean>>(
-  'config/hidden-settings-items',
-  {},
-)
 
 // settings menu order
 // 存储设置菜单项的顺序

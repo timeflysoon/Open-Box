@@ -86,7 +86,6 @@ export const GLOBE_ICONS = [
   'globe:earth-europe',
   'globe:earth-americas',
 ] as const
-export type GlobeIcon = (typeof GLOBE_ICONS)[number]
 
 // 大小写都认:值是存在数据库里的,历史记录里可能有大写的(早期服务端把图标一律
 // 转成大写,把 globe:asia 变成了 GLOBE:ASIA)。
