@@ -1,9 +1,8 @@
 // 文案对齐上游 v0.1.337(中 / 繁 / 英),并入原先拆在 dns-filter / dns-page / client-app-page 等文件里的补充文案。
-// 同名键以上游为准;文件末尾是上游已改名或移除、但 main 界面代码仍在用的键。
+// 键名与键值和上游 panel/dist 逐键一致,不另设 main 自有键。
 import type { LANG_MESSAGE } from './en'
 
-// 简体多出几个英文还没有的自有键,所以在 LANG_MESSAGE 之外放开索引
-const zh: Record<string, string> & LANG_MESSAGE = {
+const zh: LANG_MESSAGE = {
   // ===== 上游 v0.1.337 文案(取自上游 panel/dist,逐键与上游一致)=====
   cfTitle: '内容过滤',
   cfDescription:
@@ -1998,66 +1997,6 @@ const zh: Record<string, string> & LANG_MESSAGE = {
   outboundPickerTestOne: '测速',
   outboundPickerTestGroupNow: '测速该组当前选中的节点',
 
-  // ===== main 自有键:上游已改名或移除,但 main 的界面代码仍在用 =====
-  dfApplying: '正在重启内核…',
-  kernelPendingRestart: '有改动还没生效,重启内核后应用',
-  backupImportedNeedRestart: '导入成功,重启内核生效',
-  splitOverviewPage: '分离概览页',
-  testQueuedTip: '{name}\n排队中,前面还有测速在跑',
-  siteLatency: '站点延迟',
-  testSitesUrlPlaceholder: '地址',
-  testFailedTip: '{name}\n测速超时',
-  obUpdateTitle: 'Open-Box 更新',
-  failoverThreshold: '连续失败轮数',
-  failoverThresholdHint:
-    '当前页签连续这么多轮确认没有任何可用节点,才转移到下一个候选;一轮没测完、探测服务报错都不算失败',
-  failoverUnitRound: '轮',
-  subscriptionSavedNeedRestart: '保存成功,重启内核生效',
-  subscriptionRefreshedNeedRestart: '刷新成功,重启内核生效',
-  timezoneUnknown: '未识别',
-  tunMtuInvalid: 'MTU 要填 0(默认)或 {min} - {max} 的整数',
-  tunTcpMssInvalid: 'MSS 要填 0(不钳制)或 {min} - {max} 的整数',
-  tunSaved: 'TUN 参数已保存,重启内核后生效。',
-  chainEditTitle: '修改链式代理',
-  chainEmpty: '还没有链式代理。',
-  chainNameRequired: '请填写链式代理的名称',
-  chainLinkRequired: '请填写节点内容',
-  chainSaved: '链式代理已保存。',
-  chainDeleteTitle: '删除链式代理',
-  chainDeleteConfirm: '确定删除链式代理「{name}」?按名字引用它的节点组成员或分流出口需要另选。',
-  chainTestFailed: '不通:{message}',
-  chainTestVia: '经上游 {via}',
-  chainIpResult: '出口 IP {ip} · {info}',
-  chainIpFailed: 'IP 信息获取失败:{message}',
-  routeStartSourceTitle: '测试来源',
-  routeDnsRuleDetail: '规则详情',
-  routeDnsRecords: '解析记录',
-  routeEntryBypassConfigured: '入口旁路已配置:{sets}',
-  routeEntryReason: '原因',
-  routeEntryInboundDiff: '入站差异',
-  routeTermEvidence: '转发证据',
-  routeRuleDetail: '规则详情',
-  subShareEmpty: '暂无订阅分享，点击右上角“添加”创建',
-  subShareToggle: '启用/停用',
-  subShareRegenerate: '重新生成',
-  subShareRenew: '重新生成链接(旧链接立即失效)',
-  subShareRenewHint: '保存后生成新的地址和二维码',
-  subShareDeleteConfirm: '确定删除“{name}”？',
-  clientAppLoadFailed: '加载失败:{message}',
-  clientAppSaved: '已保存;App 下次同步后生效。',
-  clientAppResetConfirm: '恢复默认三组?自定义的分组会被覆盖。',
-  clientAppErrTooMany: '最多 {n} 个分组',
-  clientAppErrDefault: '必须有且只有一个默认组',
-  clientAppErrName: '分组「{id}」名称不能为空',
-  clientAppErrRegionCode: '地区代码无效:{value}',
-  clientAppErrOutside: '分组「{id}」在这些地区之外使用,至少要列一个地区',
-  clientAppErrRegionDup: '地区 {region} 同时出现在「{a}」和「{b}」',
-  clientAppServerIconDefault: '默认(Open-Box 标志)',
-  clientSystemDnsSaveFailed: '保存失败:{message}',
-  clientAppImportTooMany:
-    '共 {count} 条,超过这一组还能导入的 {max} 条;请改用「规则集链接」引用这个网址。',
-  subscriptionEmpty: '还没有订阅。',
-  clientAppRegionsHintOutside: 'App 定位不在这些地区时自动选这一组;在 App 里也能手动选。',
 }
 
 export default zh

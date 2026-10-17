@@ -217,7 +217,6 @@
           :state="ruleMatch.state"
           :badge="ruleMatch.badge"
           :badge-tone="ruleMatch.tone"
-          :details-title="$t('routeRuleDetail')"
         >
           <template v-if="!rule || ruleError">
             <span class="text-base-content/50 text-xs">{{ ruleError ? '—' : $t('routeCmpWaiting') }}</span>
@@ -298,7 +297,6 @@
           :state="actualRule.state"
           :badge="actualRule.badge"
           :badge-tone="actualRule.tone"
-          :details-title="$t('routeRuleDetail')"
         >
           <template v-if="!hasResult || actualError">
             <span class="text-base-content/50 text-xs">{{ placeholderText }}</span>
@@ -354,7 +352,6 @@
           :state="ruleEntry.state"
           :badge="rule ? $t('routeEntryConfigPredicted') : undefined"
           badge-tone="muted"
-          :details-title="$t('routeEntryReason')"
         >
           <template v-if="!rule || ruleError">
             <span class="text-base-content/50 text-xs">{{ ruleError ? '—' : $t('routeCmpWaiting') }}</span>
@@ -378,7 +375,6 @@
           :state="actualEntry.state"
           :badge="actualEntry.badge"
           :badge-tone="actualEntry.tone"
-          :details-title="mode === 'terminal' ? $t('routeTermEvidence') : $t('routeEntryInboundDiff')"
         >
           <template v-if="!hasResult || actualError">
             <span class="text-base-content/50 text-xs">{{ placeholderText }}</span>
@@ -415,7 +411,6 @@
           :state="ruleDns.state"
           :badge="ruleDns.badge"
           :badge-tone="ruleDns.tone"
-          :details-title="$t('routeDnsRuleDetail')"
         >
           <template v-if="!rule || ruleError">
             <span class="text-base-content/50 text-xs">{{ ruleError ? '—' : $t('routeCmpWaiting') }}</span>
@@ -471,7 +466,6 @@
           :state="actualDns.state"
           :badge="actualDns.badge"
           :badge-tone="actualDns.tone"
-          :details-title="$t('routeDnsRecords')"
           details-inline
         >
           <template v-if="!hasResult || actualError">
@@ -610,7 +604,6 @@
           :state="termBlock ? 'pending' : 'ok'"
           :badge="kindText"
           badge-tone="muted"
-          :details-title="$t('routeStartSourceTitle')"
           first
         >
           <!-- 设备不具备模拟条件 / 虚拟终端没建起来:在这一站(测试来源)说清楚,并给出改用内核诊断的按钮,不自动退回 -->
@@ -950,8 +943,8 @@ const ruleEntry = computed(() => {
   }
   const sets = f.nativeBypass.sets
   const hit = targetKind.value === 'domain' ? '' : listOf((rule.value.matched?.rule as Record<string, unknown> | undefined)?.rule_set).find((s) => sets.includes(s)) || ''
-  if (hit) return { state: 'ok' as RouteStageState, value: t('routeEntryBypassHit', { set: hit }), sub: t('routeEntryBypassConfigured', { sets: sets.join(', ') }), detail: t('ruleLookupFirstLayerBypassOn', { sets: sets.join(', '), via: f.nativeBypass.via === 'route' ? t('ruleLookupFirstLayerViaRoute') : 'nft' }) }
-  return { state: 'pending' as RouteStageState, value: t('routeEntryBypassUndetermined'), sub: t('routeEntryBypassConfigured', { sets: sets.join(', ') }), detail: t('routeEntryBypassUndeterminedDetail') }
+  if (hit) return { state: 'ok' as RouteStageState, value: t('routeEntryBypassHit', { set: hit }), sub: '', detail: t('ruleLookupFirstLayerBypassOn', { sets: sets.join(', '), via: f.nativeBypass.via === 'route' ? t('ruleLookupFirstLayerViaRoute') : 'nft' }) }
+  return { state: 'pending' as RouteStageState, value: t('routeEntryBypassUndetermined'), sub: '', detail: t('routeEntryBypassUndeterminedDetail') }
 })
 const ruleMatch = computed<{ state: RouteStageState; badge?: string; tone: Tone }>(() => {
   const r = rule.value

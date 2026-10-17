@@ -37,7 +37,7 @@
         <TextInput
           class="min-w-0 flex-1"
           v-model="site.url"
-          :placeholder="$t('testSitesUrlPlaceholder')"
+          :placeholder="$t('testSiteUrlPlaceholder')"
           :clearable="true"
         />
       </div>

@@ -112,7 +112,7 @@
             </span>
           </div>
           <p class="text-base-content/50 text-xs">
-            {{ $t(form.regionMatch === 'outside' ? 'clientAppRegionsHintOutside' : 'shareRegionsRegionsHint') }}
+            {{ $t(form.regionMatch === 'outside' ? 'shareRegionsRegionsHintOutside' : 'shareRegionsRegionsHint') }}
           </p>
         </div>
 
@@ -618,12 +618,12 @@ const submit = () => {
   const name = f.name.trim()
   if (!name) {
     tab.value = 'name'
-    showNotification({ content: 'clientAppErrName', params: { id: f.id }, type: 'alert-error' })
+    showNotification({ content: 'shareRegionsErrName', type: 'alert-error' })
     return
   }
   if (f.regionMatch === 'outside' && !f.regions.length) {
     tab.value = 'name'
-    showNotification({ content: 'clientAppErrOutside', params: { id: f.id }, type: 'alert-error' })
+    showNotification({ content: 'shareRegionsErrOutsideEmpty', type: 'alert-error' })
     return
   }
   if (inCnOf(f) && [f.dns.proxy, ...f.dns.proxyExtras.map((x) => x.server)].includes(WAN_UPSTREAM)) {

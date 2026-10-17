@@ -1,5 +1,5 @@
 // 文案对齐上游 v0.1.337(中 / 繁 / 英),并入原先拆在 dns-filter / dns-page / client-app-page 等文件里的补充文案。
-// 同名键以上游为准;文件末尾是上游已改名或移除、但 main 界面代码仍在用的键。
+// 键名与键值和上游 panel/dist 逐键一致,不另设 main 自有键。
 const en = {
   // ===== 上游 v0.1.337 文案(取自上游 panel/dist,逐键与上游一致)=====
   cfTitle: 'Content filtering',
@@ -2117,66 +2117,6 @@ const en = {
   outboundPickerTestOne: 'Test latency',
   outboundPickerTestGroupNow: "Test the group's current node",
 
-  // ===== main 自有键:上游已改名或移除,但 main 的界面代码仍在用 =====
-  dfApplying: 'Restarting the kernel…',
-  backupImportedNeedRestart: 'Imported. Restart the core to apply.',
-  splitOverviewPage: 'Split overview page',
-  testQueuedTip: '{name}\nQueued, other latency tests are running',
-  siteLatency: 'Site latency',
-  testSitesUrlPlaceholder: 'URL',
-  testFailedTip: '{name}\nTest failed',
-  obUpdateTitle: 'Open-Box Update',
-  failoverThreshold: 'Failed rounds',
-  failoverThresholdHint:
-    'Only after the current lane is confirmed to have no usable node for this many consecutive rounds does traffic move to the next candidate; unfinished rounds and probe-service errors do not count',
-  failoverUnitRound: 'rounds',
-  subscriptionSavedNeedRestart: 'Saved; restart the core to apply',
-  subscriptionRefreshedNeedRestart: 'Refreshed; restart the core to apply',
-  timezoneUnknown: 'Unrecognized',
-  tunMtuInvalid: 'MTU must be 0 (default) or an integer between {min} and {max}',
-  tunTcpMssInvalid: 'MSS must be 0 (off) or an integer between {min} and {max}',
-  tunSaved: 'TUN options saved; restart the kernel to apply.',
-  chainEditTitle: 'Edit chain proxy',
-  chainEmpty: 'No chain proxies yet.',
-  chainNameRequired: 'Enter a name for the chain proxy',
-  chainLinkRequired: 'Enter the node content',
-  chainSaved: 'Chain proxies saved.',
-  chainDeleteTitle: 'Delete chain proxy',
-  chainDeleteConfirm:
-    'Delete chain proxy "{name}"? Group members or routing exits that refer to it by name will need another target.',
-  chainTestFailed: 'Failed: {message}',
-  chainTestVia: 'via upstream {via}',
-  chainIpResult: 'Exit IP {ip} · {info}',
-  chainIpFailed: 'IP info failed: {message}',
-  routeStartSourceTitle: 'Test origin',
-  routeDnsRuleDetail: 'Rule details',
-  routeDnsRecords: 'Records',
-  routeEntryBypassConfigured: 'Entry bypass configured: {sets}',
-  routeEntryReason: 'Reason',
-  routeEntryInboundDiff: 'Inbound difference',
-  routeTermEvidence: 'Forwarding evidence',
-  routeRuleDetail: 'Rule details',
-  subShareEmpty: 'No shares yet. Click "Add" in the corner to create one.',
-  subShareToggle: 'Enable / disable',
-  subShareRegenerate: 'Regenerate',
-  subShareRenew: 'Regenerate the link (the old link stops working immediately)',
-  subShareRenewHint: 'A new address and QR code will be generated after saving',
-  subShareDeleteConfirm: 'Delete "{name}"?',
-  clientAppLoadFailed: 'Failed to load: {message}',
-  clientAppSaved: 'Saved; the app picks it up on its next sync.',
-  clientSystemDnsSaveFailed: 'Save failed: {message}',
-  clientAppResetConfirm:
-    'Restore the three default groups? Your custom groups will be overwritten.',
-  clientAppErrTooMany: 'At most {n} groups',
-  clientAppErrDefault: 'Exactly one default group is required',
-  clientAppErrName: 'Group "{id}" needs a name',
-  clientAppErrRegionCode: 'Invalid region code: {value}',
-  clientAppErrOutside: 'Group "{id}" is used outside its regions, so it needs at least one region',
-  clientAppErrRegionDup: 'Region {region} is in both "{a}" and "{b}"',
-  clientAppServerIconDefault: 'Open-Box logo',
-  subscriptionEmpty: 'No subscriptions yet.',
-  clientAppRegionsHintOutside:
-    'The app picks this group automatically when it is located outside these regions; you can also pick it manually in the app.',
 }
 
 export type LANG_MESSAGE = typeof en

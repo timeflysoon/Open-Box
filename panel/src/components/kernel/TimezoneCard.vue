@@ -28,7 +28,7 @@
               <span
                 class="min-w-0 flex-1 truncate text-left"
                 :class="{ 'text-base-content/40': !state.zone }"
-              >{{ state.zone || $t('timezoneUnknown') }}</span>
+              >{{ state.zone || $t('timezoneLoading') }}</span>
               <span
                 v-if="state.offset"
                 class="text-base-content/50 shrink-0"

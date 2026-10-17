@@ -2,11 +2,6 @@
   <!-- embedded:嵌在顶部总卡片里时不带外框、标题和「当前版本」(版本号在标题行) -->
   <div :class="embedded ? undefined : 'card bg-base-100 border-base-300/60 border'">
     <div :class="embedded ? 'flex flex-col gap-3 text-sm' : 'card-body gap-3 p-4 text-sm'">
-      <div v-if="!embedded">
-        <h2 class="text-base font-semibold">{{ $t('obUpdateTitle') }}</h2>
-        <p class="text-base-content/60 text-xs">{{ $t('obUpdateDescription') }}</p>
-      </div>
-
       <!-- 一行:[通道] [检查更新] 最新版本 vX [已是最新] 安装时通道。检查更新探到新版就弹确认框
            (带更新日志),点「确定更新」才真正升级;升级进行中按钮变成「查看进度」。 -->
       <div class="flex flex-wrap items-center gap-2">

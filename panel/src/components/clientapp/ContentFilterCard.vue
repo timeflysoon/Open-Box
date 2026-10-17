@@ -36,7 +36,7 @@
         v-if="loading"
         class="text-base-content/60 text-xs"
       >
-        {{ $t('loading') }}
+        {{ $t('dfLoading') }}
       </p>
       <div
         v-else-if="list.sets.length"

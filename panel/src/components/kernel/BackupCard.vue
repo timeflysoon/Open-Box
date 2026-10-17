@@ -216,7 +216,7 @@ onMounted(() => {
     const raw = sessionStorage.getItem(IMPORTED_FLAG)
     if (raw) {
       sessionStorage.removeItem(IMPORTED_FLAG)
-      let toast: DoneToast = { content: 'backupImportedNeedRestart', params: {} }
+      let toast: DoneToast = { content: 'backupImportedDone', params: {} }
       try {
         const parsed = JSON.parse(raw) as Partial<DoneToast>
         if (parsed && typeof parsed.content === 'string') toast = { content: parsed.content, params: parsed.params || {} }
@@ -362,7 +362,7 @@ const confirmImport = async () => {
       ? { content: 'backupImportedRefreshFailed', params: { n: String(refreshed), failed: String(failed) } }
       : refreshed
         ? { content: 'backupImportedRefreshed', params: { n: String(refreshed) } }
-        : { content: 'backupImportedNeedRestart', params: {} }
+        : { content: 'backupImportedDone', params: {} }
     showConfirm.value = false
     pending.value = null
     void loadOpenboxSubscriptions()

@@ -9,7 +9,6 @@ import {
   isSingBox,
   selectProxyAPI,
 } from '@/api'
-import { fetchNodeLatencyQueue } from '@/api/openbox'
 import { failoverDisplayName, failoverMembersOf, isFailoverGroup, isFailoverInternalTag } from '@/store/openboxFailover'
 import { iconUrlFor } from '@/helper/iconUrl'
 import {
@@ -570,30 +569,11 @@ const getNameForNotification = (name: string, url: string) => {
   return shown
 }
 
-// 手动测速前问一下内核的测速排队:前面有测速在跑 / 在排队就提示「已排队」。
-// 不等它、不挡测速;接口拿不到(内核没跑 / 老后端)就当不忙
-const notifyIfQueued = async (displayName: string, url: string) => {
-  try {
-    const { busy } = await fetchNodeLatencyQueue()
-    if (!busy) return
-    showNotification({
-      content: 'testQueuedTip',
-      key: `testQueuedTip${displayName}`,
-      params: { name: getNameForNotification(displayName, url) },
-      type: 'alert-info',
-      timeout: 3000,
-    })
-  } catch {
-    // 当不忙
-  }
-}
-
 export const proxyLatencyTest = async (
   proxyName: string,
   url = speedtestUrlWithDefault.value,
   timeout = speedtestTimeout.value,
 ) => {
-  void notifyIfQueued(proxyName, url)
   const res = await latencyTestForSingle(proxyName, url, timeout)
   await fetchProxies()
 
@@ -605,15 +585,6 @@ export const proxyLatencyTest = async (
     void syncLatencyHistory()
   }
 
-  if (res.status !== 200) {
-    showNotification({
-      content: 'testFailedTip',
-      params: {
-        name: getNameForNotification(proxyName, url),
-      },
-      type: 'alert-error',
-    })
-  }
 }
 
 const setHistory = (proxyName: string, delay: number) => {
@@ -641,7 +612,6 @@ const testLatencyOneByOneWithTip = async (
   let testDone = 0
   let testFailed = 0
 
-  void notifyIfQueued(displayName, url)
   await Promise.allSettled(
     nodes.map((name) =>
       limiter(async () => {
@@ -711,7 +681,6 @@ export const proxyNodesLatencyTest = async (
 const failoverGroupLatencyTest = async (proxyGroupName: string) => {
   const url = getTestUrl(proxyGroupName)
   const timeout = Math.max(5000, speedtestTimeout.value)
-  void notifyIfQueued(proxyGroupName, url)
   const members = failoverMembersOf(proxyGroupName, proxyMap.value[proxyGroupName]?.all ?? [])
   const nodes = new Set<string>()
   await Promise.allSettled(
@@ -767,7 +736,6 @@ export const proxyGroupLatencyTest = async (proxyGroupName: string) => {
   }
 
   const timeout = Math.max(5000, speedtestTimeout.value)
-  void notifyIfQueued(proxyGroupName, url)
 
   if (IPv6test.value) {
     try {

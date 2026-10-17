@@ -335,7 +335,7 @@ const kernelText = computed(() => {
 // 需要用户注意的事:有冲突的代理工具、或有改动还没重启生效
 const warnTip = computed(() => {
   if (props.status?.conflicts.length) return t('kernelConflictTitle')
-  if (serviceStatus.value?.pendingRestart?.pending) return t('kernelPendingRestart')
+  if (serviceStatus.value?.pendingRestart?.pending) return t('restartPendingToastPlain')
   return ''
 })
 

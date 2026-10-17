@@ -183,7 +183,7 @@ onMounted(async () => {
     const { data } = await getConfigsAPI()
     systemDns.value = (data as unknown as Record<string, unknown>).clientSystemDns !== false
   } catch (error) {
-    showNotification({ content: 'clientAppLoadFailed', params: { message: errorMessage(error) } })
+    showNotification({ content: 'clientConfigLoadFailed', params: { message: errorMessage(error) } })
   } finally {
     systemDnsBusy.value = false
   }
@@ -199,7 +199,7 @@ const setSystemDns = async (event: Event) => {
   } catch (error) {
     input.checked = systemDns.value
     showNotification({
-      content: 'clientSystemDnsSaveFailed',
+      content: 'routingSaveFailed',
       params: { message: errorMessage(error) },
     })
   } finally {
@@ -244,7 +244,7 @@ const load = async () => {
     issue.value = await fetchClientConfig()
   } catch (error) {
     showNotification({
-      content: 'clientAppLoadFailed',
+      content: 'clientConfigLoadFailed',
       params: { message: errorMessage(error) },
       type: 'alert-error',
     })

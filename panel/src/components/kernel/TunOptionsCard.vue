@@ -108,7 +108,7 @@ const errorMessage = (error: unknown) => (error instanceof Error ? error.message
 const save = async (patch: Record<string, unknown>) => {
   try {
     await props.patchProfile({ tun: patch })
-    showNotification({ content: 'tunSaved', type: 'alert-success' })
+    showNotification({ content: 'restartPendingToastPlain', type: 'alert-success' })
   } catch (error) {
     showNotification({ content: 'routingSaveFailed', params: { message: errorMessage(error) }, type: 'alert-error' })
   }
@@ -121,7 +121,6 @@ const saveNumber = async (key: 'mtu' | 'tcpMss') => {
   const value = raw === '' ? 0 : Number(raw)
   const [min, max] = key === 'mtu' ? [MTU_MIN, MTU_MAX] : [MSS_MIN, MSS_MAX]
   if (!(value === 0 || (Number.isInteger(value) && value >= min && value <= max))) {
-    showNotification({ content: key === 'mtu' ? 'tunMtuInvalid' : 'tunTcpMssInvalid', params: { min: String(min), max: String(max) }, type: 'alert-error' })
     mtuText.value = String(tun.value.mtu ?? 0)
     mssText.value = String(tun.value.tcpMss ?? 0)
     return

@@ -17,7 +17,6 @@
               globes
               brands
               icon-only
-              :placeholder="$t('clientAppServerIconDefault')"
               :placeholder-flag="defaultIcon"
               @update:model-value="onIcon"
             />

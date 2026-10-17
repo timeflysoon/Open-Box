@@ -103,7 +103,7 @@ const patchProfile = async (patch: Record<string, unknown>) => {
 const apply = async (update: boolean, listId = '') => {
   busy.value = true
   showNotification({
-    content: update ? 'dfUpdating' : 'dfApplying',
+    content: 'dfUpdating',
     key: 'dns-settings-apply',
     type: 'alert-info',
     timeout: 0,

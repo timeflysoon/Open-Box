@@ -1,8 +1,8 @@
 // 文案对齐上游 v0.1.337(中 / 繁 / 英),并入原先拆在 dns-filter / dns-page / client-app-page 等文件里的补充文案。
-// 同名键以上游为准;文件末尾是上游已改名或移除、但 main 界面代码仍在用的键。
+// 键名与键值和上游 panel/dist 逐键一致,不另设 main 自有键。
 import type { LANG_MESSAGE } from './en'
 
-const zhTW: Record<string, string> & LANG_MESSAGE = {
+const zhTW: LANG_MESSAGE = {
   // ===== 上游 v0.1.337 文案(取自上游 panel/dist,逐键与上游一致)=====
   cfTitle: '內容過濾',
   cfDescription:
@@ -1997,64 +1997,6 @@ const zhTW: Record<string, string> & LANG_MESSAGE = {
   outboundPickerTestOne: '測速',
   outboundPickerTestGroupNow: '測速該組目前選中的節點',
 
-  // ===== main 自有键:上游已改名或移除,但 main 的界面代码仍在用 =====
-  dfApplying: '正在重新啟動核心…',
-  kernelPendingRestart: '有改動還沒生效,重啟核心後套用',
-  backupImportedNeedRestart: '匯入成功,重啟核心生效',
-  splitOverviewPage: '分離概覽頁',
-  testQueuedTip: '{name}\n排隊中，前面還有測速在跑',
-  siteLatency: '站點延遲',
-  testSitesUrlPlaceholder: '位址',
-  testFailedTip: '{name}\n測速超時',
-  obUpdateTitle: 'Open-Box 更新',
-  failoverThreshold: '連續失敗輪數',
-  failoverThresholdHint:
-    '目前頁籤連續這麼多輪確認沒有任何可用節點,才轉移到下一個候選;一輪沒測完、探測服務報錯都不算失敗',
-  failoverUnitRound: '輪',
-  subscriptionSavedNeedRestart: '儲存成功,重啟核心生效',
-  subscriptionRefreshedNeedRestart: '重新整理成功,重啟核心生效',
-  timezoneUnknown: '未識別',
-  tunMtuInvalid: 'MTU 要填 0(預設)或 {min} - {max} 的整數',
-  tunTcpMssInvalid: 'MSS 要填 0(不鉗制)或 {min} - {max} 的整數',
-  tunSaved: 'TUN 參數已儲存,重啟核心後生效。',
-  chainEditTitle: '修改鏈式代理',
-  chainEmpty: '還沒有鏈式代理。',
-  chainNameRequired: '請填寫鏈式代理的名稱',
-  chainLinkRequired: '請填寫節點內容',
-  chainSaved: '鏈式代理已儲存。',
-  chainDeleteTitle: '刪除鏈式代理',
-  chainDeleteConfirm: '確定刪除鏈式代理「{name}」?按名稱引用它的節點組成員或分流出口需要另選。',
-  chainTestFailed: '不通:{message}',
-  chainTestVia: '經上游 {via}',
-  chainIpResult: '出口 IP {ip} · {info}',
-  chainIpFailed: 'IP 資訊取得失敗:{message}',
-  routeStartSourceTitle: '測試來源',
-  routeDnsRuleDetail: '規則詳情',
-  routeDnsRecords: '解析記錄',
-  routeEntryBypassConfigured: '入口旁路已設定:{sets}',
-  routeEntryReason: '原因',
-  routeEntryInboundDiff: '入站差異',
-  routeTermEvidence: '轉發證據',
-  routeRuleDetail: '規則詳情',
-  subShareEmpty: '暫無訂閱分享，點擊右上角「新增」建立',
-  subShareToggle: '啟用/停用',
-  subShareRegenerate: '重新產生',
-  subShareRenew: '重新產生連結(舊連結立即失效)',
-  subShareRenewHint: '儲存後產生新的位址和二維碼',
-  subShareDeleteConfirm: '確定刪除「{name}」？',
-  clientAppLoadFailed: '載入失敗:{message}',
-  clientAppSaved: '已儲存;App 下次同步後生效。',
-  clientSystemDnsSaveFailed: '儲存失敗:{message}',
-  clientAppResetConfirm: '恢復預設三組?自訂的分組會被覆蓋。',
-  clientAppErrTooMany: '最多 {n} 個分組',
-  clientAppErrDefault: '必須有且只有一個預設組',
-  clientAppErrName: '分組「{id}」名稱不能為空',
-  clientAppErrRegionCode: '地區代碼無效:{value}',
-  clientAppErrOutside: '分組「{id}」在這些地區之外使用,至少要列一個地區',
-  clientAppErrRegionDup: '地區 {region} 同時出現在「{a}」和「{b}」',
-  clientAppServerIconDefault: '預設(Open-Box 標誌)',
-  subscriptionEmpty: '還沒有訂閱。',
-  clientAppRegionsHintOutside: 'App 定位不在這些地區時自動選這一組;在 App 裡也能手動選。',
 }
 
 export default zhTW

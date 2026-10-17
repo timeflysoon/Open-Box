@@ -1609,14 +1609,6 @@ export const testSiteLatency = (sites: OpenboxSiteInput[]) =>
     signal: AbortSignal.timeout(30000),
   })
 
-// 手动测速前看一眼内核的测速排队:busy 为真时界面提示「已排队」(内核没跑 / 老内核没有这个接口时后端回 busy: false)
-export interface OpenboxNodeLatencyQueue {
-  busy: boolean
-  running: number
-  waiting: number
-}
-export const fetchNodeLatencyQueue = () => requestJson<OpenboxNodeLatencyQueue>('/api/openbox/nodes/latency/queue')
-
 // 链式代理编辑框的「测速 / IP 地区」:测框里填的这一份(没保存也能测)
 export interface OpenboxChainLatencyPayload {
   link: string

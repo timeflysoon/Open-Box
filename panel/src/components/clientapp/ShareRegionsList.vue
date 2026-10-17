@@ -173,22 +173,16 @@ const actionText = (action: string) =>
 type Problem = { content: string; params?: Record<string, string> }
 
 const validate = (groups: OpenboxShareRegionGroup[]): Problem | null => {
-  if (groups.length > SHARE_REGION_LIMITS.groups) {
-    return { content: 'clientAppErrTooMany', params: { n: String(SHARE_REGION_LIMITS.groups) } }
-  }
-  if (groups.filter((g) => g.default).length !== 1) return { content: 'clientAppErrDefault' }
   const claimed = new Map<string, string>()
   for (const g of groups) {
-    if (!g.name) return { content: 'clientAppErrName', params: { id: g.id } }
-    const bad = g.regions.find((r) => !/^[A-Z]{2}$/.test(r))
-    if (bad) return { content: 'clientAppErrRegionCode', params: { value: bad } }
+    if (!g.name) return { content: 'shareRegionsErrName' }
     if (g.regionMatch === 'outside') {
-      if (!g.regions.length) return { content: 'clientAppErrOutside', params: { id: g.id } }
+      if (!g.regions.length) return { content: 'shareRegionsErrOutsideEmpty' }
       continue
     }
     for (const r of g.regions) {
       const other = claimed.get(r)
-      if (other) return { content: 'clientAppErrRegionDup', params: { region: r, a: other, b: g.id } }
+      if (other) return { content: 'shareRegionsErrRegionTaken', params: { region: r } }
       claimed.set(r, g.id)
     }
   }
@@ -201,7 +195,7 @@ const persist = async (groups: OpenboxShareRegionGroup[]): Promise<boolean> => {
   saving.value = true
   try {
     await saveShareRegions(groups)
-    showNotification({ content: 'clientAppSaved', type: 'alert-success' })
+    showNotification({ content: 'shareRegionsSaved', type: 'alert-success' })
     emit('saved')
     return true
   } catch (error) {
@@ -252,7 +246,7 @@ const remove = async (g: OpenboxShareRegionGroup) => {
 }
 
 const reset = async () => {
-  if (!window.confirm(t('clientAppResetConfirm'))) return
+  if (!window.confirm(t('shareRegionsRestoreConfirm'))) return
   await persist([])
 }
 </script>

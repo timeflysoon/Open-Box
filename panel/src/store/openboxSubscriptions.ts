@@ -8,7 +8,7 @@ import { ref } from 'vue'
 export const notifySubscriptionSaved = (changed: boolean | undefined, kind: 'saved' | 'refreshed' = 'saved') => {
   if (changed === undefined) return
   if (changed) {
-    showNotification({ content: kind === 'refreshed' ? 'subscriptionRefreshedNeedRestart' : 'subscriptionSavedNeedRestart', type: 'alert-success' })
+    showNotification({ content: kind === 'refreshed' ? 'subscriptionRefreshedDone' : 'subscriptionSavedDone', type: 'alert-success' })
   } else {
     showNotification({ content: 'subscriptionNodesUnchanged', type: 'alert-info' })
   }

@@ -167,7 +167,7 @@ onMounted(async () => {
     servers.value = profile.servers ?? []
   } catch (error) {
     showNotification({
-      content: 'clientAppLoadFailed',
+      content: 'clientConfigLoadFailed',
       params: { message: error instanceof Error ? error.message : String(error) },
       type: 'alert-error',
     })

@@ -375,22 +375,6 @@
               <span class="text-base-content/60 text-xs">{{ $t('groupUnitSecond') }}</span>
             </div>
           </div>
-          <div class="flex flex-col gap-1">
-            <label
-              class="text-xs font-medium"
-              v-tip="$t('failoverThresholdHint')"
-            >{{ $t('failoverThreshold') }}</label>
-            <div class="flex items-center gap-1">
-              <input
-                v-model.number="failoverSettings.failureThreshold"
-                type="number"
-                min="1"
-                max="20"
-                class="input input-sm w-20"
-              />
-              <span class="text-base-content/60 text-xs">{{ $t('failoverUnitRound') }}</span>
-            </div>
-          </div>
           <label class="flex cursor-pointer items-center gap-2 pb-1.5">
             <input
               v-model="failoverSettings.restorePrimary"

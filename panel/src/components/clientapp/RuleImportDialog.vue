@@ -36,13 +36,6 @@
       </p>
       <template v-if="entries">
         <p
-          v-if="entries.length > max"
-          class="text-warning text-xs"
-        >
-          {{ $t('clientAppImportTooMany', { count: entries.length, max }) }}
-        </p>
-        <p
-          v-else
           class="text-base-content/60 text-xs"
         >
           {{ $t('routingPolicyRuleImportCount', { count: entries.length }) }}

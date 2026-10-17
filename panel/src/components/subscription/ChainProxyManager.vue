@@ -29,7 +29,11 @@
       class="flex flex-col items-center gap-3 py-14 text-center"
     >
       <LinkIcon class="text-base-content/30 h-10 w-10" />
-      <p class="text-base-content/60 text-sm">{{ $t('chainEmpty') }}</p>
+      <p class="text-base-content/60 text-sm">
+        {{ $t('chainProxyEmptyHint') }}
+        <MarketLink />
+        {{ $t('chainProxyEmptyHintSuffix') }}
+      </p>
       <button
         type="button"
         class="btn btn-primary btn-sm"
@@ -96,7 +100,7 @@
 
     <DialogWrapper
       v-model="showEditor"
-      :title="$t(editing ? 'chainEditTitle' : 'chainProxyAdd')"
+      :title="$t(editing ? 'chainProxyEditTitle' : 'chainProxyAdd')"
       box-class="w-full max-w-xl"
     >
       <div class="flex flex-col gap-4 text-sm">
@@ -227,11 +231,11 @@
               <span
                 v-else
                 class="text-error text-xs break-all"
-              >{{ $t('chainTestFailed', { message: testResult.error || '' }) }}</span>
+              >{{ $t('chainProxyTestFailed') }}</span>
               <span
                 v-if="testResult.via"
                 class="text-base-content/50 text-xs"
-              >{{ $t('chainTestVia', { via: testResult.via }) }}</span>
+              >{{ $t('chainProxyTestVia', { via: testResult.via }) }}</span>
             </template>
           </div>
           <div
@@ -270,10 +274,10 @@
 
     <DialogWrapper
       v-model="showDelete"
-      :title="$t('chainDeleteTitle')"
+      :title="$t('chainProxyTab')"
     >
       <div class="flex flex-col gap-4 p-2">
-        <p class="text-sm">{{ $t('chainDeleteConfirm', { name: pendingDelete?.name || '' }) }}</p>
+        <p class="text-sm">{{ $t('chainProxyDeleteConfirm', { name: pendingDelete?.name || '' }) }}</p>
         <div class="flex justify-end gap-2">
           <button
             type="button"
@@ -301,6 +305,7 @@
 </template>
 
 <script setup lang="ts">
+import MarketLink from '@/components/common/MarketLink.vue'
 import { fetchNodeGroups, fetchProfile, saveProfile, testChainLatency } from '@/api/openbox'
 import type { OpenboxChainLatencyResult, OpenboxChainProxy } from '@/api/openbox'
 import DialogWrapper from '@/components/common/DialogWrapper.vue'
@@ -351,7 +356,7 @@ const persist = async (next: OpenboxChainProxy[]) => {
     const plain = next.map(({ id, enabled, name, link, upstream }) => ({ id, enabled, name, link, upstream }))
     const profile = await saveProfile({ chainProxies: plain })
     chains.value = profile.chainProxies ?? []
-    showNotification({ content: 'chainSaved', type: 'alert-success' })
+    showNotification({ content: 'chainProxySaved', type: 'alert-success' })
     return true
   } catch (error) {
     showNotification({ content: 'saveFailed', params: { message: errorMessage(error) }, type: 'alert-error' })
@@ -429,7 +434,7 @@ const effectiveLink = (): string | null => {
   if (mode.value === 'link') {
     const link = draft.value.link.trim()
     if (!link) {
-      showNotification({ content: 'chainLinkRequired', type: 'alert-error' })
+      showNotification({ content: 'chainProxyErrLink', type: 'alert-error' })
       return null
     }
     return link
@@ -481,7 +486,7 @@ const pickerOptions = computed(() => {
 const saveDraft = async () => {
   const name = draft.value.name.trim()
   const upstream = draft.value.upstream.trim()
-  if (!name) return showNotification({ content: 'chainNameRequired', type: 'alert-error' })
+  if (!name) return showNotification({ content: 'chainProxyErrName', type: 'alert-error' })
   if (!upstream) return showNotification({ content: 'chainProxyErrUpstream', type: 'alert-error' })
   const link = effectiveLink()
   if (!link) return
@@ -547,7 +552,7 @@ const runTest = async () => {
 const ipSummary = computed(() => {
   const ip = testResult.value?.ip
   if (!ip) return ''
-  if (!ip.ok) return t('chainIpFailed', { message: ip.error || '' })
+  if (!ip.ok) return t('chainProxyIpFailed', { error: ip.error || '' })
   try {
     const data = JSON.parse(ip.body || '{}')
     const host = new URL(ip.url || '').hostname
@@ -557,7 +562,7 @@ const ipSummary = computed(() => {
         : host === 'ipwho.is'
           ? [data.country, data.connection?.org]
           : [data.country, data.organization]
-    return t('chainIpResult', { ip: data.ip, info: [country, org].filter(Boolean).join(' ') })
+    return `${t('chainProxyExitIp')} ${data.ip} · ${[country, org].filter(Boolean).join(' ')}`
   } catch {
     return ''
   }
