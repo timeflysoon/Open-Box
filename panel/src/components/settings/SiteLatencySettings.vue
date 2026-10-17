@@ -2,7 +2,7 @@
   <!-- 测试站点:概览「站点延迟」按这里的站点测速。图标 / 名称 / 地址都能改,右上角恢复默认的四个。 -->
   <div class="settings-section flex flex-col gap-2 p-4 text-sm">
     <div class="settings-title">
-      {{ $t('testSites') }}
+      {{ $t('testSitesSettings') }}
       <QuestionMarkCircleIcon
         class="h-4 w-4 cursor-pointer"
         @mouseenter="showTip($event, $t('testSitesTip'))"
@@ -32,7 +32,7 @@
         <input
           class="input input-sm w-30 shrink-0"
           v-model="site.name"
-          :placeholder="$t('testSitesNamePlaceholder')"
+          :placeholder="$t('cfName')"
         />
         <TextInput
           class="min-w-0 flex-1"

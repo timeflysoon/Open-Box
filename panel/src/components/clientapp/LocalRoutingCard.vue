@@ -3,8 +3,8 @@
   <div class="card">
     <div class="app-card-inset flex flex-col gap-3">
       <div class="flex flex-col gap-1">
-        <span class="text-base font-semibold">{{ $t('clientAppLocalTitle') }}</span>
-        <p class="text-base-content/60 text-xs leading-relaxed">{{ $t('clientAppLocalHint') }}</p>
+        <span class="text-base font-semibold">{{ $t('clientConfigTitle') }}</span>
+        <p class="text-base-content/60 text-xs leading-relaxed">{{ $t('clientConfigDescription') }}</p>
       </div>
 
       <div
@@ -27,7 +27,7 @@
             :off-text="$t('groupDisabledBadge')"
           />
           <span class="text-base-content/50 text-xs">
-            {{ lastSync ? $t('clientAppLastSync', { time: lastSync }) : $t('clientAppNeverSynced') }}
+            {{ lastSync ? $t('clientConfigLastSync', { time: lastSync }) : $t('clientConfigNeverSynced') }}
           </span>
         </div>
         <button
@@ -35,7 +35,7 @@
           class="btn btn-ghost btn-square btn-xs"
           :class="issue.enabled ? 'text-success' : 'text-base-content/40'"
           :disabled="toggling"
-          v-tip.contain="$t(issue.enabled ? 'clientAppSyncOn' : 'clientAppSyncOff')"
+          v-tip.contain="$t(issue.enabled ? 'clientConfigPowerOff' : 'clientConfigPowerOn')"
           @click="toggleEnabled"
         >
           <PowerIcon class="h-4 w-4" />
@@ -44,7 +44,7 @@
           type="button"
           class="btn btn-ghost btn-square btn-xs"
           :disabled="!code"
-          v-tip.contain="$t('clientAppShowQr')"
+          v-tip.contain="$t('shareCodeButton')"
           @click="showQr = true"
         >
           <QrCodeIcon class="h-4 w-4" />
@@ -62,7 +62,7 @@
           type="button"
           class="btn btn-ghost btn-square btn-xs"
           :disabled="!code || exporting"
-          v-tip.contain="$t('clientAppExport')"
+          v-tip.contain="$t('clientConfigExportFile')"
           @click="exportFile"
         >
           <span
@@ -102,7 +102,7 @@
           class="h-64 w-64 self-center rounded-lg bg-white p-1"
           alt="QR"
         />
-        <p class="text-base-content/60 text-center text-xs">{{ $t('clientAppLocalScanHint') }}</p>
+        <p class="text-base-content/60 text-center text-xs">{{ $t('clientConfigScanHint') }}</p>
         <div class="join w-full">
           <input
             :value="code"
@@ -123,13 +123,13 @@
           v-if="issue && !issue.enabled"
           class="text-warning text-xs"
         >
-          {{ $t('clientAppSyncOffHint') }}
+          {{ $t('clientConfigSyncOffHint') }}
         </p>
         <p
           v-if="issue && !issue.lanAddresses.length"
           class="text-warning text-xs"
         >
-          {{ $t('clientAppLocalNoLan') }}
+          {{ $t('clientConfigNoLan') }}
         </p>
         <div class="flex justify-end">
           <button
@@ -314,7 +314,7 @@ const exportFile = async () => {
     URL.revokeObjectURL(url)
   } catch (error) {
     showNotification({
-      content: 'clientAppExportFailed',
+      content: 'backupExportFailed',
       params: { message: errorMessage(error) },
       type: 'alert-error',
     })

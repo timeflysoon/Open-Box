@@ -222,7 +222,7 @@ const loadShares = async () => {
     shares.value = await fetchSubscriptionShares()
   } catch (error) {
     showNotification({
-      content: 'subShareLoadFailed',
+      content: 'subscriptionShareLoadFailed',
       type: 'alert-error',
       params: { message: error instanceof Error ? error.message : String(error) },
     })

@@ -61,7 +61,7 @@
               <th>{{ $t('dfDomain') }}</th>
               <th>{{ $t('dfType') }}</th>
               <th>{{ $t('dfResult') }}</th>
-              <th>{{ $t('dfDevice') }}</th>
+              <th>{{ $t('dfSource') }}</th>
               <th>{{ $t('dfMatchedList') }}</th>
               <th>{{ $t('dfDuration') }}</th>
             </tr>

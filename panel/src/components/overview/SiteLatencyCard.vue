@@ -23,7 +23,7 @@
           v-else
           class="h-4 w-4"
         />
-        {{ $t('siteLatencyTest') }}
+        {{ $t('routeTestRerun') }}
       </button>
     </div>
     <div class="grid grid-cols-2 gap-3 xl:grid-cols-4">

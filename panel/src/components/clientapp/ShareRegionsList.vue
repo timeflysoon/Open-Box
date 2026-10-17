@@ -3,13 +3,13 @@
   <div class="app-card-inset flex flex-col gap-3">
     <div class="flex flex-col gap-1">
       <div class="flex flex-wrap items-center justify-between gap-2">
-        <span class="text-base font-semibold">{{ $t('clientAppRegionsTitle') }}</span>
+        <span class="text-base font-semibold">{{ $t('shareRegionsTitle') }}</span>
         <div class="flex shrink-0 items-center gap-1">
           <button
             type="button"
             class="btn btn-ghost btn-square btn-sm"
             :disabled="saving"
-            v-tip="$t('clientAppResetDefault')"
+            v-tip="$t('cfRestore')"
             @click="reset"
           >
             <ArrowUturnLeftIcon class="h-4 w-4" />
@@ -18,14 +18,14 @@
             type="button"
             class="btn btn-primary btn-circle btn-sm"
             :disabled="saving || list.length >= SHARE_REGION_LIMITS.groups"
-            v-tip="$t('clientAppAddGroup')"
+            v-tip="$t('groupAdd')"
             @click="openEdit(null)"
           >
             <PlusIcon class="h-4 w-4" />
           </button>
         </div>
       </div>
-      <p class="text-base-content/60 text-xs leading-relaxed">{{ $t('clientAppRegionsHint') }}</p>
+      <p class="text-base-content/60 text-xs leading-relaxed">{{ $t('shareRegionsDescription') }}</p>
     </div>
 
     <Draggable
@@ -49,7 +49,7 @@
                 v-if="element.default"
                 class="badge badge-sm"
               >
-                {{ $t('clientAppDefaultBadge') }}
+                {{ $t('shareRegionsDefaultBadge') }}
               </span>
             </div>
             <span
@@ -72,8 +72,8 @@
                 />
                 <span class="truncate">{{ summary(element) }}</span>
               </span>
-              <span>{{ $t('clientAppRegionRuleCount', { count: element.rules.length }) }}</span>
-              <span>{{ $t('clientAppRegionRest', { action: actionText(element.catchAll) }) }}</span>
+              <span>{{ $t('shareRegionsRuleCount', { count: element.rules.length }) }}</span>
+              <span>{{ $t('shareRegionsCatchAllSummary', { action: actionText(element.catchAll) }) }}</span>
             </div>
           </div>
           <button
@@ -160,13 +160,13 @@ const regionName = (code: string) => {
 }
 
 const summary = (g: OpenboxShareRegionGroup) => {
-  if (!g.regions.length) return g.default ? t('clientAppRegionOther') : ''
+  if (!g.regions.length) return g.default ? t('shareRegionsOtherRegions') : ''
   const names = g.regions.map(regionName).join('、')
-  return g.regionMatch === 'outside' ? t('clientAppRegionOutside', { regions: names }) : names
+  return g.regionMatch === 'outside' ? t('shareRegionsOutsideSummary', { regions: names }) : names
 }
 
 const actionText = (action: string) =>
-  t(action === 'proxy' ? 'clientAppActionProxyShort' : 'clientAppActionDirect')
+  t(action === 'proxy' ? 'shareRegionsActionProxy' : 'shareRegionsActionDirect')
 
 // ---- 校验(和后端 engine/share-regions.mjs 同一套规则,后端才是权威)----
 
@@ -244,10 +244,10 @@ const onDialogSaved = async (group: OpenboxShareRegionGroup) => {
 
 const remove = async (g: OpenboxShareRegionGroup) => {
   if (g.default) {
-    showNotification({ content: 'clientAppDeleteDefault', type: 'alert-warning' })
+    showNotification({ content: 'shareRegionsDeleteDefault', type: 'alert-warning' })
     return
   }
-  if (!window.confirm(t('clientAppDeleteConfirm', { name: groupName(g) }))) return
+  if (!window.confirm(t('shareRegionsDeleteConfirm', { name: groupName(g) }))) return
   await persist(list.value.filter((x) => x.id !== g.id))
 }
 

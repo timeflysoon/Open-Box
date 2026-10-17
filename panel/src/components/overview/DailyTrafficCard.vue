@@ -5,7 +5,7 @@
     <div class="flex flex-wrap items-center gap-2 px-4 pt-4 max-md:px-3 max-md:pt-3">
       <div class="flex min-w-0 flex-col gap-1">
         <div class="flex flex-wrap items-center gap-2">
-          <h2 class="text-base font-semibold">{{ $t('trafficInsight') }}</h2>
+          <h2 class="text-base font-semibold">{{ $t('dailyTraffic') }}</h2>
           <!-- 统计直连流量:关掉后服务端把走直连出站的那部分从总量 / 曲线 / 列表里扣掉,库里数据不动 -->
           <label
             class="text-base-content/70 flex cursor-pointer items-center gap-1.5 text-xs font-normal"

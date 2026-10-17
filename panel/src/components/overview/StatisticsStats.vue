@@ -74,8 +74,8 @@ const order = computed(() => orderMap[props.type])
 // 概览和侧边栏用「连接数 / 进站流量 / 出站流量」这几个标签;设置页保持原样
 const LABEL_KEY: Record<string, string> = {
   [STATISTICS_TYPE.CONNECTIONS]: 'statConnections',
-  [STATISTICS_TYPE.DOWNLOAD]: 'statDownloadTotal',
-  [STATISTICS_TYPE.UPLOAD]: 'statUploadTotal',
+  [STATISTICS_TYPE.DOWNLOAD]: 'statDownload',
+  [STATISTICS_TYPE.UPLOAD]: 'statUpload',
 }
 const labelKey = (stat: string) => (props.type === 'settings' ? stat : (LABEL_KEY[stat] ?? stat))
 </script>

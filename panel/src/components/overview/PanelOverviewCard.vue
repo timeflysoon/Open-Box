@@ -4,12 +4,12 @@
     <div class="card-body gap-3">
       <div class="flex flex-wrap items-center justify-between gap-2">
         <div class="flex flex-wrap items-center gap-2">
-          <h2 class="text-base font-semibold">{{ $t('overviewPanelTitle') }}</h2>
+          <h2 class="text-base font-semibold">{{ $t('overviewCardTitle') }}</h2>
           <label
             class="text-base-content/70 flex cursor-pointer items-center gap-1.5 text-xs font-normal"
             :title="$t('siteLatencyAutoTestHint')"
           >
-            <span>{{ $t('overviewAutoTest') }}</span>
+            <span>{{ $t('siteLatencyAutoTest') }}</span>
             <input
               v-model="autoSiteLatencyTest"
               type="checkbox"

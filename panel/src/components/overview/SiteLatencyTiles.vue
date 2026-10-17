@@ -67,7 +67,7 @@
               class="text-xl leading-none font-semibold text-red-500 transition-opacity"
               :class="card.loading && 'opacity-40'"
             >
-              <span class="text-base leading-none">{{ $t('siteUnreachable') }}</span>
+              <span class="text-base leading-none">{{ $t('siteLatencyUnreachable') }}</span>
             </span>
             <span
               v-else
@@ -179,7 +179,7 @@ const maxValue = computed(() =>
 
 const escapeHtml = (text: string) =>
   text.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c] as string)
-const delayText = (delay: number) => (delay === NOT_CONNECTED ? t('siteUnreachable') : `${delay} ms`)
+const delayText = (delay: number) => (delay === NOT_CONNECTED ? t('siteLatencyUnreachable') : `${delay} ms`)
 // 悬停小柱:上一行是当时走的线路(没记录就用这个站点最近一次有记录的),下一行是时间 · 延迟
 const barTip = (sample: { time: number; delay: number; node?: string }, fallbackNode: string) => {
   const node = sample.node || fallbackNode

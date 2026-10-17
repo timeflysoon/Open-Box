@@ -32,7 +32,7 @@
           @change="savePorts"
         />
         <p class="text-base-content/50 text-xs">
-          {{ mode === 'whitelist' ? $t('bypassPortsWhitelistHint') : $t('bypassPortsBlacklistHint') }}
+          {{ mode === 'whitelist' ? $t('bypassPortsWhitelistHint') : $t('bypassPortsHint') }}
         </p>
       </div>
     </div>

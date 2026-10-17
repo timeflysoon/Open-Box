@@ -330,7 +330,7 @@ const testingAll = ref(false)
 const latencyText = (originalTag: string) => {
   const r = latency.value[originalTag]
   if (!r) return t('subscriptionLatencyUntested')
-  return r.ok ? `${r.ms}ms` : t('subscriptionLatencyFailed')
+  return r.ok ? `${r.ms}ms` : t('obUpdateStage_failed')
 }
 const latencyClass = (originalTag: string) => {
   const r = latency.value[originalTag]

@@ -2,8 +2,8 @@
   <div class="card bg-base-100 border-base-300/60 border">
     <div class="card-body gap-3 p-4">
       <div>
-        <h2 class="text-base font-semibold">{{ $t('tunTitle') }}</h2>
-        <p class="text-base-content/60 text-xs">{{ $t('tunDescription') }}</p>
+        <h2 class="text-base font-semibold">{{ $t('tunOptionsTitle') }}</h2>
+        <p class="text-base-content/60 text-xs">{{ $t('tunOptionsDescription') }}</p>
       </div>
 
       <div>

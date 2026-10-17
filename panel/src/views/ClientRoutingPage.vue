@@ -35,7 +35,7 @@
           :action="$t('clientRouteAdd')"
           @action="openCreate"
         >
-          {{ $t('clientRouteEmptyTitle') }}
+          {{ $t('clientRouteEmpty') }}
         </EmptyAction>
 
         <div

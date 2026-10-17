@@ -149,7 +149,7 @@
           :state="actualExit.state"
           :badge="actualExit.badge"
           :badge-tone="actualExit.tone"
-          :details-title="$t('routeExitDetails')"
+          :details-title="$t('connectionDetails')"
           last
         >
           <template v-if="actualError">

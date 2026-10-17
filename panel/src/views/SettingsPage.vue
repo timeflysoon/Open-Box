@@ -106,7 +106,7 @@ const tabItems: { key: SETTINGS_TAB; label: string; icon: Component }[] = [
   { key: SETTINGS_TAB.clients, label: 'clientRoutingTab', icon: DevicePhoneMobileIcon },
   { key: SETTINGS_TAB.chain, label: 'chainProxyTab', icon: LinkIcon },
   { key: SETTINGS_TAB.share, label: 'shareNetworkTab', icon: ShareIcon },
-  { key: SETTINGS_TAB.clientApp, label: 'clientAppTab', icon: Squares2X2Icon },
+  { key: SETTINGS_TAB.clientApp, label: 'clientAppsTab', icon: Squares2X2Icon },
   { key: SETTINGS_TAB.dns, label: 'dnsSettingsTab', icon: ServerStackIcon },
   { key: SETTINGS_TAB.kernel, label: 'kernelSettings', icon: CpuChipIcon },
 ]

@@ -2,7 +2,7 @@
   <!-- 地区组编辑弹窗:名称与地区 / 规则 / DNS 三个页签 -->
   <DialogWrapper
     v-model="isOpen"
-    :title="$t(group ? 'clientAppEditGroup' : 'clientAppAddGroupTitle')"
+    :title="$t(group ? 'shareRegionsEditTitle' : 'shareRegionsAdd')"
     box-class="h-[90dvh] w-full max-w-4xl"
   >
     <div
@@ -31,29 +31,29 @@
         class="flex flex-col gap-4"
       >
         <div class="flex flex-col gap-1">
-          <label class="text-xs font-medium">{{ $t('clientAppGroupName') }}</label>
+          <label class="text-xs font-medium">{{ $t('cfName') }}</label>
           <input
             v-model="form.name"
             type="text"
             class="input input-sm w-full"
             :maxlength="SHARE_REGION_LIMITS.nameMax"
-            :placeholder="$t('clientAppGroupNamePlaceholder')"
+            :placeholder="$t('shareRegionsNamePlaceholder')"
           />
         </div>
         <div class="flex flex-col gap-1">
-          <label class="text-xs font-medium">{{ $t('clientAppGroupDesc') }}</label>
+          <label class="text-xs font-medium">{{ $t('shareRegionsDescriptionLabel') }}</label>
           <textarea
             v-model="form.description"
             rows="2"
             class="textarea textarea-sm w-full"
             :maxlength="SHARE_REGION_LIMITS.descriptionMax"
-            :placeholder="$t('clientAppGroupDescPlaceholder')"
+            :placeholder="$t('shareRegionsDescriptionPlaceholder')"
           />
         </div>
 
         <div class="flex flex-col gap-1">
           <div class="flex items-center gap-2">
-            <label class="text-xs font-medium">{{ $t('clientAppGroupRegions') }}</label>
+            <label class="text-xs font-medium">{{ $t('shareRegionsRegionsLabel') }}</label>
             <div
               role="tablist"
               class="tabs-box tabs tabs-xs"
@@ -64,7 +64,7 @@
                 :class="form.regionMatch === 'inside' && 'tab-active'"
                 @click="setMatch('inside')"
               >
-                {{ $t('clientAppMatchInside') }}
+                {{ $t('shareRegionsMatchInside') }}
               </a>
               <a
                 role="tab"
@@ -72,13 +72,13 @@
                 :class="form.regionMatch === 'outside' && 'tab-active'"
                 @click="setMatch('outside')"
               >
-                {{ $t('clientAppMatchOutside') }}
+                {{ $t('shareRegionsMatchOutside') }}
               </a>
             </div>
             <div class="ml-auto w-40">
               <CountrySelect
                 model-value=""
-                :placeholder="$t('clientAppAddRegion')"
+                :placeholder="$t('shareRegionsAddRegion')"
                 @update:model-value="addRegion"
               />
             </div>
@@ -88,7 +88,7 @@
               v-if="!form.regions.length"
               class="text-base-content/50 w-full text-center text-xs"
             >
-              {{ $t('clientAppNoRegion') }}
+              {{ $t('shareRegionsNoRegion') }}
             </p>
             <span
               v-for="c in form.regions"
@@ -112,7 +112,7 @@
             </span>
           </div>
           <p class="text-base-content/50 text-xs">
-            {{ $t(form.regionMatch === 'outside' ? 'clientAppRegionsHintOutside' : 'clientAppRegionsHintInside') }}
+            {{ $t(form.regionMatch === 'outside' ? 'clientAppRegionsHintOutside' : 'shareRegionsRegionsHint') }}
           </p>
         </div>
 
@@ -124,9 +124,9 @@
               class="toggle toggle-sm"
               :disabled="group?.default === true"
             />
-            <span>{{ $t('clientAppGroupDefault') }}</span>
+            <span>{{ $t('shareRegionsDefaultLabel') }}</span>
           </label>
-          <p class="text-base-content/50 text-xs">{{ $t('clientAppDefaultUseHint') }}</p>
+          <p class="text-base-content/50 text-xs">{{ $t('shareRegionsDefaultHint') }}</p>
         </div>
       </div>
 
@@ -138,7 +138,7 @@
         <div class="flex flex-col gap-2">
           <div class="flex items-center justify-between gap-2">
             <p class="text-base-content/60 text-xs">
-              {{ $t(form.rules.length || lanSubnets.length ? 'clientAppRulesHint' : 'clientAppNoRules') }}
+              {{ $t(form.rules.length || lanSubnets.length ? 'shareRegionsRulesHint' : 'shareRegionsNoRules') }}
             </p>
             <div class="flex shrink-0 items-center gap-1">
               <button
@@ -156,7 +156,7 @@
                 @click="addRule"
               >
                 <PlusIcon class="h-3.5 w-3.5" />
-                {{ $t('clientAppAddRule') }}
+                {{ $t('routingPolicyRuleAdd') }}
               </button>
             </div>
           </div>
@@ -168,7 +168,7 @@
             class="flex flex-wrap items-center gap-2 sm:flex-nowrap"
           >
             <LockClosedIcon
-              v-tip="$t('clientAppLanRuleTip')"
+              v-tip="$t('shareRegionsLanRuleTip')"
               class="text-base-content/40 h-4 w-4 shrink-0 outline-none"
             />
             <select
@@ -189,7 +189,7 @@
               class="select select-sm w-32 shrink-0 max-sm:order-1 max-sm:w-auto max-sm:min-w-0 max-sm:grow max-sm:basis-[40%]"
               disabled
             >
-              <option>{{ $t('clientAppActionProxyShort') }}</option>
+              <option>{{ $t('shareRegionsActionProxy') }}</option>
             </select>
             <span class="w-8 shrink-0 max-sm:order-2" />
           </div>
@@ -269,7 +269,7 @@
         </div>
 
         <div class="flex flex-col gap-1">
-          <label class="text-xs font-medium">{{ $t('clientAppCatchAll') }}</label>
+          <label class="text-xs font-medium">{{ $t('shareRegionsCatchAllLabel') }}</label>
           <select
             v-model="form.catchAll"
             class="select select-sm w-full md:w-1/2"
@@ -287,7 +287,7 @@
         <RuleImportDialog
           v-model="showImport"
           :max="importMax"
-          hint-key="clientAppRuleImportHint"
+          hint-key="shareRegionsRuleImportHint"
           @import="onImport"
         />
       </div>
@@ -394,9 +394,9 @@ const isOpen = computed({
 })
 
 const TABS: { key: Tab; label: string }[] = [
-  { key: 'name', label: 'clientAppTabBasic' },
-  { key: 'rules', label: 'clientAppTabRules' },
-  { key: 'dns', label: 'clientAppTabDns' },
+  { key: 'name', label: 'cfName' },
+  { key: 'rules', label: 'rules' },
+  { key: 'dns', label: 'shareRegionsDnsTitle' },
 ]
 
 const clone = <T,>(value: T): T => JSON.parse(JSON.stringify(value)) as T
@@ -501,8 +501,8 @@ const RULE_TYPES: { type: OpenboxShareRuleType; labelKey: string; placeholderKey
   { type: 'ruleUrl', labelKey: 'routingPolicyRuleUrl', placeholderKey: 'routingPolicyRuleUrlPlaceholder' },
 ]
 const ACTIONS: { value: 'direct' | 'proxy'; labelKey: string }[] = [
-  { value: 'direct', labelKey: 'clientAppActionDirect' },
-  { value: 'proxy', labelKey: 'clientAppActionProxyShort' },
+  { value: 'direct', labelKey: 'shareRegionsActionDirect' },
+  { value: 'proxy', labelKey: 'shareRegionsActionProxy' },
 ]
 
 const placeholderOf = (type: string) =>
@@ -639,7 +639,7 @@ const submit = () => {
   if (bad >= 0) {
     tab.value = 'rules'
     showNotification({
-      content: 'clientAppErrRule',
+      content: 'shareRegionsErrRule',
       params: { index: String(bad + 1), value: rules[bad].value },
       type: 'alert-error',
     })

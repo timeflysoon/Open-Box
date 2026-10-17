@@ -2,8 +2,8 @@
   <!-- 节点分流(客户端):共享网络每台服务器一个码,点二维码在弹窗里看 -->
   <div class="app-card-inset flex flex-col gap-3">
     <div class="flex flex-col gap-1">
-      <span class="text-base font-semibold">{{ $t('clientAppShareTitle') }}</span>
-      <p class="text-base-content/60 text-xs leading-relaxed">{{ $t('clientAppShareHint') }}</p>
+      <span class="text-base font-semibold">{{ $t('shareAppCodesTitle') }}</span>
+      <p class="text-base-content/60 text-xs leading-relaxed">{{ $t('shareAppCodesDescription') }}</p>
     </div>
 
     <div
@@ -16,7 +16,7 @@
       v-else-if="!rows.length"
       class="text-base-content/50 text-xs"
     >
-      {{ $t('clientAppShareEmpty') }}
+      {{ $t('shareAppCodesEmpty') }}
     </p>
     <div
       v-else
@@ -44,7 +44,7 @@
           type="button"
           class="btn btn-ghost btn-square btn-xs"
           :disabled="!r.code"
-          v-tip="$t('clientAppShareScan')"
+          v-tip="$t('shareCodeButton')"
           @click="openQr(r)"
         >
           <QrCodeIcon class="h-4 w-4" />
@@ -63,7 +63,7 @@
 
     <DialogWrapper
       v-model="showQr"
-      :title="current ? $t('clientAppShareQrTitle', { name: current.server.name }) : ''"
+      :title="current ? $t('shareCodeTitle', { name: current.server.name }) : ''"
       box-class="w-full max-w-md"
     >
       <div
@@ -76,7 +76,7 @@
           class="h-56 w-56 self-center rounded-lg bg-white p-1"
           alt="QR"
         />
-        <p class="text-base-content/60 text-center text-xs">{{ $t('clientAppShareQrHint') }}</p>
+        <p class="text-base-content/60 text-center text-xs">{{ $t('shareCodeAppHint') }}</p>
         <div class="join w-full">
           <input
             :value="current.code"
@@ -96,7 +96,7 @@
           v-if="!info.lanAddresses.length"
           class="text-warning text-xs"
         >
-          {{ $t('clientAppLocalNoLan') }}
+          {{ $t('clientConfigNoLan') }}
         </p>
       </div>
     </DialogWrapper>

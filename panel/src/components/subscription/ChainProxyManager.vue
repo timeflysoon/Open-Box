@@ -96,7 +96,7 @@
 
     <DialogWrapper
       v-model="showEditor"
-      :title="$t(editing ? 'chainEditTitle' : 'chainAddTitle')"
+      :title="$t(editing ? 'chainEditTitle' : 'chainProxyAdd')"
       box-class="w-full max-w-xl"
     >
       <div class="flex flex-col gap-4 text-sm">
@@ -194,7 +194,7 @@
           <OutboundPicker
             v-model="draft.upstream"
             :options="pickerOptions"
-            :placeholder="$t('chainProxyUpstreamPlaceholder')"
+            :placeholder="$t('outboundPickerPlaceholder')"
           />
           <p class="text-base-content/50 text-xs">{{ $t('chainProxyHint') }}</p>
         </div>
@@ -474,7 +474,7 @@ const pickerOptions = computed(() => {
     nodes.push({ name, subscription })
   }
   for (const n of nodeOptions.value) push(n.name, n.subscription)
-  for (const c of chains.value) if (c.id !== draft.value.id) push(c.name, t('chainBadge'))
+  for (const c of chains.value) if (c.id !== draft.value.id) push(c.name, t('chainProxyTab'))
   return { builtin: [], groups: groupNames.value.filter((name) => name !== self), nodes }
 })
 
@@ -482,7 +482,7 @@ const saveDraft = async () => {
   const name = draft.value.name.trim()
   const upstream = draft.value.upstream.trim()
   if (!name) return showNotification({ content: 'chainNameRequired', type: 'alert-error' })
-  if (!upstream) return showNotification({ content: 'chainUpstreamRequired', type: 'alert-error' })
+  if (!upstream) return showNotification({ content: 'chainProxyErrUpstream', type: 'alert-error' })
   const link = effectiveLink()
   if (!link) return
   const item: OpenboxChainProxy = { id: draft.value.id, enabled: draft.value.enabled, name, link, upstream }
@@ -524,7 +524,7 @@ const runTest = async () => {
   const link = effectiveLink()
   if (!link) return
   const upstream = draft.value.upstream.trim()
-  if (!upstream) return showNotification({ content: 'chainUpstreamRequired', type: 'alert-error' })
+  if (!upstream) return showNotification({ content: 'chainProxyErrUpstream', type: 'alert-error' })
   testing.value = true
   testResult.value = null
   const base = { link, upstream, testUrl: speedtestUrl.value, timeoutMs: speedtestTimeout.value }

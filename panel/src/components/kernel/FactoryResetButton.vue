@@ -7,8 +7,8 @@
     <button
       type="button"
       class="btn btn-ghost btn-circle btn-sm text-error"
-      v-tip="$t('factoryResetTitle')"
-      :aria-label="$t('factoryResetTitle')"
+      v-tip="$t('factoryReset')"
+      :aria-label="$t('factoryReset')"
       @click="open = true"
     >
       <ExclamationTriangleIcon class="h-4 w-4" />
@@ -21,7 +21,7 @@
     >
       <div class="flex flex-col">
         <div class="border-base-content/10 relative border-b pb-2">
-          <h3 class="pr-8 text-base font-bold">{{ $t('factoryResetTitle') }}</h3>
+          <h3 class="pr-8 text-base font-bold">{{ $t('factoryReset') }}</h3>
           <button
             type="button"
             class="btn btn-circle btn-ghost btn-xs absolute top-0 right-0"
@@ -32,8 +32,8 @@
           </button>
         </div>
         <div class="mt-4 flex flex-col gap-3">
-          <p class="text-sm">{{ $t('factoryResetIntro') }}</p>
-          <p class="text-base-content/60 text-xs">{{ $t('factoryResetDetail') }}</p>
+          <p class="text-sm">{{ $t('factoryResetConfirm') }}</p>
+          <p class="text-base-content/60 text-xs">{{ $t('factoryResetKeepHint') }}</p>
         </div>
         <div class="border-base-content/10 mt-4 flex items-center justify-end gap-2 border-t pt-2">
           <button
