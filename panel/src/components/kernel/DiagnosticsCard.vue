@@ -50,7 +50,7 @@ import { useI18n } from 'vue-i18n'
 const { t } = useI18n()
 const LINK_TEXT = 'GitHub issue'
 const descParts = computed(() => {
-  const text = t('diagnosticsDescription')
+  const text = t('diagnosticsDescription', { link: LINK_TEXT })
   const i = text.indexOf(LINK_TEXT)
   return i < 0 ? [text, '', ''] : [text.slice(0, i), LINK_TEXT, text.slice(i + LINK_TEXT.length)]
 })

@@ -234,7 +234,6 @@ import {
   isDnsPort,
   regionDnsDefaults,
 } from '@/constant/shareRegionDns'
-import '@/i18n/client-app-dns'
 import { ArrowUturnLeftIcon, PencilSquareIcon, PlusIcon, TrashIcon } from '@heroicons/vue/24/outline'
 import { computed, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
