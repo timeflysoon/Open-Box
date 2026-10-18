@@ -451,6 +451,10 @@
             <span class="font-medium">{{ ruleDns.rewrite ? $t('routeDnsRewrite') : ruleDns.viaProxy ? $t('routeTestDnsProxy') : $t('routeTestDnsDirect') }}</span>
             <span class="text-base-content/60 font-mono text-xs">{{ ruleDns.serverLine }}</span>
             <span
+              v-if="ruleDns.resolvedShort"
+              class="text-base-content/60 text-xs"
+            >{{ ruleDns.resolvedShort }}</span>
+            <span
               v-if="ruleDns.rewrite"
               class="basis-full text-xs"
             >{{ ruleDns.rewrite }}</span>
@@ -460,6 +464,7 @@
             #details
           >
             <p><span class="text-base-content/50">{{ $t('routeDnsResolver') }}</span> <span class="font-mono">{{ ruleDns.tag }}</span></p>
+            <p v-if="ruleDns.resolvedLine">{{ ruleDns.resolvedLine }}</p>
             <div
               v-if="ruleDns.detour"
               class="flex flex-wrap items-center gap-x-1.5"
@@ -834,6 +839,9 @@ interface DnsView {
   detour?: string
   // 命中的 DNS 重写:「原域名 → 目标」
   rewrite?: string
+  // 规则推算时向内核 DNS 解析到的结果:resolvedShort 跟在主行后面,resolvedLine 是详情里的完整一句
+  resolvedShort?: string
+  resolvedLine?: string
   v4?: { text: string; tone: Tone }
   // queried:档案开了 IPv6、这次真的查了 AAAA;没查的(未开启 IPv6)不占主行,进详情
   v6?: { text: string; tone: Tone; queried: boolean }
@@ -943,6 +951,11 @@ const ruleAssumptions = computed(() => {
 const dnsAssumptionLines = (list?: OpenboxDnsAssumption[]) => {
   const line = (a: OpenboxDnsAssumption) => {
     const outcome = a.action === 'reject' ? t('routeAssumeReject') : a.server ? t('routeAssumeDnsServer', { server: a.server }) : ''
+    // 按终端 MAC 分流的规则:没给终端来源,认不出是哪台终端
+    if (a.sourceMac?.length) {
+      const macs = a.sourceMac.join(t('routeListJoin'))
+      return a.sameOutcome ? t('routeDnsAssumedSameMac', { index: a.ruleIndex + 1, macs, outcome }) : t('routeDnsAssumedMac', { index: a.ruleIndex + 1, macs, outcome })
+    }
     const cidrs = hostList(a.sourceIpCidr || [])
     return a.sameOutcome ? t('routeDnsAssumedSame', { index: a.ruleIndex + 1, cidrs, outcome }) : t('routeDnsAssumed', { index: a.ruleIndex + 1, cidrs, outcome })
   }
@@ -969,11 +982,22 @@ const ruleDns = computed<DnsView>(() => {
   if (!d || 'skipped' in d) return { kind: 'skip', state: 'skip', badge: t('routeDnsSkippedBadge'), tone: 'muted' }
   if ('error' in d) return { kind: 'error', state: 'pending', badge: t('routeDnsUnknown'), tone: 'pending', message: d.error }
   if (d.rejected) return { kind: 'reject', state: 'ok', badge: t('routeDnsPredicted'), tone: 'muted' }
+  // 推算时向内核 DNS 解析到了什么:占位地址 / N 个地址 / 没解析到
+  const res = rule.value.resolved
+  const resolvedShort = res ? (res.fakeIp ? t('routeDnsResolvedFakeIpShort') : res.addresses.length ? t('routeDnsResolvedShort', { count: res.addresses.length }) : t('routeDnsResolveFailedShort')) : ''
+  const resolvedLine = res
+    ? res.fakeIp
+      ? t('routeDnsResolvedFakeIp')
+      : res.addresses.length
+        ? t('routeDnsResolvedAddresses', { list: res.addresses.join(t('routeListJoin')) })
+        : t('routeDnsResolveFailed', { error: res.error || '' })
+    : ''
   return {
     kind: 'decision', state: 'ok', badge: t('routeDnsPredicted'), tone: 'muted',
     viaProxy: Boolean(d.viaProxy), serverLine: serverLineOf(d.server) || d.server?.tag || '', tag: d.server?.tag || '', detour: d.server?.detour || '',
     rewrite: rewriteLineOf(d.rewrite),
     assumptions: dnsAssumptionLines(d.assumed).relevant, assumptionsSame: dnsAssumptionLines(d.assumed).same,
+    resolvedShort, resolvedLine,
   }
 })
 // ③ 左:入口是配置状态,不是本目标的观测——只有目标是 IP、且命中的规则集正好在旁路集合里,才能说它会在入口旁路

@@ -992,6 +992,8 @@ export interface OpenboxDnsAssumption {
   ruleIndex: number
   needs: string[]
   sourceIpCidr: string[]
+  // 按终端 MAC 分流的 DNS 规则:没给终端来源时记成前提,macs 是规则里写的 MAC
+  sourceMac?: string[]
   server?: string
   action?: string
   sameOutcome?: boolean
@@ -1045,6 +1047,10 @@ export interface OpenboxPenetrationResult {
     ipUnknown?: boolean
     error?: string
   } | null
+  // 推算时向内核 DNS 解析这个域名的结果:fakeIp = 内核返回的是占位地址(连接进内核后按域名找回目标);
+  // addresses 是解析到的地址;解析不到时 error 是原因。有域名的访问不看 IP 条件,这个地址只拿去比
+  // 内置的私网直连、节点站点直连和按 IP 判的规则
+  resolved?: { fakeIp?: boolean; addresses: string[]; error?: string } | null
   // 部署时第一层的判定(config.meta.json 的 firstLayer,见 server/system/deploy.mjs)
   firstLayer?: {
     dnsMode: string
