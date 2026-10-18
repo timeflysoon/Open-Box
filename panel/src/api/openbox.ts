@@ -891,8 +891,20 @@ export interface OpenboxServiceStatus {
   pendingRestart?: { pending: boolean; reasons: string[] }
   // 内核因为和别的代理服务冲突被自动停掉了(界面提示「已自动停止」用)
   conflictAutoStopped?: boolean
-  // Docker 容器里跑时('container')才有:容器的局域网 IP,Docker 卡片的提示里要用
-  container?: { lanIp?: string } | null
+  // Docker 容器里跑时('container')才有:容器的局域网 IP,以及容器自检结果(Docker 卡片用)
+  container?: {
+    lanIp?: string
+    // 截流方式('tun' / 'stopped' 等)和转发 IP 伪装是否开着
+    mode?: string
+    masquerade?: boolean
+    tun?: boolean
+    netAdmin?: boolean
+    forwarding?: boolean
+    redirectsDisabled?: boolean
+    nftables?: boolean
+    // 策略路由顺序检查:conflicts 是提前查询主路由表的规则
+    routing?: { checked: boolean; conflicts: { priority: number | string; table: number | string }[] } | null
+  } | null
 }
 
 export type OpenboxServiceAction = 'start' | 'stop' | 'restart' | 'enable' | 'disable'

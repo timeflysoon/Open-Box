@@ -14,6 +14,12 @@
           @refresh="loadStatus"
         />
 
+        <!-- Docker 旁路由:容器自检和升级方法,只在容器里跑时出现 -->
+        <ContainerCard
+          v-if="serviceStatus?.platform === 'container'"
+          :status="serviceStatus"
+        />
+
         <!-- 内核参数:DNS 劫持、直连、IPv6、测速地址。改动写进档案,重启内核后生效。
              相邻的设置合成三张大卡片,卡片之间用分隔线隔开。 -->
         <template v-if="profile">
@@ -79,9 +85,10 @@
 </template>
 
 <script setup lang="ts">
-import { refreshServiceStatus } from '@/composables/kernelService'
+import { refreshServiceStatus, serviceStatus } from '@/composables/kernelService'
 import type { OpenboxKernelVersion, OpenboxProfile, OpenboxServiceStatus } from '@/api/openbox'
 import { fetchKernelVersion, fetchProfile, saveProfile } from '@/api/openbox'
+import ContainerCard from '@/components/kernel/ContainerCard.vue'
 import KernelServiceCard from '@/components/kernel/KernelServiceCard.vue'
 import NodeDirectCard from '@/components/kernel/NodeDirectCard.vue'
 import DirectBypassCard from '@/components/kernel/DirectBypassCard.vue'
