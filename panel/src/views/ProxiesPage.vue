@@ -182,7 +182,7 @@ const handleSubscriptionRefresh = async (id: string) => {
   try {
     const res = await refreshSubscription(id)
     await loadOpenboxSubscriptions()
-    notifySubscriptionSaved(res.changed, 'refreshed')
+    notifySubscriptionSaved(res.changed, 'refreshed', res)
   } catch {
     // 失败原因在订阅设置页会逐条显示;这里是只读入口,不重复铺错误文案
   } finally {

@@ -376,7 +376,7 @@ export interface OpenboxNodeGroup {
 export interface OpenboxSkippedNode {
   name: string
   type: string
-  reason?: 'unsupported-type' | 'unsupported-plugin' | 'invalid'
+  reason?: 'unsupported-type' | 'unsupported-plugin' | 'unsupported-transport' | 'invalid'
   detail?: string
 }
 export interface OpenboxSubscriptionPreview {

@@ -301,6 +301,7 @@ const { t } = useI18n()
 // 跳过的条目按原因写:插件内核没有 / 字段不合法 / 类型不认识
 const skippedText = (item: OpenboxSkippedNode) => {
   if (item.reason === 'unsupported-plugin') return t('subscriptionSkippedPlugin', { name: item.name, plugin: item.detail || '' })
+  if (item.reason === 'unsupported-transport') return t('subscriptionSkippedTransport', { name: item.name, type: item.type, detail: item.detail || '' })
   if (item.reason === 'invalid') return t('subscriptionSkippedInvalid', { name: item.name, type: item.type, detail: item.detail || '' })
   return t('subscriptionSkippedReason', { name: item.name, type: item.type })
 }

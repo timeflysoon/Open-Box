@@ -19,7 +19,7 @@
           </h2>
           <p class="text-base-content/55 mt-1 text-xs">{{ $t('subscriptionShareSubtitle') }}</p>
         </div>
-        <button type="button" class="btn btn-primary btn-sm btn-square" v-tip="$t('dnsRewriteAdd')" :aria-label="$t('dnsRewriteAdd')" @click.stop="openCreate">
+        <button type="button" class="btn btn-primary btn-sm btn-square" v-tip="$t('subscriptionShareAdd')" :aria-label="$t('subscriptionShareAdd')" @click.stop="openCreate">
           <PlusIcon class="h-4 w-4" />
         </button>
       </div>
@@ -54,7 +54,7 @@
         <div class="max-h-80 overflow-y-auto pr-1">
           <label v-for="sub in subscriptions" :key="sub.id" class="border-base-content/10 flex items-center gap-2 border-b py-2 text-sm first:border-t">
             <input v-model="form.subscriptionIds" type="checkbox" class="checkbox checkbox-sm" :value="sub.id" />
-            <span class="min-w-0 flex-1 truncate">{{ sub.name }}</span><span class="text-base-content/50 text-xs">{{ $t('groupAutoNodeCount', { count: sub.nodeCount }) }}</span>
+            <span class="min-w-0 flex-1 truncate">{{ sub.name }}</span><span class="text-base-content/50 text-xs">{{ $t('subscriptionShareNodeCount', { count: sub.nodeCount }) }}</span>
           </label>
         </div>
         <p v-if="!subscriptions.length" class="text-base-content/55 text-xs">{{ $t('subscriptionShareNeedSubscription') }}</p>
@@ -140,10 +140,14 @@ const save = async () => {
       ? await updateSubscriptionShare(editing.value.id, { name: form.name, host: form.host, protocol: form.protocol, subscriptionIds: form.subscriptionIds })
       : await createSubscriptionShare({ name: form.name, host: form.host, protocol: form.protocol, subscriptionIds: form.subscriptionIds, token: draftToken.value })
     await makeQr(share); emit('changed'); dialogOpen.value = false; showNotification({ content: 'subscriptionShareSaved', type: 'alert-success' })
+    // 新建时服务端发现草稿 token 已被别的分享占用,会换一个:提示以列表里的链接为准
+    if (!editing.value && share.token !== draftToken.value) showNotification({ content: 'subscriptionShareTokenReplaced', type: 'alert-warning' })
   } catch (error) { showNotification({ content: 'subscriptionShareSaveFailed', type: 'alert-error', params: { message: error instanceof Error ? error.message : String(error) } }) } finally { busy.value = false }
 }
-const toggle = async (share: OpenboxSubscriptionShare) => { if (busy.value) return; busy.value = true; try { await updateSubscriptionShare(share.id, { name: share.name, host: share.host, protocol: (share.protocol || currentProtocol()) as 'http' | 'https', subscriptionIds: share.subscriptionIds, enabled: share.enabled === false }) ; emit('changed') } finally { busy.value = false } }
-const regenerate = async (share: OpenboxSubscriptionShare) => { if (busy.value) return; busy.value = true; try { await regenerateSubscriptionShare(share.id); emit('changed') } finally { busy.value = false } }
-const remove = async (share: OpenboxSubscriptionShare) => { if (busy.value || !window.confirm(t('subscriptionShareDeleteConfirm', { name: share.name }))) return; busy.value = true; try { await deleteSubscriptionShare(share.id); emit('changed') } finally { busy.value = false } }
+// 启停 / 重新生成 / 删除失败时提示原因,不再静默吞掉
+const actionFailed = (error: unknown) => showNotification({ content: 'subscriptionShareActionFailed', type: 'alert-error', params: { message: error instanceof Error ? error.message : String(error) } })
+const toggle = async (share: OpenboxSubscriptionShare) => { if (busy.value) return; busy.value = true; try { await updateSubscriptionShare(share.id, { name: share.name, host: share.host, protocol: (share.protocol || currentProtocol()) as 'http' | 'https', subscriptionIds: share.subscriptionIds, enabled: share.enabled === false }) ; emit('changed') } catch (error) { actionFailed(error) } finally { busy.value = false } }
+const regenerate = async (share: OpenboxSubscriptionShare) => { if (busy.value || !window.confirm(t('subscriptionShareRegenerateConfirm', { name: share.name }))) return; busy.value = true; try { await regenerateSubscriptionShare(share.id); emit('changed') } catch (error) { actionFailed(error) } finally { busy.value = false } }
+const remove = async (share: OpenboxSubscriptionShare) => { if (busy.value || !window.confirm(t('subscriptionShareDeleteConfirm', { name: share.name }))) return; busy.value = true; try { await deleteSubscriptionShare(share.id); emit('changed') } catch (error) { actionFailed(error) } finally { busy.value = false } }
 const copy = async (value: string) => { const ok = await copyToClipboard(value); showNotification({ content: ok ? 'copySuccess' : 'copyFailed', type: ok ? 'alert-success' : 'alert-error' }) }
 </script>
