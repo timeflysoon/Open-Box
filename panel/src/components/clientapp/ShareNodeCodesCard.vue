@@ -92,11 +92,41 @@
             <ClipboardDocumentIcon class="h-4 w-4" />
           </button>
         </div>
+        <template v-if="current.link">
+          <div class="join w-full">
+            <input
+              :value="current.link"
+              type="text"
+              readonly
+              class="input input-sm join-item w-full font-mono text-xs"
+            />
+            <button
+              type="button"
+              class="btn btn-sm join-item"
+              @click="copy(current.link)"
+            >
+              <ClipboardDocumentIcon class="h-4 w-4" />
+            </button>
+          </div>
+          <p class="text-base-content/60 text-xs">{{ $t('shareCodeLinkHint') }}</p>
+        </template>
+        <p
+          v-if="current.server.enabled === false"
+          class="text-warning text-xs"
+        >
+          {{ $t('shareCodeDisabled') }}
+        </p>
+        <p
+          v-if="isLocalAddress(current.server.address || '')"
+          class="text-warning text-xs"
+        >
+          {{ $t('shareCodeLocalAddress', { address: current.server.address }) }}
+        </p>
         <p
           v-if="!info.lanAddresses.length"
           class="text-warning text-xs"
         >
-          {{ $t('clientConfigNoLan') }}
+          {{ $t('shareCodeNoLan') }}
         </p>
       </div>
     </DialogWrapper>
@@ -111,14 +141,14 @@ import StatusBadge from '@/components/common/StatusBadge.vue'
 import { copyText } from '@/helper/clipboard'
 import { buildShareAppCode } from '@/helper/clientAppCode'
 import { showNotification } from '@/helper/notification'
-import { buildShareLink } from '@/helper/shareLink'
+import { buildShareLink, isLocalAddress } from '@/helper/shareLink'
 import { ClipboardDocumentIcon, QrCodeIcon, ServerStackIcon } from '@heroicons/vue/24/outline'
 import QRCode from 'qrcode'
 import { computed, onMounted, ref } from 'vue'
 
 const props = defineProps<{ info: OpenboxClientAppInfo }>()
 
-type Row = { server: OpenboxServer; code: string }
+type Row = { server: OpenboxServer; code: string; link: string }
 
 const servers = ref<OpenboxServer[]>([])
 const loading = ref(true)
@@ -134,10 +164,10 @@ const router = computed(() => ({
 }))
 
 const rows = computed<Row[]>(() =>
-  servers.value.map((server) => ({
-    server,
-    code: buildShareAppCode(router.value, { id: server.id, link: buildShareLink(server) || '' }),
-  })),
+  servers.value.map((server) => {
+    const link = buildShareLink(server) || ''
+    return { server, link, code: buildShareAppCode(router.value, { id: server.id, link }) }
+  }),
 )
 
 const copy = async (text: string) => {

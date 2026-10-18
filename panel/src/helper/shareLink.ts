@@ -9,6 +9,20 @@ import type { OpenboxServer } from '@/api/openbox'
 
 export const TLS_SERVER_NAME = 'open-box.local'
 
+// 只在局域网 / 本机里能用的地址:私网和链路本地 IP、回环、localhost、.local / .lan 域名、不带点的主机名。
+// 这类地址写进分享链接,人在外面就连不上
+export const isLocalAddress = (raw: string): boolean => {
+  const a = raw.trim().replace(/^\[|\]$/g, '').toLowerCase()
+  if (!a) return false
+  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(a)
+  if (v4) {
+    const [x, y] = [Number(v4[1]), Number(v4[2])]
+    return x === 10 || x === 127 || x === 0 || (x === 169 && y === 254) || (x === 172 && y >= 16 && y <= 31) || (x === 192 && y === 168)
+  }
+  if (a.includes(':')) return a === '::1' || a.startsWith('fe80:') || a.startsWith('fc') || a.startsWith('fd')
+  return a === 'localhost' || a.endsWith('.local') || a.endsWith('.lan') || !a.includes('.')
+}
+
 const hostPart = (address: string) => (address.includes(':') && !address.startsWith('[') ? `[${address}]` : address)
 
 export const buildShareLink = (s: OpenboxServer): string => {

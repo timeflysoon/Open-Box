@@ -50,7 +50,7 @@ const load = async () => {
     info.value = await fetchClientAppInfo()
   } catch (error) {
     showNotification({
-      content: 'clientConfigLoadFailed',
+      content: 'shareCodeInfoFailed',
       params: { message: error instanceof Error ? error.message : String(error) },
       type: 'alert-error',
     })

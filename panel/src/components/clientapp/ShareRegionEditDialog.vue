@@ -2,7 +2,7 @@
   <!-- 地区组编辑弹窗:名称与地区 / 规则 / DNS 三个页签 -->
   <DialogWrapper
     v-model="isOpen"
-    :title="$t(group ? 'shareRegionsEditTitle' : 'shareRegionsAdd')"
+    :title="$t(group ? 'shareRegionsEditTitle' : 'shareRegionsAddTitle')"
     box-class="h-[90dvh] w-full max-w-4xl"
   >
     <div
@@ -31,7 +31,7 @@
         class="flex flex-col gap-4"
       >
         <div class="flex flex-col gap-1">
-          <label class="text-xs font-medium">{{ $t('cfName') }}</label>
+          <label class="text-xs font-medium">{{ $t('shareRegionsNameLabel') }}</label>
           <input
             v-model="form.name"
             type="text"

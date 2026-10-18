@@ -9,7 +9,7 @@
             type="button"
             class="btn btn-ghost btn-square btn-sm"
             :disabled="saving"
-            v-tip="$t('cfRestore')"
+            v-tip="$t('shareRegionsRestore')"
             @click="reset"
           >
             <ArrowUturnLeftIcon class="h-4 w-4" />
@@ -18,7 +18,7 @@
             type="button"
             class="btn btn-primary btn-circle btn-sm"
             :disabled="saving || list.length >= SHARE_REGION_LIMITS.groups"
-            v-tip="$t('groupAdd')"
+            v-tip="list.length >= SHARE_REGION_LIMITS.groups ? $t('shareRegionsMax', { max: SHARE_REGION_LIMITS.groups }) : $t('shareRegionsAddTitle')"
             @click="openEdit(null)"
           >
             <PlusIcon class="h-4 w-4" />
@@ -246,6 +246,11 @@ const remove = async (g: OpenboxShareRegionGroup) => {
 }
 
 const reset = async () => {
+  // 没改过(服务器上就是默认的三组)就不用再恢复
+  if (!props.info.shareRegionsCustomized) {
+    showNotification({ content: 'shareRegionsAlreadyDefault', type: 'alert-info' })
+    return
+  }
   if (!window.confirm(t('shareRegionsRestoreConfirm'))) return
   await persist([])
 }
