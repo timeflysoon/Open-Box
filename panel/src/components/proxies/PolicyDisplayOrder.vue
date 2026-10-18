@@ -3,7 +3,18 @@
        (改它去后台目标分流页)。两列并排放着,是为了让人一眼看出这两个顺序是两回事。 -->
   <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
     <div class="flex flex-col gap-2">
-      <div class="text-xs font-medium">{{ $t('policyDisplayOrder') }}</div>
+      <div class="flex items-center justify-between gap-2">
+        <div class="text-xs font-medium">{{ $t('policyDisplayOrder') }}</div>
+        <!-- 一键把显示顺序改成和右边的命中顺序一样 -->
+        <button
+          type="button"
+          class="btn btn-ghost btn-xs"
+          :disabled="!orderDiffers"
+          @click="resetToMatchOrder"
+        >
+          {{ $t('policyDisplayOrderReset') }}
+        </button>
+      </div>
       <Draggable
         v-model="rows"
         :animation="150"
@@ -111,6 +122,12 @@ const customIcon = computed(() => {
   const code = customPolicySummary.value?.icon
   return (code && iconUrlFor(code)) || ''
 })
+
+const orderDiffers = computed(() => rows.value.map((r) => r.name).join('\n') !== matchOrder.value.join('\n'))
+const resetToMatchOrder = async () => {
+  rows.value = toRows(matchOrder.value)
+  await persist()
+}
 
 const persist = async () => {
   try {

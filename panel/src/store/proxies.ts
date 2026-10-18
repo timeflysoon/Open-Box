@@ -614,6 +614,8 @@ const testLatencyOneByOneWithTip = async (
   let testFailed = 0
   // 失败原因归类:内核 delay 接口超时回 504 / 「Timeout」,其余都算连接失败
   const reasonCounts = new Map<string, number>()
+  // 开始时前面已经有测速在跑(名额被占着):这一批要排队,进度提示换成「已排队」的说法
+  const queued = limiter.activeCount + limiter.pendingCount > 0
 
   await Promise.allSettled(
     nodes.map((name) =>
@@ -631,7 +633,7 @@ const testLatencyOneByOneWithTip = async (
         }
         testDone++
         showNotification({
-          content: 'testFinishedTip',
+          content: queued ? 'latencyQueuedTip' : 'testFinishedTip',
           key: TIP_KEY + keyName,
           params: {
             name: getNameForNotification(displayName, url),

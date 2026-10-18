@@ -11,7 +11,7 @@
     <TextInput
       class="w-24 sm:w-40"
       v-model="sourceIPLabel.label"
-      :placeholder="$t('label')"
+      :placeholder="$t('sourceIPLabelName')"
     />
     <slot></slot>
   </div>
