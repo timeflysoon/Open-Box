@@ -76,6 +76,7 @@ import { connectionCardLines } from '@/store/settings'
 import { PlusIcon, TrashIcon } from '@heroicons/vue/24/outline'
 import { ref } from 'vue'
 import Draggable from 'vuedraggable'
+import { useI18n } from 'vue-i18n'
 
 const restOfColumns = ref<CONNECTIONS_TABLE_ACCESSOR_KEY[]>([])
 
@@ -84,6 +85,8 @@ const setRestOfColumns = () => {
     (key) => !connectionCardLines.value.flat().includes(key),
   )
 }
+
+const { t } = useI18n()
 
 setRestOfColumns()
 
@@ -96,6 +99,7 @@ const addLine = () => {
 }
 
 const removeLine = (index: number) => {
+  if (!window.confirm(t('connectionCardLineDeleteConfirm'))) return
   connectionCardLines.value.splice(index, 1)
   setRestOfColumns()
 }

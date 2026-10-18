@@ -126,6 +126,7 @@
 </template>
 
 <script setup lang="ts">
+import { useI18n } from 'vue-i18n'
 import {
   fetchKnownClients,
   fetchNodeGroups,
@@ -144,6 +145,7 @@ import { Bars3Icon, DevicePhoneMobileIcon, PencilSquareIcon, PlusIcon, PowerIcon
 import { computed, onMounted, ref, watch } from 'vue'
 import Draggable from 'vuedraggable'
 
+const { t } = useI18n()
 const { padding } = usePaddingForViews({ offsetTop: 0, offsetBottom: 0 })
 
 const profile = ref<OpenboxProfile | null>(null)
@@ -247,6 +249,7 @@ const toggle = (r: OpenboxClientRoute) => {
   void persist(routes.value.map((x) => (x.id === r.id ? { ...x, enabled: x.enabled === false } : x)))
 }
 const remove = (r: OpenboxClientRoute) => {
+  if (!window.confirm(t('clientRouteDeleteConfirm', { name: r.name }))) return
   void persist(routes.value.filter((x) => x.id !== r.id))
 }
 

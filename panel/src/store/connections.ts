@@ -4,6 +4,7 @@ import { getChainsStringFromConnection, getInboundUserFromConnection } from '@/h
 import type { Connection, ConnectionRawMessage } from '@/types'
 import { useStorage, watchOnce } from '@vueuse/core'
 import dayjs from 'dayjs'
+import { showNotification } from '@/helper/notification'
 import { computed, ref, watch } from 'vue'
 import { initAggregatedDataMap, saveConnectionHistory } from './connHistory'
 import { autoDisconnectIdleUDP, autoDisconnectIdleUDPTime, useConnectionCard } from './settings'
@@ -168,13 +169,28 @@ export const connections = computed(() => {
     : closedConnections.value
 })
 
+let lastQuickFilterError = ''
+
 export const renderConnections = computed(() => {
   const lowerCaseFilter = connectionFilter.value.split(' ').map((f) => f.toLowerCase().trim())
 
   let regex: RegExp | null = null
 
   if (quickFilterEnabled.value && quickFilterRegex.value) {
-    regex = new RegExp(quickFilterRegex.value, 'i')
+    try {
+      regex = new RegExp(quickFilterRegex.value, 'i')
+      lastQuickFilterError = ''
+    } catch (error) {
+      // 正则写错不能让整张连接表崩掉:先不按它过滤,同一条错误只提示一次
+      if (lastQuickFilterError !== quickFilterRegex.value) {
+        lastQuickFilterError = quickFilterRegex.value
+        showNotification({
+          content: 'quickFilterRegexInvalid',
+          params: { message: error instanceof Error ? error.message : String(error) },
+          type: 'alert-warning',
+        })
+      }
+    }
   }
 
   return connections.value
