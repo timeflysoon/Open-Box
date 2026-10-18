@@ -11,6 +11,7 @@
           v-bind="tile.attrs"
           :title="tile.hint"
           class="border-base-300/60 bg-base-100 flex items-center gap-2 rounded-lg border px-3 py-2.5"
+          @click="onTileClick($event, tile)"
           :class="tile.available ? 'hover:bg-base-200/60 transition-colors' : 'cursor-not-allowed'"
         >
           <!-- eslint-disable-next-line vue/no-v-html -->
@@ -57,11 +58,41 @@
         </component>
       </div>
     </div>
+
+    <!-- 点平台:弹出二维码,手机扫码下载;也可以直接点按钮下载 -->
+    <DialogWrapper
+      v-model="showQr"
+      :title="qrTile ? $t('clientDownloadQrTitle', { name: qrTile.name }) : ''"
+      box-class="w-full max-w-sm"
+    >
+      <div
+        v-if="qrTile"
+        class="flex flex-col items-center gap-3 text-sm"
+      >
+        <img
+          v-if="qrDataUrl"
+          :src="qrDataUrl"
+          class="h-56 w-56 rounded-lg bg-white p-1"
+          alt="QR"
+        />
+        <p class="text-base-content/60 text-center text-xs">{{ $t('clientDownloadQrHint') }}</p>
+        <a
+          :href="qrTile.href"
+          target="_blank"
+          rel="noopener noreferrer"
+          class="btn btn-primary btn-sm"
+        >
+          {{ $t('clientDownloadButton') }}
+        </a>
+      </div>
+    </DialogWrapper>
   </div>
 </template>
 
 <script setup lang="ts">
 import CountryFlag from '@/components/common/CountryFlag.vue'
+import DialogWrapper from '@/components/common/DialogWrapper.vue'
+import QRCode from 'qrcode'
 import { computed, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 
@@ -178,6 +209,27 @@ const loadReleases = async (): Promise<Record<string, Release>> => {
   } finally {
     clearTimeout(timer)
   }
+}
+
+const showQr = ref(false)
+const qrTile = ref<{ name: string; href: string } | null>(null)
+const qrDataUrl = ref('')
+
+// 可下载的平台:拦下默认的跳转,改成弹二维码窗(窗里的按钮才是真正的下载链接)
+const onTileClick = (event: Event, tile: { available: boolean; name: string; attrs: Record<string, string> }) => {
+  const href = tile.attrs.href
+  if (!tile.available || !href) return
+  event.preventDefault()
+  qrTile.value = { name: tile.name, href }
+  qrDataUrl.value = ''
+  showQr.value = true
+  QRCode.toDataURL(href, { margin: 1, width: 352 })
+    .then((url) => {
+      if (qrTile.value?.href === href) qrDataUrl.value = url
+    })
+    .catch(() => {
+      qrDataUrl.value = ''
+    })
 }
 
 const loading = ref(true)
