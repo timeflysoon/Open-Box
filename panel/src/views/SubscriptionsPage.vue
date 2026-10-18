@@ -27,6 +27,15 @@
             <button
               type="button"
               class="btn btn-sm btn-square"
+              v-tip="$t('groupRestore')"
+              :aria-label="$t('groupRestore')"
+              @click="groupsPanel?.restoreDefaults()"
+            >
+              <ArrowUturnLeftIcon class="h-4 w-4" />
+            </button>
+            <button
+              type="button"
+              class="btn btn-sm btn-square"
               v-tip="$t('groupAutoAdd')"
               :aria-label="$t('groupAutoAdd')"
               @click="groupsPanel?.openAutoDialog()"
@@ -176,6 +185,7 @@ import SubscriptionCard from '@/components/subscription/SubscriptionCard.vue'
 import SubscriptionShareCard from '@/components/subscription/SubscriptionShareCard.vue'
 import { usePaddingForViews } from '@/composables/paddingViews'
 import {
+  ArrowUturnLeftIcon,
   PlusIcon,
   RssIcon,
   SparklesIcon,

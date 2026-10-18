@@ -920,7 +920,7 @@
 
 <script setup lang="ts">
 import type { OpenboxFailoverLane, OpenboxFailoverSettings, OpenboxGroupType, OpenboxUserGroup } from '@/api/openbox'
-import { fetchNodeGroups, saveNodeGroups } from '@/api/openbox'
+import { fetchDefaultNodeGroups, fetchNodeGroups, saveNodeGroups } from '@/api/openbox'
 import BulkPick from '@/components/subscription/BulkPick.vue'
 import CountryFlag from '@/components/common/CountryFlag.vue'
 import CountrySelect from '@/components/common/CountrySelect.vue'
@@ -1434,11 +1434,11 @@ const openAutoDialog = () => {
   showAuto.value = true
 }
 
-const AUTO_SUFFIX: Record<OpenboxGroupType, string> = {
-  urltest: '自动',
-  selector: '手动',
-  // 自动分组只建自动 / 手动两种;故障转移要用户自己排主备,这里只是让类型表完整
-  failover: '主备',
+// 自动分组只建自动 / 手动两种;故障转移要用户自己排主备,这里只是让类型表完整
+const AUTO_SUFFIX_KEY: Record<OpenboxGroupType, string> = {
+  urltest: 'groupAutoSuffixUrltest',
+  selector: 'groupAutoSuffixSelector',
+  failover: 'groupAutoSuffixFailover',
 }
 
 // 同一个国家的组要挨在一起,自动排在手动前面。分两次生成(先建一批自动,过几天
@@ -1477,7 +1477,7 @@ const createAutoGroups = async () => {
     const country = findCountry(code)
     if (!country) continue
     for (const type of autoTypes.value) {
-      const name = `${countryName(country, locale.value)}-${AUTO_SUFFIX[type]}`
+      const name = `${countryName(country, locale.value)}-${t(AUTO_SUFFIX_KEY[type])}`
       // 同名的跳过:组名就是内核里的出站名,重名会生成两个同名出站
       if (existing.has(name)) {
         skipped += 1
@@ -1522,7 +1522,20 @@ const createAutoGroups = async () => {
 }
 
 // 两个入口都在父组件的页签行上,弹窗在这里,所以要把它们暴露出去
-defineExpose({ openEditor, openAutoDialog })
+// 恢复默认:拿到随包默认的节点组,整体覆盖当前列表(走正常的保存,校验、落库不另开一条路)。
+// 自己建的组会被删掉,所以先确认。
+const restoreDefaults = async () => {
+  if (!window.confirm(t('groupRestoreConfirm'))) return
+  try {
+    const defaults = await fetchDefaultNodeGroups()
+    await persist(defaults)
+    showNotification({ content: 'groupRestored', type: 'alert-success' })
+  } catch (err) {
+    notifyError(err)
+  }
+}
+
+defineExpose({ openEditor, openAutoDialog, restoreDefaults })
 
 // 拖完就存:顺序也是配置的一部分(策略组在内核里的排列),不存下来刷新就白拖了
 const persistOrder = async () => {
