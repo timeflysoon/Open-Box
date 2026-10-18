@@ -37,11 +37,14 @@ import { BoltIcon } from '@heroicons/vue/24/outline'
 import { CountUp } from 'countup.js'
 import dayjs from 'dayjs'
 import { twMerge } from 'tailwind-merge'
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, createVNode, getCurrentInstance, nextTick, onMounted, onUnmounted, ref, render, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
+import NodeLatencyTip from './NodeLatencyTip.vue'
 
 const { t } = useI18n()
 const { showTip } = useTooltip()
+// 浮层是手动挂到 tippy 里的 DOM,不在这个组件的渲染树下:把应用上下文带过去,里面的组件才拿得到 i18n
+const appContext = getCurrentInstance()?.appContext ?? null
 // 最近 10 次结果,新的在上:mihomo 的独立测试模式内核自己留了多条,照用;sing-box 每个节点只留
 // 最新一次,用服务端攒的时间线(store/latencyHistory.ts),一条都没攒到就退回内核那一条。
 // 组看组自己的时间线(每笔带当时选中的节点),节点看节点的;标签本身显示的是当前所选节点的延迟
@@ -49,6 +52,15 @@ const timelineTarget = () => {
   if (props.timelineName) return props.timelineName
   const name = props.name ?? ''
   return proxyMap.value[name]?.all?.length ? name : getNowProxyNodeName(name)
+}
+// 不是真节点的出站:没有入口服务器可查,不出「节点信息」页签
+const NON_NODE_TYPES = new Set(['direct', 'reject', 'block', 'dns', 'pass', 'compatible', 'rejectdrop', 'selector', 'urltest', 'fallback', 'loadbalance', 'smart'])
+// 标签属于一个真节点(不是组、不是内置出站、也不是看组时间线的那个)才有节点信息可看
+const infoNode = () => {
+  if (props.timelineName) return null
+  const node = proxyMap.value[props.name ?? '']
+  if (!node || node.all?.length || NON_NODE_TYPES.has(String(node.type || '').toLowerCase())) return null
+  return node
 }
 const recentHistory = (): LatencySample[] => {
   const name = props.name ?? ''
@@ -70,8 +82,10 @@ const dotColor = (delay: number) => {
 }
 const handlerHistoryTip = (e: Event) => {
   const history = recentHistory()
+  const node = infoNode()
 
-  if (!history.length) return
+  // 没有历史也没有节点信息可看,就没有浮层
+  if (!history.length && !node) return
 
   // 竖着的时间线:左边时间、中间一根线穿过每次的点(顶端箭头,新的在上)、右边延迟按阈值着色;
   // 组的样本在时间上面用小字标出那一笔是当时选中的哪个节点测出来的
@@ -121,13 +135,43 @@ const handlerHistoryTip = (e: Event) => {
     historyList.append(time, cell, latency)
   })
 
-  // interactive:鼠标从标签移进浮层里不关,离开浮层才关
-  showTip(e, historyList, {
+  // 不是真节点:浮层就是时间线本身
+  if (!node) {
+    // interactive:鼠标从标签移进浮层里不关,离开浮层才关
+    showTip(e, historyList, {
+      delay: [1000, 150],
+      trigger: 'mouseenter',
+      touch: false,
+      interactive: true,
+      interactiveBorder: 8,
+    })
+    return
+  }
+
+  // 真节点:浮层是两个页签(测速延时 / 节点信息),打开时才挂上去,关了就卸掉
+  const host = document.createElement('div')
+  let mounted = false
+  showTip(e, host, {
     delay: [1000, 150],
     trigger: 'mouseenter',
     touch: false,
     interactive: true,
     interactiveBorder: 8,
+    onShow: () => {
+      if (mounted) return
+      const vnode = createVNode(NodeLatencyTip, {
+        name: props.name ?? '',
+        udp: !!node.udp,
+        history: history.length ? historyList : null,
+      })
+      vnode.appContext = appContext
+      render(vnode, host)
+      mounted = true
+    },
+    onDestroy: () => {
+      if (mounted) render(null, host)
+      mounted = false
+    },
   })
 }
 

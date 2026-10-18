@@ -1697,3 +1697,44 @@ export const testStoredLatencyStream = async (
   if (!state.final) throw new Error('latency stream ended without results')
   return state.final
 }
+
+// 节点信息(服务端 panel/server/api/node-info.mjs):入口地址解析、出口 IP 归属和风控值。
+export interface OpenboxNodeInfo {
+  tag: string
+  type: string
+  protocol: string[]
+  server: string
+  port: number | null
+  // 链式上游:这个节点经哪个节点去连
+  detour?: string
+  addresses: { v4: string[]; v6: string[] }
+  // 入口 IP 的国家(服务端缓存里有才带;没有就再问 entry-country)
+  entryCountry: string
+  resolveError?: string
+}
+
+export interface OpenboxNodeExit {
+  ok: boolean
+  at: number
+  ip: string
+  ipv6: string
+  location: string
+  country: string
+  asn?: string
+  asnOwner?: string
+  ipType: string
+  proxyType: string
+  risk: number | null
+  devices: number | null
+  registeredCountry: string
+  native: boolean | null
+  // 某一路没查到的来源,值是失败原因
+  errors?: { proxycheck?: string; rdap?: string }
+  cached?: boolean
+}
+
+export const fetchNodeInfo = (tag: string) => requestJson<OpenboxNodeInfo>(`/api/openbox/node-info/${encodeURIComponent(tag)}`)
+export const fetchNodeEntryCountry = (tag: string) => requestJson<{ ip: string; country: string }>(`/api/openbox/node-info/${encodeURIComponent(tag)}/entry-country`)
+// refresh = true 跳过 6 小时缓存重新查(服务端 15 秒内的重复刷新仍按缓存答)
+export const fetchNodeExit = (tag: string, refresh = false) =>
+  requestJson<OpenboxNodeExit>(`/api/openbox/node-info/${encodeURIComponent(tag)}/exit`, { method: 'POST', body: JSON.stringify({ refresh }) })
