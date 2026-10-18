@@ -183,6 +183,15 @@ export const SETTINGS_CATEGORIES: SettingsCategory[] = [
 ]
 
 /**
+ * Returns all item keys for a category (sub-items only, not the category key itself).
+ * Use for computing "has any visible item" in a settings section.
+ */
+export function getItemKeysByCategory(categoryKey: SETTINGS_MENU_KEY): string[] {
+  const category = SETTINGS_CATEGORIES.find((c) => c.key === categoryKey)
+  return category ? category.items.map((item) => item.key) : []
+}
+
+/**
  * Returns the category key plus all item keys for that category.
  * Use when you need both the top-level menu key and all sub-item keys (e.g. getAllSettingKeys).
  */
@@ -201,9 +210,14 @@ export function getAllSettingKeys(): string[] {
 
 /** Key map for general settings: label -> full key. Use with useIsSettingVisible(KEY_MAP.item). */
 export const GENERAL_ITEM_KEYS = keyMapByLabel(SETTINGS_MENU_KEY.general)
-
+/** Key map for overview settings. */
+export const OVERVIEW_ITEM_KEYS = keyMapByLabel(SETTINGS_MENU_KEY.overview)
+/** Key map for backend settings. */
+export const BACKEND_ITEM_KEYS = keyMapByLabel(SETTINGS_MENU_KEY.backend)
 /** Key map for proxies settings. */
 export const PROXIES_ITEM_KEYS = keyMapByLabel(SETTINGS_MENU_KEY.proxies)
+/** Key map for connections settings. */
+export const CONNECTIONS_ITEM_KEYS = keyMapByLabel(SETTINGS_MENU_KEY.connections)
 
 function keyMapByLabel(categoryKey: SETTINGS_MENU_KEY): Record<string, string> {
   const category = SETTINGS_CATEGORIES.find((c) => c.key === categoryKey)

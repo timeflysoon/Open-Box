@@ -248,3 +248,6 @@ export const getConnectionHistoryFromIndexedDB = async (
   }
 }
 
+export const clearConnectionHistoryFromIndexedDB = async () => {
+  return connectionHistoryDB.clear()
+}

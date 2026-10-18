@@ -864,6 +864,14 @@ export const getProxyGroupChains = (name: string) => {
   ]
 }
 
+export const getProxyFullChains = (name: string) => {
+  if (!name) {
+    return []
+  }
+
+  return [name, ...getProxyRouteChain(name)]
+}
+
 export const getDirectChildProxyGroups = (groupName: string) => {
   return (proxyMap.value[groupName]?.all ?? []).filter((name) => {
     return Boolean(proxyMap.value[name]?.all?.length)

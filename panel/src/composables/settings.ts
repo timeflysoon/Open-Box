@@ -14,3 +14,7 @@ export function useIsSettingVisible(_key: MaybeRef<string>) {
   return computed(() => true)
 }
 
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+export function useHasAnyVisibleSetting(_keys: MaybeRef<string[]>) {
+  return computed(() => true)
+}

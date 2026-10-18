@@ -73,6 +73,14 @@ export const isFailoverRejectMember = (groupName: string, member: string) => {
 export const failoverMembersOf = (groupName: string, all: string[]) =>
   all.filter((member) => !isFailoverRejectMember(groupName, member))
 
+// 页签的图标:自己挑了就用自己的,没挑继承父组的(短码,给 iconUrlFor 转成地址)
+export const failoverLaneIconCode = (groupName: string, laneId: string) => {
+  const group = managedOutbounds.value.find((g) => g.name === groupName)
+  if (!group || group.type !== 'failover') return ''
+  const lane = group.lanes?.find((l) => l.id === laneId)
+  return lane?.icon || group.icon || ''
+}
+
 export const isFailoverGroup = (groupName: string) =>
   managedOutbounds.value.some((g) => g.name === groupName && g.type === 'failover')
 

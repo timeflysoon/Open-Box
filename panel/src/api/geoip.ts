@@ -10,6 +10,18 @@ export interface IPInfo {
   organization: string
 }
 
+// china
+export const getIPFromIpipnetAPI = async () => {
+  const response = await fetch('https://myip.ipip.net/json?t=' + Date.now())
+
+  return (await response.json()) as {
+    data: {
+      ip: string
+      location: string[]
+    }
+  }
+}
+
 // global
 const getIPFromIpsbAPI = async (ip = '') => {
   const response = await fetch(
