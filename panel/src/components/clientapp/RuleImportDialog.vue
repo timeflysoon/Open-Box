@@ -40,6 +40,12 @@
         >
           {{ $t('routingPolicyRuleImportCount', { count: entries.length }) }}
         </p>
+        <p
+          v-if="entries.length > max"
+          class="text-warning text-xs"
+        >
+          {{ $t('routingPolicyRuleImportTooMany', { count: entries.length, max }) }}
+        </p>
         <div class="border-base-300/60 max-h-80 overflow-y-auto rounded-lg border">
           <p
             v-if="!entries.length"

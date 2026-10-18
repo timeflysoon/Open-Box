@@ -31,6 +31,24 @@
       <button
         v-if="profile"
         type="button"
+        class="btn btn-sm btn-square"
+        :disabled="resetting"
+        v-tip="$t('routingResetDefaults')"
+        :aria-label="$t('routingResetDefaults')"
+        @click="resetDefaults"
+      >
+        <span
+          v-if="resetting"
+          class="loading loading-spinner loading-xs"
+        />
+        <ArrowUturnLeftIcon
+          v-else
+          class="h-4 w-4"
+        />
+      </button>
+      <button
+        v-if="profile"
+        type="button"
         class="btn btn-primary btn-sm btn-square"
         v-tip="$t('routingPolicyAdd')"
         :aria-label="$t('routingPolicyAdd')"
@@ -44,13 +62,15 @@
 
 <script setup lang="ts">
 import type { OpenboxProfile } from '@/api/openbox'
-import { fetchProfile, saveProfile } from '@/api/openbox'
+import { fetchDefaultRouting, fetchProfile, saveProfile } from '@/api/openbox'
 import RoutingPoliciesCard from '@/components/routing/RoutingPoliciesCard.vue'
 import { usePaddingForViews } from '@/composables/paddingViews'
 import { showNotification } from '@/helper/notification'
-import { PlusIcon } from '@heroicons/vue/24/outline'
+import { ArrowUturnLeftIcon, PlusIcon } from '@heroicons/vue/24/outline'
 import { onMounted, ref, useTemplateRef } from 'vue'
+import { useI18n } from 'vue-i18n'
 
+const { t } = useI18n()
 const { padding } = usePaddingForViews({
   offsetTop: 0,
   offsetBottom: 0,
@@ -83,5 +103,24 @@ const patchProfile = async (patch: Record<string, unknown>): Promise<OpenboxProf
   const updated = await saveProfile(patch)
   profile.value = updated
   return updated
+}
+
+// 恢复默认目标分流:取随包默认的分流,经同一条保存路径写回(校验、落库不另开一条路);已设定的规则会被覆盖,先确认
+const resetting = ref(false)
+const resetDefaults = async () => {
+  if (resetting.value || !window.confirm(t('routingResetDefaultsConfirm'))) return
+  resetting.value = true
+  try {
+    await patchProfile({ routing: await fetchDefaultRouting() })
+    showNotification({ content: 'routingResetDefaultsDone', type: 'alert-success' })
+  } catch (error) {
+    showNotification({
+      content: 'routingResetDefaultsFailed',
+      params: { message: error instanceof Error ? error.message : String(error) },
+      type: 'alert-error',
+    })
+  } finally {
+    resetting.value = false
+  }
 }
 </script>

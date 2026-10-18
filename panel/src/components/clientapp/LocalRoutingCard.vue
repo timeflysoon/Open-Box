@@ -286,9 +286,13 @@ const toggleEnabled = async () => {
   try {
     const r = await setClientConfigEnabled(!current.enabled)
     current.enabled = r.enabled
+    showNotification({
+      content: r.enabled ? 'clientConfigSyncEnabled' : 'clientConfigSyncDisabled',
+      type: r.enabled ? 'alert-success' : 'alert-info',
+    })
   } catch (error) {
     showNotification({
-      content: 'saveFailed',
+      content: 'clientConfigPowerFailed',
       params: { message: errorMessage(error) },
       type: 'alert-error',
     })
@@ -307,14 +311,16 @@ const exportFile = async () => {
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
-    a.download = clientConfigExportFileName(current.routerName || props.info.routerName)
+    const fileName = clientConfigExportFileName(current.routerName || props.info.routerName)
+    a.download = fileName
     document.body.appendChild(a)
     a.click()
     document.body.removeChild(a)
     URL.revokeObjectURL(url)
+    showNotification({ content: 'clientConfigExported', params: { file: fileName }, type: 'alert-success' })
   } catch (error) {
     showNotification({
-      content: 'backupExportFailed',
+      content: 'clientConfigExportFailed',
       params: { message: errorMessage(error) },
       type: 'alert-error',
     })
