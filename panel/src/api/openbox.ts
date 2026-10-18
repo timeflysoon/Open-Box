@@ -1030,6 +1030,19 @@ export interface OpenboxPenetrationResult {
   // 内核还在跑旧的分流配置(改了没重启)。为真时「规则路由」是按当前设置推算的,
   // 下面的「真实路由」才是内核此刻的实际行为,两者对不上是正常的。
   routingStale?: boolean
+  // 入口预匹配:新连接的首包由内核按前置自定义分流规则预判。verdict:bypass = 入口放行(kind 区分
+  // 节点服务器 / 直连终端),kernel = 进内核(reason 说明为什么),其它 = 没判出来(error 是原因)
+  preMatch?: {
+    verdict: 'bypass' | 'kernel' | 'unknown'
+    kind?: 'nodes' | 'terminal'
+    reason?: 'fakeip' | 'port' | 'ip' | 'set'
+    port?: number
+    cidr?: string
+    tag?: string
+    // 目标地址没解析出来,命中前置自定义分流的仍按进内核算
+    ipUnknown?: boolean
+    error?: string
+  } | null
   // 部署时第一层的判定(config.meta.json 的 firstLayer,见 server/system/deploy.mjs)
   firstLayer?: {
     dnsMode: string

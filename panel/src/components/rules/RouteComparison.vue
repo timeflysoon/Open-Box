@@ -361,10 +361,15 @@
             <span class="text-base-content/60 text-xs">{{ ruleEntry.sub }}</span>
           </template>
           <template
-            v-if="ruleEntry.detail"
+            v-if="ruleEntry.detail.length"
             #details
           >
-            <p>{{ ruleEntry.detail }}</p>
+            <p
+              v-for="line in ruleEntry.detail"
+              :key="line"
+            >
+              {{ line }}
+            </p>
           </template>
         </RouteStage>
         <RouteStage
@@ -936,15 +941,40 @@ const ruleDns = computed<DnsView>(() => {
 // ③ 左:入口是配置状态,不是本目标的观测——只有目标是 IP、且命中的规则集正好在旁路集合里,才能说它会在入口旁路
 const ruleEntry = computed(() => {
   const f = rule.value?.firstLayer
-  if (!rule.value || ruleError.value) return { state: 'ok' as RouteStageState, value: '', sub: '', detail: '' }
-  if (!f) return { state: 'pending' as RouteStageState, value: t('routeEntryUnknown'), sub: t('routeEntryNoMeta'), detail: '' }
+  if (!rule.value || ruleError.value) return { state: 'ok' as RouteStageState, value: '', sub: '', detail: [] as string[] }
+  if (!f) return { state: 'pending' as RouteStageState, value: t('routeEntryUnknown'), sub: t('routeEntryNoMeta'), detail: [] as string[] }
+  // 入口预匹配:新连接的首包由内核按前置自定义分流规则预判(节点服务器 / 直连终端直接在入口放行,
+  // 其余要看是不是命中前置规则才进内核)。服务端给了 preMatch 就按它说,不再按旁路集合推算。
+  const pre = rule.value.preMatch
+  if (pre) {
+    const why =
+      pre.reason === 'fakeip'
+        ? t('routePreMatchWhyFakeIp')
+        : pre.reason === 'port'
+          ? pre.port === 53
+            ? t('routePreMatchWhyDns')
+            : t('routePreMatchWhyPort', { port: pre.port ?? '' })
+          : pre.reason === 'ip'
+            ? t('routePreMatchWhyIp', { cidr: pre.cidr || '' })
+            : pre.reason === 'set'
+              ? t('routePreMatchWhySet', { tag: pre.tag || '' })
+              : ''
+    const detail = [t('routePreMatchDetail'), pre.ipUnknown ? t('routePreMatchIpUnknown') : ''].filter(Boolean)
+    if (pre.verdict === 'bypass') {
+      return { state: 'ok' as RouteStageState, value: t(pre.kind === 'nodes' ? 'routePreMatchNodes' : 'routePreMatchTerminal'), sub: '', detail }
+    }
+    if (pre.verdict === 'kernel') {
+      return { state: 'ok' as RouteStageState, value: t('routePreMatchKernel', { why }), sub: '', detail }
+    }
+    return { state: 'pending' as RouteStageState, value: t('routePreMatchUnknown', { error: pre.error || '' }), sub: '', detail }
+  }
   if (!f.nativeBypass?.enabled) {
-    return { state: 'ok' as RouteStageState, value: t('routeEntryKernel'), sub: t('routeEntryNoBypass'), detail: t('ruleLookupFirstLayerBypassOff', { reason: f.nativeBypass?.reason || '' }) }
+    return { state: 'ok' as RouteStageState, value: t('routeEntryKernel'), sub: t('routeEntryNoBypass'), detail: [t('ruleLookupFirstLayerBypassOff', { reason: f.nativeBypass?.reason || '' })] }
   }
   const sets = f.nativeBypass.sets
   const hit = targetKind.value === 'domain' ? '' : listOf((rule.value.matched?.rule as Record<string, unknown> | undefined)?.rule_set).find((s) => sets.includes(s)) || ''
-  if (hit) return { state: 'ok' as RouteStageState, value: t('routeEntryBypassHit', { set: hit }), sub: '', detail: t('ruleLookupFirstLayerBypassOn', { sets: sets.join(', '), via: f.nativeBypass.via === 'route' ? t('ruleLookupFirstLayerViaRoute') : 'nft' }) }
-  return { state: 'pending' as RouteStageState, value: t('routeEntryBypassUndetermined'), sub: '', detail: t('routeEntryBypassUndeterminedDetail') }
+  if (hit) return { state: 'ok' as RouteStageState, value: t('routeEntryBypassHit', { set: hit }), sub: '', detail: [t('ruleLookupFirstLayerBypassOn', { sets: sets.join(', '), via: f.nativeBypass.via === 'route' ? t('ruleLookupFirstLayerViaRoute') : 'nft' })] }
+  return { state: 'pending' as RouteStageState, value: t('routeEntryBypassUndetermined'), sub: '', detail: [t('routeEntryBypassUndeterminedDetail')] }
 })
 const ruleMatch = computed<{ state: RouteStageState; badge?: string; tone: Tone }>(() => {
   const r = rule.value
