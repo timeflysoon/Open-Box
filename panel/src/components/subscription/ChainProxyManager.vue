@@ -56,12 +56,40 @@
             <div class="min-w-0 flex-1">
               <div class="flex flex-wrap items-center gap-x-2 gap-y-1">
                 <span class="max-w-full truncate text-base font-medium">{{ chain.name }}</span>
+                <span class="badge badge-outline badge-sm shrink-0 whitespace-nowrap">{{ $t('chainProxyVia', { upstream: chain.upstream }) }}</span>
+                <!-- 逐条测速的结果(点右边的闪电):延迟 + 出口 IP。没进内核的链路是单独发请求测的,延迟会偏高 -->
+                <template v-if="rowInfos[chain.id] && !testingIds.has(chain.id)">
+                  <span
+                    v-if="rowInfos[chain.id].ok"
+                    class="text-xs font-medium"
+                    :class="latencyClass(rowInfos[chain.id].ms)"
+                    v-tip="inKernel(chain) ? '' : $t('chainProxyLatencyNotInKernel')"
+                  >{{ rowInfos[chain.id].ms }} ms</span>
+                  <span
+                    v-else
+                    class="text-error shrink-0 text-xs"
+                    v-tip="rowInfos[chain.id].error"
+                  >{{ $t('chainProxyTestFailed') }}</span>
+                  <span
+                    v-if="rowInfos[chain.id].ipText"
+                    class="text-base-content/70 min-w-0 truncate text-xs"
+                  >{{ rowInfos[chain.id].ipText }}</span>
+                  <span
+                    v-else-if="rowInfos[chain.id].ipFailed"
+                    class="text-warning shrink-0 text-xs"
+                    v-tip="rowInfos[chain.id].ipError"
+                  >{{ $t('chainProxyIpUnknown') }}</span>
+                </template>
                 <StatusBadge
                   v-if="chain.enabled === false"
                   :on="false"
                   on-text=""
                   :off-text="$t('groupDisabledBadge')"
                 />
+                <span
+                  v-if="upstreamMissing(chain)"
+                  class="text-warning text-xs"
+                >{{ $t('chainProxyUpstreamMissing', { name: chain.upstream }) }}</span>
               </div>
               <div class="text-base-content/60 mt-0.5 truncate text-xs">{{ summary(chain) }}</div>
             </div>
@@ -75,6 +103,23 @@
               @click="toggleEnabled(chain)"
             >
               <PowerIcon class="h-4 w-4" />
+            </button>
+            <button
+              type="button"
+              class="btn btn-ghost btn-square btn-sm"
+              :aria-label="$t('chainProxyTest')"
+              v-tip="$t('chainProxyTest')"
+              :disabled="testingIds.has(chain.id)"
+              @click="testRow(chain)"
+            >
+              <span
+                v-if="testingIds.has(chain.id)"
+                class="loading loading-spinner loading-xs"
+              />
+              <BoltIcon
+                v-else
+                class="h-4 w-4"
+              />
             </button>
             <button
               type="button"
@@ -100,7 +145,7 @@
 
     <DialogWrapper
       v-model="showEditor"
-      :title="$t(editing ? 'chainProxyEditTitle' : 'chainProxyAdd')"
+      :title="$t(editing ? 'chainProxyEditTitle' : 'chainProxyAddTitle')"
       box-class="w-full max-w-xl"
     >
       <div class="flex flex-col gap-4 text-sm">
@@ -236,6 +281,17 @@
                 v-if="testResult.via"
                 class="text-base-content/50 text-xs"
               >{{ $t('chainProxyTestVia', { via: testResult.via }) }}</span>
+              <a
+                v-if="exitIp"
+                :href="ipDetailUrl(exitIp.ip)"
+                target="_blank"
+                rel="noopener noreferrer"
+                class="link link-hover ml-auto inline-flex shrink-0 items-center gap-0.5 text-xs"
+                v-tip="$t('chainProxyIpDetailTip', { site: IP_DETAIL_SITE })"
+              >
+                {{ $t('chainProxyIpDetail') }}
+                <ArrowTopRightOnSquareIcon class="h-3 w-3" />
+              </a>
             </template>
           </div>
           <div
@@ -314,7 +370,15 @@ import StatusBadge from '@/components/common/StatusBadge.vue'
 import { IP_INFO_API } from '@/constant'
 import { showNotification } from '@/helper/notification'
 import { IPInfoAPI, speedtestTimeout, speedtestUrl } from '@/store/settings'
-import { BoltIcon, LinkIcon, PencilSquareIcon, PlusIcon, PowerIcon, TrashIcon } from '@heroicons/vue/24/outline'
+import {
+  ArrowTopRightOnSquareIcon,
+  BoltIcon,
+  LinkIcon,
+  PencilSquareIcon,
+  PlusIcon,
+  PowerIcon,
+  TrashIcon,
+} from '@heroicons/vue/24/outline'
 import { computed, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 
@@ -322,6 +386,8 @@ const { t } = useI18n()
 
 const chains = ref<OpenboxChainProxy[]>([])
 const groupNames = ref<string[]>([])
+// 所有已知的节点 / 节点组名(含已停用、内置的),判断上游是否还在
+const knownNames = ref<Set<string>>(new Set())
 const nodeOptions = ref<Array<{ name: string; subscription: string }>>([])
 const loading = ref(true)
 const saving = ref(false)
@@ -335,6 +401,7 @@ const load = async () => {
     // 内置的直连 / 拒绝、已停用的组不能当上游
     groupNames.value = payload.groups.filter((g) => !g.kind && g.enabled !== false).map((g) => g.name)
     nodeOptions.value = payload.availableNodes
+    knownNames.value = new Set([...payload.groups.map((g) => g.name), ...payload.availableNodes.map((n) => n.name)])
   } catch (error) {
     showNotification({ content: 'routingLoadFailed', params: { message: errorMessage(error) }, type: 'alert-error' })
   } finally {
@@ -343,10 +410,18 @@ const load = async () => {
 }
 onMounted(load)
 
-const summary = (chain: OpenboxChainProxy) => {
-  const node = chain.node ? `${chain.node.type} · ${chain.node.server}:${chain.node.port}` : ''
-  return [node, `→ ${chain.upstream}`].filter(Boolean).join('  ')
-}
+// 上游已经在名字后面的「经 xxx」徽标里了,这一行只写节点本身
+const summary = (chain: OpenboxChainProxy) =>
+  chain.node ? `${chain.node.type} · ${chain.node.server}:${chain.node.port}` : ''
+
+// 上游「已不存在」:既不是节点 / 节点组,也不是另一条链式代理
+const upstreamMissing = (chain: OpenboxChainProxy) =>
+  !!chain.upstream &&
+  !knownNames.value.has(chain.upstream) &&
+  !chains.value.some((c) => c.id !== chain.id && c.name === chain.upstream)
+
+// 这条链路有没有进内核:启用着、上游也还在才进
+const inKernel = (chain: OpenboxChainProxy) => chain.enabled !== false && !upstreamMissing(chain)
 
 // 整份写回;服务端校验不过(重名、上游自己、节点内容解析失败等)会回一句话,原样提示。
 // 发出去的只留可写的字段,node 摘要由服务端按 link 重算
@@ -488,11 +563,15 @@ const saveDraft = async () => {
   const upstream = draft.value.upstream.trim()
   if (!name) return showNotification({ content: 'chainProxyErrName', type: 'alert-error' })
   if (!upstream) return showNotification({ content: 'chainProxyErrUpstream', type: 'alert-error' })
+  if (upstream === name) return showNotification({ content: 'chainProxyErrSelf', type: 'alert-error' })
   const link = effectiveLink()
   if (!link) return
   const item: OpenboxChainProxy = { id: draft.value.id, enabled: draft.value.enabled, name, link, upstream }
   const next = editing.value ? chains.value.map((c) => (c.id === item.id ? item : c)) : [...chains.value, item]
-  if (await persist(next)) showEditor.value = false
+  if (await persist(next)) {
+    delete rowTests.value[item.id]
+    showEditor.value = false
+  }
 }
 
 // ---------- 删除 ----------
@@ -506,6 +585,7 @@ const confirmDelete = async () => {
   const target = pendingDelete.value
   if (!target) return
   if (await persist(chains.value.filter((c) => c.id !== target.id))) {
+    delete rowTests.value[target.id]
     showDelete.value = false
     pendingDelete.value = null
   }
@@ -524,6 +604,17 @@ const ipUrls = () =>
 // 延迟的颜色:越慢越偏红
 const latencyClass = (ms: number) => (ms < 300 ? 'text-success' : ms < 800 ? 'text-warning' : 'text-error')
 
+// 经这条链路发一次测速请求;后端的 IP 接口白名单和这里对不上时只丢掉 IP 信息,延迟照测
+type ChainTestBase = Omit<Parameters<typeof testChainLatency>[0], 'ipUrls'>
+const requestChainTest = async (base: ChainTestBase) => {
+  try {
+    return await testChainLatency({ ...base, ipUrls: ipUrls() })
+  } catch (error) {
+    if (!/ipUrls/.test(errorMessage(error))) throw error
+    return await testChainLatency(base)
+  }
+}
+
 const runTest = async () => {
   if (testing.value) return
   const link = effectiveLink()
@@ -532,15 +623,13 @@ const runTest = async () => {
   if (!upstream) return showNotification({ content: 'chainProxyErrUpstream', type: 'alert-error' })
   testing.value = true
   testResult.value = null
-  const base = { link, upstream, testUrl: speedtestUrl.value, timeoutMs: speedtestTimeout.value }
   try {
-    try {
-      testResult.value = await testChainLatency({ ...base, ipUrls: ipUrls() })
-    } catch (error) {
-      // 后端的 IP 接口白名单和这里对不上时只丢掉 IP 信息,延迟照测
-      if (!/ipUrls/.test(errorMessage(error))) throw error
-      testResult.value = await testChainLatency(base)
-    }
+    testResult.value = await requestChainTest({
+      link,
+      upstream,
+      testUrl: speedtestUrl.value,
+      timeoutMs: speedtestTimeout.value,
+    })
   } catch (error) {
     testResult.value = { via: '', ok: false, error: errorMessage(error) }
   } finally {
@@ -549,10 +638,7 @@ const runTest = async () => {
 }
 
 // 后端把 IP 信息接口的正文原样交回,这里按答话那一家的格式取出 IP、国家、运营商
-const ipSummary = computed(() => {
-  const ip = testResult.value?.ip
-  if (!ip) return ''
-  if (!ip.ok) return t('chainProxyIpFailed', { error: ip.error || '' })
+const parseExitIp = (ip: NonNullable<OpenboxChainLatencyResult['ip']>) => {
   try {
     const data = JSON.parse(ip.body || '{}')
     const host = new URL(ip.url || '').hostname
@@ -562,9 +648,73 @@ const ipSummary = computed(() => {
         : host === 'ipwho.is'
           ? [data.country, data.connection?.org]
           : [data.country, data.organization]
-    return `${t('chainProxyExitIp')} ${data.ip} · ${[country, org].filter(Boolean).join(' ')}`
+    const address = String(data.ip ?? '')
+    return address ? { ip: address, place: [country, org].filter(Boolean).join(' ') } : null
   } catch {
-    return ''
+    return null
   }
+}
+
+const ipSummary = computed(() => {
+  const ip = testResult.value?.ip
+  if (!ip) return ''
+  if (!ip.ok) return t('chainProxyIpFailed', { error: ip.error || '' })
+  const exit = parseExitIp(ip)
+  return exit ? `${t('chainProxyExitIp')} ${exit.ip} · ${exit.place}` : ''
 })
+
+// 测速通过后,在 IP 详情站点查看这个出口 IP(和节点信息面板用同一个站点)
+const IP_DETAIL_SITE = 'ping0.cc'
+const ipDetailUrl = (ip: string) => `https://${IP_DETAIL_SITE}/ip/${encodeURIComponent(ip)}`
+const exitIp = computed(() => {
+  const ip = testResult.value?.ip
+  return ip?.ok ? parseExitIp(ip) : null
+})
+
+// ---------- 列表里逐条测速 ----------
+interface RowInfo {
+  ok: boolean
+  ms: number
+  error: string
+  ipText: string
+  ipFailed: boolean
+  ipError: string
+}
+const rowTests = ref<Record<string, OpenboxChainLatencyResult>>({})
+const testingIds = ref<Set<string>>(new Set())
+
+const rowInfos = computed(() => {
+  const infos: Record<string, RowInfo> = {}
+  for (const [id, result] of Object.entries(rowTests.value)) {
+    const exit = result.ip?.ok ? parseExitIp(result.ip) : null
+    infos[id] = {
+      ok: result.ok,
+      ms: result.ms ?? 0,
+      error: result.error ?? '',
+      ipText: exit ? [exit.ip, exit.place].filter(Boolean).join(' · ') : '',
+      ipFailed: !!result.ip && !result.ip.ok,
+      ipError: result.ip?.error ?? '',
+    }
+  }
+  return infos
+})
+
+const testRow = async (chain: OpenboxChainProxy) => {
+  if (testingIds.value.has(chain.id)) return
+  testingIds.value = new Set(testingIds.value).add(chain.id)
+  try {
+    rowTests.value[chain.id] = await requestChainTest({
+      link: chain.link,
+      upstream: chain.upstream,
+      testUrl: speedtestUrl.value,
+      timeoutMs: speedtestTimeout.value,
+    })
+  } catch (error) {
+    rowTests.value[chain.id] = { via: '', ok: false, error: errorMessage(error) }
+  } finally {
+    const rest = new Set(testingIds.value)
+    rest.delete(chain.id)
+    testingIds.value = rest
+  }
+}
 </script>
