@@ -50,6 +50,7 @@
 <script setup lang="ts">
 import { fetchBackendVersion } from '@/api'
 import SideBar from '@/components/sidebar/SideBar.vue'
+import { useKernelConflictToast, useRestartPendingToast } from '@/composables/kernelService'
 import { dockTop } from '@/composables/paddingViews'
 import { useSwipeRouter } from '@/composables/swipe'
 import { ROUTE_ICON_MAP } from '@/constant'
@@ -65,6 +66,9 @@ import { isSidebarCollapsed } from '@/store/settings'
 import { useDocumentVisibility, useElementBounding } from '@vueuse/core'
 import { ref, watch } from 'vue'
 import { RouterView, useRouter } from 'vue-router'
+
+useRestartPendingToast()
+useKernelConflictToast()
 
 const router = useRouter()
 const { swiperRef } = useSwipeRouter()

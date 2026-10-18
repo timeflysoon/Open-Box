@@ -74,6 +74,7 @@
 <script setup lang="ts">
 import type { OpenboxProfile } from '@/api/openbox'
 import DialogWrapper from '@/components/common/DialogWrapper.vue'
+import { refreshServiceStatus } from '@/composables/kernelService'
 import { showNotification } from '@/helper/notification'
 import { AdjustmentsHorizontalIcon } from '@heroicons/vue/24/outline'
 import { computed, ref, watch } from 'vue'
@@ -108,7 +109,7 @@ const errorMessage = (error: unknown) => (error instanceof Error ? error.message
 const save = async (patch: Record<string, unknown>) => {
   try {
     await props.patchProfile({ tun: patch })
-    showNotification({ content: 'restartPendingToastPlain', type: 'alert-success' })
+    void refreshServiceStatus()
   } catch (error) {
     showNotification({ content: 'routingSaveFailed', params: { message: errorMessage(error) }, type: 'alert-error' })
   }
