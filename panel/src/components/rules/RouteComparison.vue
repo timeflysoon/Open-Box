@@ -1030,13 +1030,30 @@ const ruleEntry = computed(() => {
     }
     return { state: 'pending' as RouteStageState, value: t('routePreMatchUnknown', { error: pre.error || '' }), sub: '', detail }
   }
+  // 入口默认放行:走代理的域名拿占位地址进内核,其余地址不在「进内核」名单里就在入口放行
+  if (f.entryMode?.mode === 'whitelist') {
+    const need = [
+      t('routeEntryNeedFakeIp'),
+      ...(f.entryMode.needSets || []),
+      ...(f.entryMode.needCidrs ? [t('routeEntryNeedCidrs', { count: f.entryMode.needCidrs })] : []),
+    ].join(', ')
+    return {
+      state: 'ok' as RouteStageState,
+      value: t('routeEntryWhitelist'),
+      sub: '',
+      detail: [t('routeEntryWhitelistNeed', { list: need }), t('routeEntryWhitelistDetail')],
+    }
+  }
+  // 没用默认放行时,服务端说明了原因,跟在各条详情后面
+  const whyBlacklist = f.entryMode?.reason ? t('routeEntryWhyBlacklist', { reason: f.entryMode.reason }) : ''
   if (!f.nativeBypass?.enabled) {
-    return { state: 'ok' as RouteStageState, value: t('routeEntryKernel'), sub: t('routeEntryNoBypass'), detail: [t('ruleLookupFirstLayerBypassOff', { reason: f.nativeBypass?.reason || '' })] }
+    return { state: 'ok' as RouteStageState, value: t('routeEntryKernel'), sub: t('routeEntryNoBypass'), detail: [t('ruleLookupFirstLayerBypassOff', { reason: f.nativeBypass?.reason || '' }), whyBlacklist].filter(Boolean) }
   }
   const sets = f.nativeBypass.sets
+  const bypassOn = t('ruleLookupFirstLayerBypassOn', { sets: sets.join(', '), via: f.nativeBypass.via === 'route' ? t('ruleLookupFirstLayerViaRoute') : 'nft' })
   const hit = targetKind.value === 'domain' ? '' : listOf((rule.value.matched?.rule as Record<string, unknown> | undefined)?.rule_set).find((s) => sets.includes(s)) || ''
-  if (hit) return { state: 'ok' as RouteStageState, value: t('routeEntryBypassHit', { set: hit }), sub: '', detail: [t('ruleLookupFirstLayerBypassOn', { sets: sets.join(', '), via: f.nativeBypass.via === 'route' ? t('ruleLookupFirstLayerViaRoute') : 'nft' })] }
-  return { state: 'pending' as RouteStageState, value: t('routeEntryBypassUndetermined'), sub: '', detail: [t('routeEntryBypassUndeterminedDetail')] }
+  if (hit) return { state: 'ok' as RouteStageState, value: t('routeEntryBypassHit', { set: hit }), sub: '', detail: [bypassOn, whyBlacklist].filter(Boolean) }
+  return { state: 'pending' as RouteStageState, value: t('routeEntryBypassUndetermined'), sub: '', detail: [bypassOn, t('routeEntryBypassUndeterminedDetail'), whyBlacklist].filter(Boolean) }
 })
 const ruleMatch = computed<{ state: RouteStageState; badge?: string; tone: Tone }>(() => {
   const r = rule.value

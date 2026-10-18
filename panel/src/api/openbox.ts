@@ -1058,6 +1058,9 @@ export interface OpenboxPenetrationResult {
     dnsForwardReason: string
     nativeBypass: { enabled: boolean; sets: string[]; reason: string; via?: 'nft' | 'route' }
     dnsSourceRules: boolean
+    // 入口放行方式:whitelist = 默认放行,只有名单里的地址才进内核(needSets 是进内核的集合,
+    // needCidrs 是手写网段的段数);其它 = 默认进内核、名单里的放行,reason 说明为什么没用默认放行
+    entryMode?: { mode: string; needSets?: string[]; needCidrs?: number; reason?: string }
     // 走代理的域名由内核发占位地址(FakeIP 原型)
     fakeIp?: boolean
     // IPv6 分层:off 老关闭语义 / node 代理 v6 交给节点 / ipv4 走代理的降为 IPv4
