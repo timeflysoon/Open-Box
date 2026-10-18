@@ -30,6 +30,7 @@ import {
 } from '@/constant'
 import { isProxyGroup } from '@/helper'
 import { showNotification } from '@/helper/notification'
+import { i18n } from '@/i18n'
 import type { History, Proxy, ProxyProvider } from '@/types'
 import { useStorage } from '@vueuse/core'
 import { last } from 'lodash'
@@ -611,6 +612,8 @@ const testLatencyOneByOneWithTip = async (
   const total = nodes.length
   let testDone = 0
   let testFailed = 0
+  // 失败原因归类:内核 delay 接口超时回 504 / 「Timeout」,其余都算连接失败
+  const reasonCounts = new Map<string, number>()
 
   await Promise.allSettled(
     nodes.map((name) =>
@@ -619,6 +622,9 @@ const testLatencyOneByOneWithTip = async (
 
         if (res.status !== 200) {
           testFailed++
+          const message = String((res.data as { message?: string } | undefined)?.message || '')
+          const reason = i18n.global.t(res.status === 504 || /time\s*out/i.test(message) ? 'latencyReasonTimeout' : 'latencyReasonError')
+          reasonCounts.set(reason, (reasonCounts.get(reason) || 0) + 1)
           setHistory(name, NOT_CONNECTED)
         } else {
           setHistory(name, res.data.delay)
@@ -640,14 +646,19 @@ const testLatencyOneByOneWithTip = async (
   )
   // 这一批测完让服务端读一次内核,成功的结果进时间线
   void syncLatencyHistory()
+  const reasons = [...reasonCounts]
+    .sort((a, b) => b[1] - a[1])
+    .map(([reason, n]) => i18n.global.t('failoverFailItem', { reason, n }))
+    .join(i18n.global.t('listSeparator'))
   showNotification({
-    content: 'testFinishedResultTip',
+    content: reasons ? 'testFinishedReasonsTip' : 'testFinishedResultTip',
     key: TIP_KEY + keyName,
     params: {
       name: getNameForNotification(displayName, url),
       total: total.toString(),
       success: `${total - testFailed}`,
       failed: `${testFailed}`,
+      ...(reasons ? { reasons } : {}),
     },
     type: testFailed ? 'alert-warning' : 'alert-success',
     timeout: 3000,

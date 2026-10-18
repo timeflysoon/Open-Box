@@ -61,7 +61,7 @@ const notifyError = (e: unknown) => {
   const message = e instanceof Error ? e.message : String(e)
   if (message !== lastError) {
     showNotification({
-      content: 'routeTestRequestFailed',
+      content: 'testRequestFailedTip',
       params: { message },
       key: 'site-latency',
       type: 'alert-error',

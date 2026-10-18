@@ -17,12 +17,13 @@
               globes
               brands
               icon-only
+              :placeholder="$t('serverInfoIconNone')"
               :placeholder-flag="defaultIcon"
               @update:model-value="onIcon"
             />
           </div>
           <div class="flex min-w-0 flex-1 flex-col gap-1">
-            <label class="text-xs font-medium">{{ $t('cfName') }}</label>
+            <label class="text-xs font-medium">{{ $t('serverInfoName') }}</label>
             <input
               v-model="form.name"
               type="text"
@@ -33,7 +34,7 @@
           </div>
         </div>
         <div class="flex w-full flex-col gap-1 md:w-44">
-          <label class="text-xs font-medium">{{ $t('subscriptionRenameTokenRegion') }}</label>
+          <label class="text-xs font-medium">{{ $t('serverInfoRegion') }}</label>
           <CountrySelect
             :model-value="form.region"
             clearable

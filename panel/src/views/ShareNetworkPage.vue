@@ -163,8 +163,10 @@ import {
   TrashIcon,
 } from '@heroicons/vue/24/outline'
 import { computed, onMounted, ref } from 'vue'
+import { useI18n } from 'vue-i18n'
 import Draggable from 'vuedraggable'
 
+const { t } = useI18n()
 const { padding } = usePaddingForViews({ offsetTop: 0, offsetBottom: 0 })
 
 const servers = ref<OpenboxServer[]>([])
@@ -236,6 +238,7 @@ const toggle = (s: OpenboxServer) => {
   )
 }
 const remove = (s: OpenboxServer) => {
+  if (!window.confirm(t('serverDeleteConfirm', { name: s.name }))) return
   void persist(servers.value.filter((x) => x.id !== s.id))
 }
 const copyText = async (text: string) => {

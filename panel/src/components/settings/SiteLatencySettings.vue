@@ -11,7 +11,7 @@
         type="button"
         class="btn btn-ghost btn-circle btn-sm ml-auto"
         v-tip="$t('testSitesReset')"
-        @click="resetTestSites"
+        @click="confirmReset"
       >
         <ArrowUturnLeftIcon class="h-4 w-4" />
       </button>
@@ -32,7 +32,7 @@
         <input
           class="input input-sm w-30 shrink-0"
           v-model="site.name"
-          :placeholder="$t('cfName')"
+          :placeholder="$t('testSiteNamePlaceholder')"
         />
         <TextInput
           class="min-w-0 flex-1"
@@ -40,6 +40,10 @@
           :placeholder="$t('testSiteUrlPlaceholder')"
           :clearable="true"
         />
+        <span
+          v-if="site.url.trim() && !isValidSiteUrl(site.url)"
+          class="text-error shrink-0 text-xs"
+        >{{ $t('testSiteUrlInvalid') }}</span>
       </div>
     </div>
   </div>
@@ -48,9 +52,16 @@
 <script setup lang="ts">
 import CountrySelect from '@/components/common/CountrySelect.vue'
 import TextInput from '@/components/common/TextInput.vue'
-import { resetTestSites, testSites } from '@/composables/siteLatency'
+import { isValidSiteUrl, resetTestSites, testSites } from '@/composables/siteLatency'
 import { useTooltip } from '@/helper/tooltip'
 import { ArrowUturnLeftIcon, QuestionMarkCircleIcon } from '@heroicons/vue/24/outline'
+import { useI18n } from 'vue-i18n'
 
 const { showTip } = useTooltip()
+const { t } = useI18n()
+
+// 恢复默认会覆盖四个站点的图标、名称和网址,先确认
+const confirmReset = () => {
+  if (window.confirm(t('testSitesResetConfirm'))) resetTestSites()
+}
 </script>
