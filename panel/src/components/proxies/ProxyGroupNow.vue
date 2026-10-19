@@ -8,19 +8,10 @@
     <div
       class="flex min-w-0 items-center gap-1 overflow-hidden whitespace-nowrap"
     >
-      <template
-        v-for="(routeName, index) in routeNames"
-        :key="`${routeName}-${index}`"
-      >
-        <ArrowRightCircleIcon
-          v-if="index > 0"
-          class="h-4 w-4 shrink-0"
-        />
-        <ProxyName
-          :name="routeName"
-          class="text-base-content/80 text-xs md:text-sm"
-        />
-      </template>
+      <RouteChainHops
+        :chain="routeNames"
+        name-class="text-base-content/80 text-xs md:text-sm"
+      />
       <ExclamationTriangleIcon
         v-if="isStale"
         class="text-warning h-4 w-4 shrink-0"
@@ -41,14 +32,13 @@ import { PROXY_TYPE } from '@/constant'
 import { useTooltip } from '@/helper/tooltip'
 import { getProxyRouteChain, isUrlTestGroupStale, proxyMap } from '@/store/proxies'
 import {
-  ArrowRightCircleIcon,
   CheckCircleIcon,
   ExclamationTriangleIcon,
   LockClosedIcon,
 } from '@heroicons/vue/24/outline'
 import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
-import ProxyName from './ProxyName.vue'
+import RouteChainHops from './RouteChainHops.vue'
 
 const props = defineProps<{
   name: string

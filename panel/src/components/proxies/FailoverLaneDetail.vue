@@ -110,6 +110,7 @@
           :name="node"
           :group-name="lane.subTag ?? groupName"
           :active="node === lane.kernelNow"
+          @click="handlerSelectNode(node)"
         />
       </ProxyNodeGrid>
     </div>
@@ -126,7 +127,13 @@ import { iconUrlFor } from '@/helper/iconUrl'
 import { prettyBytesHelper } from '@/helper/utils'
 import { activeConnections } from '@/store/connections'
 import { failoverLanesOf, watchFailoverStatus } from '@/store/openboxFailover'
-import { getTestUrl, proxyGroupLatencyTest, proxyLatencyTest, proxyMap } from '@/store/proxies'
+import {
+  getTestUrl,
+  handlerProxySelect,
+  proxyGroupLatencyTest,
+  proxyLatencyTest,
+  proxyMap,
+} from '@/store/proxies'
 import { proxyGroupIconMargin, proxyGroupIconSize, useLargeProxyGroupIcon } from '@/store/settings'
 import { twMerge } from 'tailwind-merge'
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
@@ -153,7 +160,7 @@ const modeText = computed(() => {
   if (!l) return ''
   if (!l.valid.length) return t('failoverModeEmpty')
   if (l.valid.length === 1) return t('failoverModeSingle')
-  return t('failoverModeAuto')
+  return t(l.manual ? 'failoverModeManual' : 'failoverModeAuto')
 })
 // 标题后的「有效 / 总数」和上一栏同一口径:最近一次延迟测试有结果的算有效
 const validNodes = computed(() => lane.value?.valid ?? [])
@@ -166,6 +173,13 @@ const downloadTotal = computed(() => {
     .filter((conn) => conn.chains.includes(key))
     .reduce((total, conn) => total + conn.downloadSpeed, 0)
 })
+
+// 手动选择的页签:点节点卡片就是把内部 selector 切到它(自动优选的页签卡片不响应点击)
+const handlerSelectNode = (node: string) => {
+  const l = lane.value
+  if (!l?.manual || !l.subTag) return
+  void handlerProxySelect(l.subTag, node)
+}
 
 const isLatencyTesting = ref(false)
 const handlerLatencyTest = async () => {

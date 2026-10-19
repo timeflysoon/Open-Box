@@ -46,3 +46,7 @@ export const geoEntryCount = (tag: string): Promise<number | null> =>
 export const cachedRuleListCount = (url: string) => counts.get(`url:${url}`) ?? null
 export const ruleListCount = (url: string): Promise<number | null> =>
   url ? countFor(`url:${url}`, () => fetchRuleListPreview(url, { limit: 1 })) : Promise.resolve(null)
+// 「立即更新」拉回新名单后,把新的条数记进去,按钮上的数字马上跟着变
+export const setRuleListCount = (url: string, total: number) => {
+  counts.set(`url:${url}`, total)
+}

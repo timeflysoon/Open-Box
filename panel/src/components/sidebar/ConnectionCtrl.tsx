@@ -8,6 +8,7 @@ import {
   connections,
   connectionSortDirection,
   connectionSortType,
+  hideDnsConnections,
   isPaused,
   quickFilterEnabled,
   renderConnections,
@@ -105,10 +106,33 @@ export default defineComponent({
             v-model={settingsModel.value}
             title={t('connectionSettings')}
           >
-            {/* 这个弹窗只管表格列。「隐藏连接」的开关在工具栏上(链条图标)就有,匹配用的
+            {/* 这个弹窗管显示方式、是否隐藏 DNS 劫持连接和表格列。「隐藏连接」的开关在工具栏上(链条图标)就有,匹配用的
                 正则固定用默认那条;「完整显示代理链」恒开。跳去设置页的入口也去掉了——
                 这里能改的东西本来就都在眼前。 */}
             <div class="flex flex-col gap-4 p-2 text-sm">
+              <div class="flex items-center justify-between gap-3">
+                <span>{t('connectionStyle')}</span>
+                <select
+                  class="select select-sm min-w-24"
+                  value={useConnectionCard.value ? 'card' : 'table'}
+                  onChange={(e) => (useConnectionCard.value = (e.target as HTMLSelectElement).value === 'card')}
+                >
+                  <option value="card">{t('card')}</option>
+                  <option value="table">{t('table')}</option>
+                </select>
+              </div>
+              <label class="flex cursor-pointer items-center gap-3">
+                <input
+                  type="checkbox"
+                  class="toggle toggle-primary toggle-sm"
+                  checked={hideDnsConnections.value}
+                  onChange={(e) => (hideDnsConnections.value = (e.target as HTMLInputElement).checked)}
+                />
+                <span class="flex flex-col">
+                  <span>{t('hideDnsConnections')}</span>
+                  <span class="text-base-content/60 text-xs">{t('hideDnsConnectionsHint')}</span>
+                </span>
+              </label>
               {useConnectionCard.value ? <ConnectionCardSettings /> : <TableSettings />}
             </div>
           </DialogWrapper>

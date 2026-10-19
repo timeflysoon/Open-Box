@@ -24,6 +24,11 @@ export const connectionSortDirection = useStorage<SORT_DIRECTION>(
 
 export const quickFilterRegex = useStorage<string>('config/quick-filter-regex', 'direct|dns-out')
 export const quickFilterEnabled = useStorage<boolean>('config/quick-filter-enabled', false)
+// 终端的 DNS 查询被劫持进内核后交给 dnsmasq / dns-out 的那些 127.0.0.1:53 行,默认不显示
+export const hideDnsConnections = useStorage<boolean>('config/hide-dns-connections', true)
+const isDnsHijackConnection = (conn: { metadata: { destinationPort: string }; chains: string[]; rule: string }) =>
+  conn.metadata.destinationPort === '53' &&
+  (conn.chains.includes('dnsmasq') || conn.chains.includes('dns-out') || (conn.rule || '').includes('route(dnsmasq'))
 export const connectionFilter = ref('')
 export const sourceIPFilter = ref<string[] | null>(null)
 
@@ -214,6 +219,10 @@ export const renderConnections = computed(() => {
         sourceIPFilter.value !== null &&
         sourceIPFilter.value.every((i) => i !== conn.metadata.sourceIP)
       ) {
+        return false
+      }
+
+      if (hideDnsConnections.value && isDnsHijackConnection(conn)) {
         return false
       }
 

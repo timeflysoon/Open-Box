@@ -95,6 +95,8 @@ export interface FailoverLaneView {
   valid: string[]
   invalid: string[]
   kernelNow: string | null
+  // 手动选择的页签:成员由用户在代理页点选,不按测速自动择优
+  manual: boolean
   // 页签图标(短码;已按「自己的 → 继承父组」算好),iconScale 跟父组
   icon: string
   iconScale: number
@@ -120,7 +122,7 @@ export const failoverLanesOf = (
     }
     const ref = st ? st.ref : valid.length === 1 ? valid[0]! : subTag
     const kernelNow = subTag ? (proxies[subTag]?.now ?? null) : valid.length === 1 ? valid[0]! : null
-    return { id: lane.id, index, label: lane.name || failoverRoleLabel(index), ref, subTag, valid, invalid, kernelNow, icon: lane.icon || group.icon || '', iconScale: group.iconScale || 0 }
+    return { id: lane.id, index, label: lane.name || failoverRoleLabel(index), ref, subTag, valid, invalid, kernelNow, manual: Boolean(lane.manual || st?.manual || st?.mode === 'selector'), icon: lane.icon || group.icon || '', iconScale: group.iconScale || 0 }
   })
 }
 // 「最近切换:主用 → 备用 1(页签失效)· 14:20:05」这一句(没切换过就是空串)
@@ -233,3 +235,9 @@ export const recheckFailoverGroup = async (groupName: string) => {
   }
   await loadFailoverStatus()
 }
+
+// 这个内部子组是不是某个手动选择页签的 selector(是的话它的成员卡片可以点选)
+export const isManualFailoverLaneTag = (tag: string) =>
+  [...failoverGroupByTag.value.values()].some((g) =>
+    g.lanes.some((l) => l.subTag === tag && (l.manual || l.mode === 'selector')),
+  )

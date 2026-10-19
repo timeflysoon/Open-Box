@@ -615,6 +615,8 @@ export interface OpenboxFailoverLane {
   name: string
   // 页签图标(和分组图标同一套短码);空 = 继承分组的图标
   icon?: string
+  // 手动选择:多节点页签不按测速自动择优,在代理页点选节点(不稳时不会来回跳);不写 = 自动优选
+  manual?: boolean
   members: string[]
 }
 export interface OpenboxFailoverSettings {
@@ -673,7 +675,9 @@ export interface OpenboxFailoverLaneStatus {
   index: number
   role: string
   // 派生模式:single = 直接用那个节点;urltest = 内部自动择优子组;empty = 没有有效节点
-  mode: 'single' | 'urltest' | 'empty'
+  mode: 'single' | 'urltest' | 'selector' | 'empty'
+  // 手动选择的页签(mode 为 selector):内部子组是 selector,由用户点选
+  manual?: boolean
   ref: string | null
   subTag: string | null
   members: string[]
@@ -744,7 +748,8 @@ export interface OpenboxGroupsPayload {
   groups: OpenboxUserGroup[]
   types: OpenboxGroupType[]
   // 带订阅名,供成员选择器按订阅筛选;组没有订阅归属,不在这个列表里
-  availableNodes: Array<{ name: string; subscription: string }>
+  // upstream:链式代理节点的前置上游节点名(没挂前置的节点没有这个字段)
+  availableNodes: Array<{ name: string; subscription: string; upstream?: string }>
   availableGroups: string[]
 }
 
@@ -1005,8 +1010,16 @@ export interface OpenboxDnsRewriteHit {
   addresses: string[]
 }
 
+// 命中那条规则的「主人」:站点集(policy,name 是出站名)、前置自定义分流(custom,name 是它的名字)、
+// 内置规则(builtin,name 对应一条文案:private / ntp / nodes / clients / kernel / other)
+export interface OpenboxRuleOwner {
+  kind: 'policy' | 'custom' | 'builtin'
+  name: string
+}
+
 export interface OpenboxPenetrationResult {
   matched: OpenboxPenetrationMatched | null
+  owner?: OpenboxRuleOwner | null
   // 要看终端来源 IP / 目标端口 / 地址族才能判、这次查询没给的规则:推算按"不满足它"的情况继续,这里把前提列出来
   assumed?: OpenboxRuleAssumption[]
   // 规则表里有预解析动作(按 IP 判的规则排在域名规则前面):以域名进内核的连接先解析成真实 IP 再判

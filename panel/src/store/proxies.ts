@@ -9,13 +9,20 @@ import {
   isSingBox,
   selectProxyAPI,
 } from '@/api'
-import { failoverDisplayName, failoverMembersOf, isFailoverGroup, isFailoverInternalTag } from '@/store/openboxFailover'
+import {
+  failoverDisplayName,
+  failoverMembersOf,
+  isFailoverGroup,
+  isFailoverInternalTag,
+  isManualFailoverLaneTag,
+} from '@/store/openboxFailover'
 import { iconUrlFor } from '@/helper/iconUrl'
 import {
   loadOpenboxNodeGroups,
   loadOpenboxSiteSets,
   managedOutbounds,
   nodeProviders,
+  nodeUpstreams,
   siteSetIcons,
   siteSetIconScales,
 } from '@/store/openboxSiteSets'
@@ -460,7 +467,7 @@ export const isManualSelectable = (groupName?: string) => {
   if (!groupName) return false
   const g = proxyMap.value[groupName]
   if (!g || String(g.type || '').toLowerCase() !== 'selector') return false
-  if (isFailoverInternalTag(groupName)) return false
+  if (isFailoverInternalTag(groupName)) return isManualFailoverLaneTag(groupName)
   return !managedOutbounds.value.some((m) => m.name === groupName && m.type === 'failover')
 }
 
@@ -868,6 +875,17 @@ export const getProxyRouteChain = (name: string) => {
   }
 
   return routeChain
+}
+
+// 把一条路由链拆成「链上的跳 / 前置上游 / 目标」:最后一个节点如果挂了前置上游,
+// 链就是 hops → [前置] 上游 → 目标;没挂前置就原样返回,target 为空
+export const splitChainHops = (chain: string[]) => {
+  const target = chain[chain.length - 1]
+  const upstream = target ? nodeUpstreams.value.get(target) : undefined
+  if (!upstream) return { hops: chain, upstream: [] as string[], target: '' }
+  const seen = new Set(chain)
+  const layers = [upstream, ...getProxyRouteChain(upstream)].filter((n) => !seen.has(n))
+  return { hops: chain.slice(0, -1), upstream: layers, target }
 }
 
 export const getProxyGroupChains = (name: string) => {

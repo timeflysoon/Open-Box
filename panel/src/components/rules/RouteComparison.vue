@@ -180,16 +180,10 @@
                 <span class="text-base-content/60 text-xs">{{ $t('routeTermExitForwardVia', { device: exitView.forward.device, gateway: exitView.forward.gateway }) }}</span>
               </template>
               <template v-else-if="exitView.chains.length">
-                <template
-                  v-for="(hop, i) in exitView.chains"
-                  :key="`${hop}-${i}`"
-                >
-                  <ArrowRightCircleIcon
-                    v-if="i > 0"
-                    class="text-base-content/40 -ml-0.5 h-4 w-4 shrink-0"
-                  />
-                  <ProxyName :name="hop" />
-                </template>
+                <RouteChainHops
+                  :chain="exitView.chains"
+                  arrow-class="text-base-content/40 -ml-0.5 h-4 w-4 shrink-0"
+                />
               </template>
               <span
                 v-else
@@ -243,12 +237,12 @@
             <div class="flex flex-wrap items-center gap-x-2 gap-y-1">
               <span class="text-base-content/60 text-xs">{{ $t('ruleLookupSiteSet') }}</span>
               <span
-                v-if="ruleOwner"
+                v-if="ownerView.text"
                 class="font-medium"
-              >{{ ruleOwner }}</span>
+              >{{ ownerView.text }}</span>
               <ProxyName
-                v-else-if="ruleOutbound"
-                :name="ruleOutbound"
+                v-else-if="ownerView.proxy"
+                :name="ownerView.proxy"
                 class="font-medium"
               />
               <span
@@ -701,6 +695,7 @@ import type { OpenboxDnsAssumption, OpenboxPenetrationResult, OpenboxRouteTest, 
 import { fetchTerminalCapability, queryPenetration, testRoute, testTerminal, type OpenboxProbeMethod } from '@/api/openbox'
 import ProxyGroupNow from '@/components/proxies/ProxyGroupNow.vue'
 import ProxyName from '@/components/proxies/ProxyName.vue'
+import RouteChainHops from '@/components/proxies/RouteChainHops.vue'
 import RouteStage from '@/components/rules/RouteStage.vue'
 import type { RouteStageState, RouteStageTone } from '@/components/rules/RouteStage.vue'
 import { ruleTypeLabelKey } from '@/helper/ruleType'
@@ -912,7 +907,29 @@ const errorText = (raw: string) => {
 
 // ---------- 左列:规则路由 ----------
 const ruleOutbound = computed(() => rule.value?.finalOutbound || '')
-const ruleOwner = computed(() => rule.value?.matched?.ownerName || '')
+// 命中规则的归属:站点集在代理页里有同名组就显示成组名,没有就当文字;前置自定义分流直接显示名字;
+// 内置规则按 name 取文案;服务端没给 owner 的老版本,退回 ownerName / 最终出站
+const BUILTIN_OWNER_KEYS: Record<string, string> = {
+  private: 'routeOwnerBuiltinPrivate',
+  ntp: 'routeOwnerBuiltinNtp',
+  nodes: 'routeOwnerBuiltinNodes',
+  clients: 'routeOwnerBuiltinClients',
+  kernel: 'routeOwnerBuiltinKernel',
+  other: 'routeOwnerBuiltinOther',
+}
+const ownerView = computed<{ proxy: string; text: string }>(() => {
+  const owner = rule.value?.owner
+  if (owner) {
+    if (owner.kind === 'policy') {
+      return proxyMap.value[owner.name] ? { proxy: owner.name, text: '' } : { proxy: '', text: owner.name }
+    }
+    if (owner.kind === 'custom') return { proxy: '', text: owner.name }
+    return { proxy: '', text: t(BUILTIN_OWNER_KEYS[owner.name] || 'routeOwnerBuiltinOther') }
+  }
+  const fallback = rule.value?.matched?.ownerName || rule.value?.finalOutbound || ''
+  if (!fallback) return { proxy: '', text: '' }
+  return proxyMap.value[fallback] ? { proxy: fallback, text: '' } : { proxy: '', text: fallback }
+})
 // 具体命中的第一条条目(规则集解码出来的,或站点集里手写的),跟在站点集名后面显示
 const firstEntry = computed(() => rule.value?.matched?.entries?.[0] || null)
 const ruleReject = computed(() => rule.value?.matched?.action === 'reject')

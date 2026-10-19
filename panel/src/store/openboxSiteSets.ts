@@ -52,6 +52,8 @@ export const managedOutbounds = ref<OpenboxUserGroup[]>([])
 // sing-box 的 clash_api 没有 provider 概念,zashboard 原来靠内核给的 provider-name 分,
 // 在这里永远是空的——所以由 Open-Box 自己按订阅归属补上。
 export const nodeProviders = ref<Map<string, string>>(new Map())
+// 链式代理节点 → 它的前置上游节点(路由链上用来标出「前置」那一层)
+export const nodeUpstreams = ref<Map<string, string>>(new Map())
 
 export const loadOpenboxNodeGroups = async () => {
   try {
@@ -59,6 +61,9 @@ export const loadOpenboxNodeGroups = async () => {
     managedOutbounds.value = payload.groups
     nodeProviders.value = new Map(
       (payload.availableNodes || []).filter((n) => n.subscription).map((n) => [n.name, n.subscription]),
+    )
+    nodeUpstreams.value = new Map(
+      (payload.availableNodes || []).filter((n) => n.upstream).map((n) => [n.name, n.upstream as string]),
     )
   } catch {
     // 拉不到就保持原样:代理页照内核给的顺序显示,只是没有图标

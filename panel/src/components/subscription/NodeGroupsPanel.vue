@@ -610,6 +610,16 @@
                   <span class="text-xs font-medium whitespace-nowrap">
                     {{ $t('groupSelected') }} ({{ members.length }})
                   </span>
+                  <select
+                    v-if="isFailover && activeLane"
+                    v-model="activeLaneMode"
+                    v-tip="$t('failoverLaneModeHint')"
+                    class="select select-xs w-auto shrink-0"
+                    :aria-label="$t('failoverLaneModeHint')"
+                  >
+                    <option value="auto">{{ $t('failoverLaneModeAuto') }}</option>
+                    <option value="manual">{{ $t('failoverLaneModeManual') }}</option>
+                  </select>
                   <input
                     v-model="selectedFilter"
                     type="text"
@@ -1121,6 +1131,15 @@ const activeLaneIcon = computed<string>({
   set: (v: string) => {
     if (!activeLane.value) return
     activeLane.value.icon = v && v !== (draft.value?.icon || '') ? v : ''
+  },
+})
+// 当前页签怎么挑节点:自动优选(按测速自己选)/ 手动选择(在代理页点选);自动 = 不写 manual
+const activeLaneMode = computed<'auto' | 'manual'>({
+  get: () => (activeLane.value?.manual ? 'manual' : 'auto'),
+  set: (v) => {
+    if (!activeLane.value) return
+    if (v === 'manual') activeLane.value.manual = true
+    else delete activeLane.value.manual
   },
 })
 const showLaneDelete = ref(false)
