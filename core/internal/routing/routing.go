@@ -20,6 +20,9 @@ func Register(r *protocol.Registry) {
 		"normalizeRouting":     hNormalizeRouting,
 		"routingFingerprint":   hRoutingFingerprint,
 		"migrateStoredRouting": hMigrateStoredRouting,
+		"classes":              hClasses,
+		"forwardPlan":          hForwardPlan,
+		"bypassPlan":           hBypassPlan,
 	}
 	for _, m := range Methods {
 		if h, ok := done[m]; ok {
