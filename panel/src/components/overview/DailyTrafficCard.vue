@@ -50,7 +50,7 @@
         </button>
         <div
           role="tablist"
-          class="tabs-box tabs tabs-xs"
+          class="tabs-box tabs tabs-xs overflow-hidden"
         >
           <a
             role="tab"
@@ -59,7 +59,7 @@
           >{{ monthLabel(prevMonth) }}</a>
           <a
             role="tab"
-            class="tab tab-active font-semibold"
+            class="tab tab-active"
           >{{ monthLabel(month) }}</a>
           <a
             role="tab"
