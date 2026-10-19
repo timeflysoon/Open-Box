@@ -140,7 +140,7 @@
         v-else-if="kernelLoaded"
         class="text-base-content/50 mt-2 text-sm"
       >
-        {{ $t(allProxies.length ? 'proxiesSubscriptionNoMatch' : 'proxiesSubscriptionNoNodes') }}
+        {{ $t(emptyHintKey) }}
       </div>
     </template>
     <template v-slot:content>
@@ -156,7 +156,7 @@
         v-else-if="kernelLoaded"
         class="text-base-content/50 text-sm"
       >
-        {{ $t(allProxies.length ? 'proxiesSubscriptionNoMatch' : 'proxiesSubscriptionNoNodes') }}
+        {{ $t(emptyHintKey) }}
       </div>
     </template>
   </CollapseCard>
@@ -171,7 +171,8 @@ import ProxyPreview from '@/components/proxies/ProxyPreview.vue'
 import { useRenderProxies } from '@/composables/renderProxies'
 import { prettyBytesHelper } from '@/helper/utils'
 import { nodeProviders } from '@/store/openboxSiteSets'
-import { proxyMap, proxyNodesLatencyTest } from '@/store/proxies'
+import { proxiesFilter, proxyMap, proxyNodesLatencyTest } from '@/store/proxies'
+import { hideUnavailableProxies } from '@/store/settings'
 import { ArrowPathIcon, Bars3Icon, BoltIcon, PencilSquareIcon, PowerIcon, TrashIcon } from '@heroicons/vue/24/outline'
 import dayjs from 'dayjs'
 import { computed, ref } from 'vue'
@@ -204,6 +205,13 @@ const allProxies = computed(() =>
     .map(([tag]) => tag),
 )
 const { renderProxies, proxiesCount } = useRenderProxies(allProxies)
+
+// 空了的原因:没有节点 / 没测速或都测不通被「隐藏不可用节点」藏光了(没写过滤词时只可能是这个) / 过滤词没匹配上
+const emptyHintKey = computed(() => {
+  if (!allProxies.value.length) return 'proxiesSubscriptionNoNodes'
+  if (hideUnavailableProxies.value && !proxiesFilter.value) return 'proxiesSubscriptionAllHidden'
+  return 'proxiesSubscriptionNoMatch'
+})
 // 内核数据还没拉到(proxyMap 为空)时只显示订阅自己记的节点数,不说"内核里没有节点"
 const kernelLoaded = computed(() => Object.keys(proxyMap.value).length > 0)
 const countText = computed(() =>

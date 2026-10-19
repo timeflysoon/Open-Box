@@ -15,6 +15,7 @@ export const pickGeoNote = (row: GeoCategoryRow, locale: string): string => {
 // 没有独立条目——与其让它们空着,不如就地拼:基名的说明 + 属性是什么。
 const ATTR_KEY: Record<string, string> = {
   ads: 'geoCategoryAttrAds',
+  telemetry: 'geoCategoryAttrTelemetry',
   cn: 'geoCategoryAttrCn',
   '!cn': 'geoCategoryAttrNotCn',
 }

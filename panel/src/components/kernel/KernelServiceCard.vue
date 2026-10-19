@@ -249,6 +249,20 @@
       <!-- Open-Box 更新:通道 / 检查更新 / 自动更新(档案还在加载时先不显示) -->
       <template v-if="profile && patchProfile">
         <div class="bg-base-content/10 h-px" />
+        <div class="flex items-center justify-end">
+          <a
+            href="https://github.com/timeflysoon/Open-Box"
+            target="_blank"
+            rel="noopener noreferrer"
+            class="text-base-content/70 hover:text-primary inline-flex items-center gap-1.5 rounded-md px-1 py-0.5 text-sm"
+            aria-label="Open-Box GitHub"
+            v-tip="$t('openboxGithubHint')"
+          >
+            <GithubIcon class="h-4 w-4" />
+            <span>Open-Box GitHub</span>
+            <ArrowTopRightOnSquareIcon class="h-4 w-4" />
+          </a>
+        </div>
         <OpenboxUpdateCard
           embedded
           :profile="profile"

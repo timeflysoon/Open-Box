@@ -54,7 +54,7 @@
               v-if="busy"
               class="loading loading-spinner loading-xs"
             />
-            {{ countdown > 0 ? `${$t('confirm')} (${countdown})` : $t('confirm') }}
+            {{ countdown > 0 ? $t('confirmIn', { seconds: countdown }) : $t('confirm') }}
           </button>
         </div>
       </div>
