@@ -711,6 +711,8 @@ export interface OpenboxFailoverGroupStatus {
   // 正在跑的这一轮:节点测了几个(界面显示「检测中 x / y」);manualRecheck:点了「重新检测」还没做完(v0.1.305 起)
   round?: { startedAt: number; done: number; total: number } | null
   manualRecheck?: boolean
+  // 重新检测已受理、还没轮到测(服务端 v0.1.305 起有这个字段;没有就按 status === 'failing' 判断)
+  recheckPending?: boolean
   settings: { interval?: string; intervalMs?: number; tolerance?: number; testUrl?: string } & Partial<OpenboxFailoverSettings>
   lanes: OpenboxFailoverLaneStatus[]
 }
@@ -730,15 +732,16 @@ export interface OpenboxFailoverStatus {
   probes?: OpenboxProbeStats | null
   groups: OpenboxFailoverGroupStatus[]
 }
-export const fetchFailoverStatus = async (): Promise<OpenboxFailoverStatus> =>
-  requestJson<OpenboxFailoverStatus>('/api/openbox/failover/status')
+export const fetchFailoverStatus = async (signal?: AbortSignal): Promise<OpenboxFailoverStatus> =>
+  requestJson<OpenboxFailoverStatus>('/api/openbox/failover/status', { signal })
 export const refreshFailover = async (): Promise<void> => {
   await requestJson<{ ok: boolean }>('/api/openbox/failover/refresh', { method: 'POST' })
 }
 // 「重新检测」一个故障转移组:正在跑的那轮作废,马上把这个组的节点全部强制测一遍。组不存在回 404
-export const recheckFailover = async (id: string): Promise<void> => {
+export const recheckFailover = async (id: string, signal?: AbortSignal): Promise<void> => {
   await requestJson<{ ok: boolean }>('/api/openbox/failover/recheck', {
     method: 'POST',
+    signal,
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ id }),
   })

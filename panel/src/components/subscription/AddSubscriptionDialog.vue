@@ -123,16 +123,22 @@
               <template v-if="autoUpdate.enabled">
                 <span class="text-base-content/70 text-sm">{{ $t('geoUpdateEvery') }}</span>
                 <select
-                  v-model.number="autoUpdate.days"
-                  class="select select-sm w-24"
+                  v-model="autoUpdateInterval"
+                  class="select select-sm w-28"
                 >
                   <option
+                    v-for="h in AUTO_UPDATE_HOURS"
+                    :key="`h${h}`"
+                    :value="`h${h}`"
+                  >{{ $t('geoUpdateHours', { hours: h }) }}</option>
+                  <option
                     v-for="d in [1, 2, 3, 7, 14, 30]"
-                    :key="d"
-                    :value="d"
+                    :key="`d${d}`"
+                    :value="`d${d}`"
                   >{{ $t('geoUpdateDays', { days: d }) }}</option>
                 </select>
                 <select
+                  v-if="autoUpdate.mode !== 'hours'"
                   v-model.number="autoUpdate.hour"
                   class="select select-sm w-24"
                 >
@@ -339,12 +345,28 @@ const initialUrls = () => {
 const urls = ref<string[]>(initialUrls())
 const content = ref(props.subscription?.content ?? '')
 // 定期更新计划;默认关着,打开时默认每天 04:00
+// 间隔可以按小时(每隔 N 小时,mode = 'hours')或按天(每隔 N 天的几点,没有 mode)
+const AUTO_UPDATE_HOURS = [1, 2, 3, 4, 6, 8, 12]
 const initialAutoUpdate = (): OpenboxSubscriptionAutoUpdate => ({
   enabled: props.subscription?.autoUpdate?.enabled === true,
   days: props.subscription?.autoUpdate?.days || 1,
   hour: props.subscription?.autoUpdate?.hour ?? 4,
+  ...(props.subscription?.autoUpdate?.mode === 'hours'
+    ? { mode: 'hours', hours: props.subscription.autoUpdate.hours || 6 }
+    : {}),
 })
 const autoUpdate = ref<OpenboxSubscriptionAutoUpdate>(initialAutoUpdate())
+// 下拉里的值:h6 = 每 6 小时,d3 = 每 3 天
+const autoUpdateInterval = computed({
+  get: () => (autoUpdate.value.mode === 'hours' ? `h${autoUpdate.value.hours || 6}` : `d${autoUpdate.value.days || 1}`),
+  set: (value: string) => {
+    const n = Number(value.slice(1)) || 1
+    const { enabled, hour } = autoUpdate.value
+    autoUpdate.value = value.startsWith('h')
+      ? { enabled, days: autoUpdate.value.days, hour, mode: 'hours', hours: n }
+      : { enabled, days: n, hour }
+  },
+})
 
 // 订阅 DNS 解析(DoH):没配就都留空。展开状态:已经配过就展开,否则收起(和 v0.1.317 一样)
 const nodeDnsUrl = ref(props.subscription?.nodeDns?.url ?? '')

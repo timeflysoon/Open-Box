@@ -18,7 +18,8 @@
             type="button"
             class="btn btn-primary btn-circle btn-sm"
             :disabled="saving || list.length >= SHARE_REGION_LIMITS.groups"
-            v-tip="list.length >= SHARE_REGION_LIMITS.groups ? $t('shareRegionsMax', { max: SHARE_REGION_LIMITS.groups }) : $t('shareRegionsAddTitle')"
+            :aria-label="$t('shareRegionsAdd')"
+            v-tip="list.length >= SHARE_REGION_LIMITS.groups ? $t('shareRegionsMax', { max: SHARE_REGION_LIMITS.groups }) : $t('shareRegionsAdd')"
             @click="openEdit(null)"
           >
             <PlusIcon class="h-4 w-4" />

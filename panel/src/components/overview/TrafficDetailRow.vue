@@ -13,7 +13,7 @@
         <span
           class="min-w-0 truncate"
           :title="row.key"
-        >{{ row.key || '—' }}</span>
+        >{{ trafficKeyLabel(row.key) || '—' }}</span>
         <span
           v-if="note"
           class="text-base-content/60 shrink-0"
@@ -57,7 +57,7 @@ import { prettyBytesHelper } from '@/helper/utils'
 import { ChevronDownIcon } from '@heroicons/vue/24/outline'
 import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { trafficRowNote } from '@/helper/trafficName'
+import { trafficKeyLabel, trafficRowNote } from '@/helper/trafficName'
 import TrafficDrillPanel from './TrafficDrillPanel.vue'
 
 const props = defineProps<{

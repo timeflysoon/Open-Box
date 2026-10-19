@@ -41,7 +41,7 @@
                 class="max-w-[24rem] truncate"
                 :title="e.row.key"
               >
-                {{ e.row.key || '—' }}
+                {{ trafficKeyLabel(e.row.key) || '—' }}
                 <span
                   v-if="trafficRowNote(e.row, t)"
                   class="text-base-content/60 ml-1"
@@ -174,7 +174,7 @@ import {
 import { prettyBytesHelper } from '@/helper/utils'
 import { trafficCountDirect } from '@/store/settings'
 import { ChevronDownIcon, ChevronUpIcon, InformationCircleIcon } from '@heroicons/vue/24/outline'
-import { trafficRowNote } from '@/helper/trafficName'
+import { mergeTrafficNodeRows, trafficKeyLabel, trafficRowNote } from '@/helper/trafficName'
 import { computed, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 
@@ -211,7 +211,10 @@ const dimLabel = (d: OpenboxTrafficDim) => t(LABEL_KEY[d])
 const fmt = (n?: number) => prettyBytesHelper(Math.max(0, Math.round(n || 0)), { maximumFractionDigits: 1 })
 
 const current = computed(() => cache.value[by.value])
-const rows = computed<OpenboxTrafficRow[]>(() => current.value?.rows ?? [])
+const rows = computed<OpenboxTrafficRow[]>(() => {
+  const list = current.value?.rows ?? []
+  return by.value === 'node' ? mergeTrafficNodeRows(list) : list
+})
 const restRows = computed(() => rows.value.slice(TOP_N))
 const restSummary = computed(() =>
   restRows.value.reduce(

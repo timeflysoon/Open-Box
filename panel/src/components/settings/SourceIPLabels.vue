@@ -89,9 +89,11 @@ import {
 import { useSessionStorage } from '@vueuse/core'
 import { v4 as uuid } from 'uuid'
 import { ref } from 'vue'
+import { useI18n } from 'vue-i18n'
 import Draggable from 'vuedraggable'
 import SourceIPInput from './SourceIPInput.vue'
 
+const { t } = useI18n()
 const dialogVisible = useSessionStorage('cache/sourceip-label-dialog-visible', false)
 const newLabelForIP = ref<Omit<SourceIPLabel, 'id'>>({
   key: '',
@@ -116,6 +118,7 @@ const handlerLabelAdd = () => {
 }
 
 const handlerLabelRemove = (id: string) => {
+  if (!window.confirm(t('removeItemConfirm'))) return
   sourceIPLabelList.value.splice(
     sourceIPLabelList.value.findIndex((item) => item.id === id),
     1,

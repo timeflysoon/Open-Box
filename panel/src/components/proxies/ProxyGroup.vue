@@ -235,7 +235,7 @@ import {
 } from '@/store/settings'
 import { EyeIcon, EyeSlashIcon } from '@heroicons/vue/24/outline'
 import { managedOutbounds, siteSetNames } from '@/store/openboxSiteSets'
-import { failoverCurrentLaneId, failoverLanesOf, failoverLastSwitchText, failoverMembersOf, isFailoverGroup, isFailoverRejected, watchFailoverStatus } from '@/store/openboxFailover'
+import { failoverCurrentLaneId, failoverLanesOf, failoverMembersOf, isFailoverGroup, isFailoverRejected, watchFailoverStatus } from '@/store/openboxFailover'
 import { openPenetrationDialog } from '@/store/proxyGroupRulePenetration'
 import { DARK_THEME, theme } from '@/store/settings'
 import { twMerge } from 'tailwind-merge'
@@ -298,8 +298,7 @@ onMounted(() => {
 onBeforeUnmount(() => {
   releaseStatus?.()
 })
-// 自动择优组和故障转移组都显示实际检测间隔、容差及最近切换信息;
-// 手动组没有这两项
+// 自动择优组和故障转移组都显示实际检测间隔和容差;手动组没有这两项
 const intervalText = (interval: string) => {
   const m = /^(\d+)(m|s)$/.exec(interval)
   if (!m) return interval
@@ -309,9 +308,7 @@ const testMeta = computed(() => {
   const g = managedGroup.value
   if (!g || (g.type !== 'urltest' && g.type !== 'failover')) return ''
   const interval = g.interval || '300s'
-  const base = `${t('groupInterval')} ${intervalText(interval)} · ${t('groupTolerance')} ${g.tolerance ?? 100} ${t('groupUnitMs')}`
-  const lastSwitch = g.type === 'failover' ? failoverLastSwitchText(props.name, failoverLanes.value) : ''
-  return lastSwitch ? `${base} · ${lastSwitch}` : base
+  return `${t('groupInterval')} ${intervalText(interval)} · ${t('groupTolerance')} ${g.tolerance ?? 100} ${t('groupUnitMs')}`
 })
 
 const hiddenGroup = computed({
