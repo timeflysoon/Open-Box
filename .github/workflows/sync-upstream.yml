@@ -25,6 +25,8 @@ env:
   UPSTREAM_REPO: liandu2024/Open-Box
   OWN_REPO: timeflysoon/Open-Box
   BASE_BRANCH: ${{ vars.SYNC_BASE_BRANCH || 'catch-up-upstream' }}
+  # 自己维护的开源核心目录(空格分隔);同步不能碰这些路径,碰到就中止、不提交
+  PROTECT_PATHS: core
 
 jobs:
   sync:
@@ -186,6 +188,14 @@ jobs:
           git add -A
           # 前端 dist 可能被 .gitignore 忽略,强制加入 panel 下的文件
           git add -f panel
+          # 保护自己的核心源码:同步只该动上游的东西,暂存区里出现受保护路径就中止
+          for p in $PROTECT_PATHS; do
+            if git diff --cached --name-only -- "$p" | grep -q .; then
+              echo "同步改动了受保护路径 $p/,已中止、未提交(检查 rsync 范围,或 SYNC_BASE_BRANCH 是不是指到了 main)" >&2
+              git diff --cached --name-only -- "$p" | head -20 >&2
+              exit 1
+            fi
+          done
           if git diff --cached --quiet; then echo "没有变化"; exit 0; fi
           git commit -m "sync: 上游 $tag(openwrt、debian、panel、install/update/uninstall.sh),仓库地址保持 $OWN_REPO"
           git push origin "HEAD:$BASE_BRANCH"
