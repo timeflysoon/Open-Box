@@ -582,6 +582,8 @@ export interface OpenboxLatencyResult {
   ok: boolean
   ms?: number
   error?: string
+  // 没测成时的原因,如 invalid(生成不出这个节点的出站)、not-found(是组,或已不在订阅里)、timeout、refused
+  reason?: string
 }
 
 // 服务端用 `sing-box tools fetch` 按节点的完整配置真的拨一次号并发一次 HTTPS 请求,
@@ -1706,10 +1708,7 @@ export interface OpenboxStoredLatencyJob {
   // 是否记进延迟历史,默认记;传 false 只测不记
   record?: boolean
 }
-export interface OpenboxStoredLatencyResult extends OpenboxLatencyResult {
-  // 没测成时的原因,如 invalid(生成不出这个节点的出站)、not-found(是组,或已不在订阅里)
-  reason?: string
-}
+export type OpenboxStoredLatencyResult = OpenboxLatencyResult
 export interface OpenboxStoredLatencyResponse {
   // 顺序和请求里的 jobs 一一对应
   results: OpenboxStoredLatencyResult[]

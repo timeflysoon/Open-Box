@@ -17,6 +17,7 @@ import {
   recheckFailoverGroup,
 } from '@/store/openboxFailover'
 import { iconUrlFor } from '@/helper/iconUrl'
+import { summarizeLatencyReasons } from '@/helper/latencyReason'
 import {
   loadOpenboxNodeGroups,
   loadOpenboxSiteSets,
@@ -37,7 +38,6 @@ import {
 } from '@/constant'
 import { isProxyGroup } from '@/helper'
 import { showNotification } from '@/helper/notification'
-import { i18n } from '@/i18n'
 import type { History, Proxy, ProxyProvider } from '@/types'
 import { useStorage } from '@vueuse/core'
 import { last } from 'lodash'
@@ -620,7 +620,7 @@ const testLatencyOneByOneWithTip = async (
   let testDone = 0
   let testFailed = 0
   // 失败原因归类:内核 delay 接口超时回 504 / 「Timeout」,其余都算连接失败
-  const reasonCounts = new Map<string, number>()
+  const results: { ok: boolean; reason?: string }[] = []
   // 开始时前面已经有测速在跑(名额被占着):这一批要排队,进度提示换成「已排队」的说法
   const queued = limiter.activeCount + limiter.pendingCount > 0
 
@@ -632,10 +632,10 @@ const testLatencyOneByOneWithTip = async (
         if (res.status !== 200) {
           testFailed++
           const message = String((res.data as { message?: string } | undefined)?.message || '')
-          const reason = i18n.global.t(res.status === 504 || /time\s*out/i.test(message) ? 'latencyReasonTimeout' : 'latencyReasonError')
-          reasonCounts.set(reason, (reasonCounts.get(reason) || 0) + 1)
+          results.push({ ok: false, reason: res.status === 504 || /time\s*out/i.test(message) ? 'timeout' : 'error' })
           setHistory(name, NOT_CONNECTED)
         } else {
+          results.push({ ok: true })
           setHistory(name, res.data.delay)
         }
         testDone++
@@ -655,19 +655,16 @@ const testLatencyOneByOneWithTip = async (
   )
   // 这一批测完让服务端读一次内核,成功的结果进时间线
   void syncLatencyHistory()
-  const reasons = [...reasonCounts]
-    .sort((a, b) => b[1] - a[1])
-    .map(([reason, n]) => i18n.global.t('failoverFailItem', { reason, n }))
-    .join(i18n.global.t('listSeparator'))
+  const reasons = summarizeLatencyReasons(results)
   showNotification({
-    content: reasons ? 'testFinishedReasonsTip' : 'testFinishedResultTip',
+    content: testFailed ? 'testFinishedReasonsTip' : 'testFinishedResultTip',
     key: TIP_KEY + keyName,
     params: {
       name: getNameForNotification(displayName, url),
       total: total.toString(),
       success: `${total - testFailed}`,
       failed: `${testFailed}`,
-      ...(reasons ? { reasons } : {}),
+      reasons,
     },
     type: testFailed ? 'alert-warning' : 'alert-success',
     timeout: 3000,

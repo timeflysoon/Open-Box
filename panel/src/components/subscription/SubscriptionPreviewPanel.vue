@@ -218,8 +218,9 @@
                            这一格固定宽度且常驻(没测过就写「未测速」):否则有结果的行会把
                            输入框挤窄,同一列里的文本框宽度参差不齐。 -->
                       <span
+                        v-tip="latencyTitle(entry.originalTag)"
                         :class="[
-                          'w-16 shrink-0 text-right text-xs whitespace-nowrap',
+                          'w-20 shrink-0 truncate text-right text-xs whitespace-nowrap',
                           latencyClass(entry.originalTag),
                         ]"
                       >
@@ -267,6 +268,7 @@
 import type { OpenboxLatencyResult, OpenboxRenameOptions, OpenboxSubscriptionPreview, OpenboxSkippedNode } from '@/api/openbox'
 import { testNodeLatency } from '@/api/openbox'
 import CountryFlag from '@/components/common/CountryFlag.vue'
+import { latencyReasonText } from '@/helper/latencyReason'
 import {
   ArrowRightIcon,
   ArrowUturnLeftIcon,
@@ -331,7 +333,13 @@ const testingAll = ref(false)
 const latencyText = (originalTag: string) => {
   const r = latency.value[originalTag]
   if (!r) return t('subscriptionLatencyUntested')
-  return r.ok ? `${r.ms}ms` : t('obUpdateStage_failed')
+  return r.ok ? `${r.ms}ms` : latencyReasonText(r.reason)
+}
+// 悬停显示失败原因加服务端给的具体错误;成功和没测过都不出提示
+const latencyTitle = (originalTag: string) => {
+  const r = latency.value[originalTag]
+  if (!r || r.ok) return ''
+  return [latencyReasonText(r.reason), r.error].filter(Boolean).join(' ')
 }
 const latencyClass = (originalTag: string) => {
   const r = latency.value[originalTag]

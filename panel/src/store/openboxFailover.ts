@@ -1,5 +1,6 @@
 import type { OpenboxFailoverGroupStatus, OpenboxFailoverStatus } from '@/api/openbox'
 import { fetchFailoverStatus, recheckFailover } from '@/api/openbox'
+import { latencyReasonText } from '@/helper/latencyReason'
 import { showNotification } from '@/helper/notification'
 import { i18n } from '@/i18n'
 import { managedOutbounds } from '@/store/openboxSiteSets'
@@ -153,13 +154,6 @@ export const failoverLaneOfTag = (tag: string) => {
 // 这个组此刻是不是在兜底拒绝上(所有页签都没通过测速,流量被拒绝;服务端每分钟复查一次)
 export const isFailoverRejected = (groupName: string) => failoverGroupByTag.value.get(groupName)?.status === 'reject'
 
-// 失败类别的文案:复用测速失败原因那一套(latencyReasonTimeout 等),没有对应文案就原样显示
-const failKindLabel = (kind: string) => {
-  const camel = kind.replace(/[-_ ]+(.)/g, (_m, c: string) => c.toUpperCase())
-  const key = `latencyReason${camel.charAt(0).toUpperCase()}${camel.slice(1)}`
-  return i18n.global.te(key) ? i18n.global.t(key) : kind
-}
-
 // 「状态码 404(2 个)、超时(1 个)」:这个组所有失败节点按原因归类、多的在前。没有失败节点就是空串
 export const failoverFailReasons = (groupName: string) => {
   const group = failoverGroupByTag.value.get(groupName)
@@ -172,7 +166,7 @@ export const failoverFailReasons = (groupName: string) => {
       if (seen.has(tag) || !node || node.ok !== false) continue
       seen.add(tag)
       const code = node.kind === 'status' ? /unexpected status (\d{3})/.exec(node.error || '')?.[1] : undefined
-      const label = code ? t('failoverFailStatusCode', { code }) : failKindLabel(node.kind || (node.reason === 'timeout' ? 'timeout' : 'error'))
+      const label = code ? t('failoverFailStatusCode', { code }) : latencyReasonText(node.kind || (node.reason === 'timeout' ? 'timeout' : 'error'))
       counts.set(label, (counts.get(label) || 0) + 1)
     }
   }
