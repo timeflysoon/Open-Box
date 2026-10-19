@@ -4,14 +4,7 @@
     <div class="card-body gap-3 p-4 text-sm">
       <!-- 标题行:Open-Box 标识 + 版本号;右边是需要注意的提示和「恢复出厂设置」 -->
       <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
-        <a
-          href="https://github.com/timeflysoon/Open-Box"
-          target="_blank"
-          rel="noopener noreferrer"
-          class="hover:bg-base-200 inline-flex cursor-pointer items-center gap-2 rounded-lg py-1"
-          aria-label="Open-Box GitHub"
-          v-tip="$t('openboxGithubHint')"
-        >
+        <div class="inline-flex items-center gap-2 py-1">
           <img
             :src="logoUrl"
             class="app-logo h-6 w-auto"
@@ -21,21 +14,7 @@
             v-if="openboxVersion"
             class="font-mono text-base"
           >{{ openboxVersion }}</span>
-          <GithubIcon class="h-5 w-5" />
-          <span class="text-base">GitHub</span>
-          <ArrowTopRightOnSquareIcon class="text-base-content/50 h-4 w-4" />
-        </a>
-        <button
-          type="button"
-          class="hover:bg-base-200 inline-flex cursor-pointer items-center gap-2 rounded-lg py-1"
-          @click="tutorialOpen = true"
-        >
-          <CountryFlag
-            code="brand:youtube"
-            :size="20"
-          />
-          <span class="text-base">{{ $t('tutorialButton') }}</span>
-        </button>
+        </div>
         <div class="ml-auto flex items-center gap-2">
           <ExclamationTriangleIcon
             v-if="warnTip"
@@ -276,7 +255,6 @@
           :patch-profile="patchProfile"
         />
       </template>
-      <TutorialVideosDialog v-model="tutorialOpen" />
     </div>
   </div>
 </template>
@@ -288,7 +266,6 @@ import GithubIcon from '@/components/common/GithubIcon.vue'
 import StatusBadge from '@/components/common/StatusBadge.vue'
 import FactoryResetButton from '@/components/kernel/FactoryResetButton.vue'
 import OpenboxUpdateCard from '@/components/kernel/OpenboxUpdateCard.vue'
-import TutorialVideosDialog from '@/components/kernel/TutorialVideosDialog.vue'
 import {
   isRestartDisabled,
   isStartDisabled,
@@ -310,13 +287,10 @@ import {
   PlayIcon,
   StopIcon,
 } from '@heroicons/vue/24/outline'
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 
 const { t } = useI18n()
-
-// 「使用教程」弹窗开关
-const tutorialOpen = ref(false)
 
 // Geo 数据、安装通道都来自更新状态(同卡的更新区也会拉;这里没有就自己拉一次)
 onMounted(() => {
