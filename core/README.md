@@ -13,7 +13,8 @@
 ## 方法(共 15 个 + hello)
 | 包 | 方法 | 状态 |
 |---|---|---|
-| routing | normalizePolicy normalizeRouting routingFingerprint migrateStoredRouting classes forwardPlan entryPlan bypassPlan | 占位 |
+| routing | normalizePolicy normalizeRouting routingFingerprint migrateStoredRouting | 已实现(对照旧 Node 的金标准测试) |
+| routing | classes forwardPlan entryPlan bypassPlan | 占位 |
 | groups | normalizeGroups builtinTags emitGroups | 占位 |
 | config | configDetailed | 占位 |
 | authz | checkActivationCode activationState authorizationState | 已实现(一律解锁) |
@@ -22,7 +23,8 @@
 - `cmd/openbox-core/` 入口与方法注册
 - `internal/protocol/` 协议、hello、大小限制
 - `internal/{routing,groups,config,authz}/` 各类方法
-- `testdata/` 金标准:同一份输入喂旧版 Node 实现(backup 分支)得到的输出
+- `testdata/` 金标准:同一份输入喂旧版 Node 实现(backup 分支)得到的输出;
+  `gen-golden.mjs` 可重新生成(用法见脚本开头注释)
 - `scripts/` 构建脚本
 - `singbox/` 预留
 
