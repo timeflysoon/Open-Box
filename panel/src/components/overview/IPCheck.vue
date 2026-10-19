@@ -77,8 +77,8 @@ const queryingIpInfo = () => ({
 })
 
 const failedIpInfo = () => ({
-  ip: [t('testFailed'), ''],
-  ipWithPrivacy: [t('testFailed'), ''],
+  ip: [t('speedtestTimeout'), ''],
+  ipWithPrivacy: [t('speedtestTimeout'), ''],
 })
 
 const getIPs = () => {

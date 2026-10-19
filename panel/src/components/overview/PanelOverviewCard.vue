@@ -60,7 +60,7 @@
           :min="100 * 1024 * 1024"
         />
         <BasicCharts
-          :title="$t('connectionCount')"
+          :title="$t('statConnections')"
           tone="primary"
           :data="connectionsData"
           :label-formatter="connectionsLabel"
