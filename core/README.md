@@ -15,7 +15,7 @@
 |---|---|---|
 | routing | normalizePolicy normalizeRouting routingFingerprint migrateStoredRouting classes forwardPlan bypassPlan | 已实现(对照旧 Node 的金标准测试) |
 | routing | entryPlan | 已实现 blacklist 模式(旧代码里没有对照;whitelist 暂不做) |
-| groups | normalizeGroups builtinTags emitGroups | 占位 |
+| groups | normalizeGroups builtinTags emitGroups | 已实现(对照旧 Node 的金标准测试,含逐字节键序) |
 | config | configDetailed | 占位 |
 | authz | checkActivationCode activationState authorizationState | 已实现(一律解锁) |
 
@@ -23,8 +23,9 @@
 - `cmd/openbox-core/` 入口与方法注册
 - `internal/protocol/` 协议、hello、大小限制
 - `internal/{routing,groups,config,authz}/` 各类方法
+- `internal/jsx/` 复刻旧 Node 实现用到的 JS 语义(Number() 转换、trim、undefined 与 null 的区别)
 - `testdata/` 金标准:同一份输入喂旧版 Node 实现(backup 分支)得到的输出;
-  `gen-golden.mjs`、`gen-plans-golden.mjs` 可重新生成(用法见脚本开头注释)
+  `gen-golden.mjs`、`gen-plans-golden.mjs`、`gen-groups-golden.mjs` 可重新生成(用法见脚本开头注释)
 - `scripts/` 构建脚本
 - `singbox/` 预留
 
