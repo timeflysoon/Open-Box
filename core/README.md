@@ -14,7 +14,7 @@
 | 包 | 方法 | 状态 |
 |---|---|---|
 | routing | normalizePolicy normalizeRouting routingFingerprint migrateStoredRouting classes forwardPlan bypassPlan | 已实现(对照旧 Node 的金标准测试) |
-| routing | entryPlan | 占位(旧代码里没有,第一版只做 blacklist) |
+| routing | entryPlan | 已实现 blacklist 模式(旧代码里没有对照;whitelist 暂不做) |
 | groups | normalizeGroups builtinTags emitGroups | 占位 |
 | config | configDetailed | 占位 |
 | authz | checkActivationCode activationState authorizationState | 已实现(一律解锁) |
