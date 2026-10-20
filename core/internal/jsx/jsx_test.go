@@ -29,3 +29,14 @@ func TestRound(t *testing.T) {
 		}
 	}
 }
+
+func TestNumberToString(t *testing.T) {
+	for in, want := range map[float64]string{
+		0: "0", 5: "5", 100000000: "100000000", 1.5: "1.5", 0.1: "0.1", -3: "-3", 1e21: "1e+21", 1.5e25: "1.5e+25",
+		1e-7: "1e-7", 0.000001: "0.000001", 123456789012345680000: "123456789012345680000", 1e20: "100000000000000000000",
+	} {
+		if got := NumberToString(in); got != want {
+			t.Errorf("NumberToString(%v)=%q 要 %q", in, got, want)
+		}
+	}
+}

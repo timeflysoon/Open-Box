@@ -88,7 +88,7 @@ func ToString(v any) string {
 		}
 		return "false"
 	case float64:
-		return strconv.FormatFloat(x, 'g', -1, 64)
+		return NumberToString(x)
 	case string:
 		return x
 	case []any:
@@ -171,3 +171,32 @@ func stringToNumber(s string) float64 {
 
 // IsFinite 相当于 Number.isFinite(已经是数字的值)。
 func IsFinite(f float64) bool { return !math.IsNaN(f) && !math.IsInf(f, 0) }
+
+// NumberToString 相当于 String(number):整数不带指数(String(100000000) 是 "100000000"),
+// 指数只在绝对值 >= 1e21 或 < 1e-6 时出现,写法是 "1e+21" / "1e-7"(指数不补零)。
+func NumberToString(f float64) string {
+	switch {
+	case math.IsNaN(f):
+		return "NaN"
+	case math.IsInf(f, 1):
+		return "Infinity"
+	case math.IsInf(f, -1):
+		return "-Infinity"
+	case f == 0:
+		return "0"
+	}
+	if abs := math.Abs(f); abs >= 1e21 || abs < 1e-6 {
+		s := strconv.FormatFloat(f, 'e', -1, 64)
+		i := strings.IndexByte(s, 'e')
+		mant, exp := s[:i], s[i+1:]
+		digits := strings.TrimLeft(exp[1:], "0")
+		if digits == "" {
+			digits = "0"
+		}
+		return mant + "e" + exp[:1] + digits
+	}
+	return strconv.FormatFloat(f, 'f', -1, 64)
+}
+
+// Nullish 相当于 v == null(null 或 undefined),用于 ?? 运算符。
+func Nullish(v any) bool { return v == nil || IsUndefined(v) }
