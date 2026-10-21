@@ -30,7 +30,7 @@
 - `internal/leafgolden/` 只有测试:上面几个叶子包统一对照旧实现的金标准
 - `internal/jsx/` 复刻旧 Node 实现用到的 JS 语义(Number() 转换、trim、undefined 与 null 的区别)
 - `testdata/` 金标准:同一份输入喂旧版 Node 实现(backup 分支)得到的输出;
-  `gen-golden.mjs`、`gen-plans-golden.mjs`、`gen-groups-golden.mjs`、`gen-emit-golden.mjs`、`gen-leaf-golden.mjs`、`gen-dns-golden.mjs` 可重新生成(用法见脚本开头注释)
+  `gen-golden.mjs`、`gen-plans-golden.mjs`、`gen-groups-golden.mjs`、`gen-emit-golden.mjs`、`gen-leaf-golden.mjs`、`gen-dns-golden.mjs`、`gen-route-golden.mjs` 可重新生成(用法见脚本开头注释)
 - `scripts/` 构建脚本
 - `singbox/` 预留
 
@@ -50,6 +50,7 @@ chainNodes / dnsRuleOwners,这几项没有旧代码可对照)。
     (`routing/rulesets.go`:routeRulesetTags / dnsRulesetTags / policyOutboundOptions / splitRuleSetConditions)、
     `routing/urlhost.go`(extractHost:按 WHATWG 规则取 `new URL().hostname`,对 Node 做过两万条差分):**已完成**,
     金标准 `testdata/dns_golden.json`(`gen-dns-golden.mjs` 生成),做过变异测试
-  - routing(旧 routing.mjs 的 buildRoute):**待做**
-- 阶段 C:buildConfig 装配,以及新增字段和 dnsRuleOwners
+  - routing(`routing/route.go`,对应旧 routing.mjs 的 buildRoute):**已完成**,金标准 `testdata/route_golden.json`
+    (`gen-route-golden.mjs` 生成),做过变异测试。旧文件里的 preResolveRules 正式生成不启用(config.mjs 不传 resolvers),没有移植
+- 阶段 C:buildConfig 装配(阶段 B 的零件已齐),以及新增字段和 dnsRuleOwners
 - 阶段 D:旧 JS 金标准 + 真实 sing-box 1.13.14 `check` + 对照 templates/reference-1.13.14.json
