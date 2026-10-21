@@ -1269,6 +1269,8 @@ refresh_update_script() {
   fi
   if cancel_requested; then
     write_status cancelled "" "" "已取消(用户请求)"
+    restore_core_if_suspended
+    rm -f "$CANCEL_FLAG" 2>/dev/null || true
     exit 0
   fi
   set --

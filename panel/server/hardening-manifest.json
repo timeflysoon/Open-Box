@@ -4,19 +4,19 @@
   "core": {
     "protocol": 1,
     "implementation": "go-native",
-    "buildID": "e4f52a629e1fecc1796141d6a9d10df0fb5d1774f9bc8cb87e0dc579b171c8d1",
+    "buildID": "dd3cf57521159c6f5c18481d821d46852fc82e2e58b986b55c90d5364b71c782",
     "goVersion": "1.25.12",
     "os": "linux",
     "arch": "amd64",
-    "sha256": "706e7ffe500440417e996cc90f3e0d368bbc1dbe6760055c30b8e3fb1709eba9",
-    "size": 3661972,
-    "bindingSha256": "dcd580b0f8e5b9086a1d1ac173626b42d71032d8713e6abb03b85d1f89ce68e3"
+    "sha256": "01c457a52167e4aac60076dcf63fddf427bb20440d8554dd14f83b07ac1640b9",
+    "size": 3670164,
+    "bindingSha256": "40086663012b1715dca9776e3dc23253baec265004143c3ffb7ebda87f8d34db"
   },
   "files": {
-    "native/openbox-core": "706e7ffe500440417e996cc90f3e0d368bbc1dbe6760055c30b8e3fb1709eba9",
-    "native/core-build.json": "85681e96b73d175323ee63a96b8b1e84feab753436c4bd3d75d3c41489b0cdc8",
-    "index.mjs": "5eda9b35d2c0d765af59149dc70eff67c15b0b2a1af659bc0051958f0151755a",
-    "cli/deploy.mjs": "673943fa8088eaa9103111b136311cba9f2be252248e25b079f4e0e98d1796ac",
+    "native/openbox-core": "01c457a52167e4aac60076dcf63fddf427bb20440d8554dd14f83b07ac1640b9",
+    "native/core-build.json": "fdd9683b7c19ad3dea2a4adc6117cbc26b8faad9108e617fd9f5b9ca959d07b5",
+    "index.mjs": "cb8da60167be5f18fb99050b55bc8dc4e8d16228f562e30a66f940a051f56387",
+    "cli/deploy.mjs": "884ddd84cda6db46b1a9ca0b1afcd4390f91f82e3fecec53000b3dbef26c3e14",
     "system/access-password-cli.mjs": "2f9078ceaf704e590fcc9ba0fa4b1775cbc60183bfc49c8ff94b5cf6fa2a9005",
     "system/component-update.mjs": "9f0a3a43be1d3dca81c32f774725a076305ddfad882a33351601e5eb0749d3a9",
     "system/dns-filter-parse.mjs": "79f068b0dfd818c70ff989ccf4c0841f730cc82d7e95ec28f695acd5f4cf4faf",
