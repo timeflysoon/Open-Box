@@ -302,6 +302,7 @@ drain_stdin() {
 }
 
 die() {
+  [ "${CORE_HELPERS_READY:-0}" = "1" ] && restore_core_if_suspended
   echo "[open-box] 错误:$*" >&2
   write_status failed "" "" "$*"
   openbox_env_report
@@ -449,6 +450,41 @@ build_url() {
     printf '%s\n' "$url"
   fi
 }
+
+# 内核开着时,路由器自己发出的 GitHub 直连会被内核接管;代理线路不通就 8 秒超时
+# (#672:192.168.3.1 浏览器能上 GitHub,路由器自己取不到升级脚本,面板升级直接失败)。
+# 取脚本 / 取包之前先把内核停掉,失败时按原状拉起来;升级流程本来也要停它。
+OPENBOX_CORE_SUSPENDED=${OPENBOX_CORE_SUSPENDED:-0}
+openbox_core_service() {
+  if [ -x /etc/init.d/openbox ]; then
+    printf '%s\n' /etc/init.d/openbox
+  elif [ -x "$INSTALL_ROOT/debian/bin/openbox-ctl" ]; then
+    printf '%s\n' "$INSTALL_ROOT/debian/bin/openbox-ctl"
+  fi
+}
+suspend_core_for_fetch() {
+  [ "$OPENBOX_CORE_SUSPENDED" = "0" ] || return 0
+  _scs=$(openbox_core_service)
+  [ -n "$_scs" ] || return 0
+  "$_scs" status 2>/dev/null | grep -q running || return 0
+  info "暂停内核以下载升级包(内核接管路由器自身流量时 GitHub 会超时)..."
+  "$_scs" stop >/dev/null 2>&1 || true
+  OPENBOX_CORE_SUSPENDED=1
+  OPENBOX_UPDATE_CORE_WAS_UP=1
+  # 两个都导出:取到新脚本会 exec 成另一个进程,由它负责把内核拉回来
+  export OPENBOX_CORE_SUSPENDED OPENBOX_UPDATE_CORE_WAS_UP
+}
+restore_core_if_suspended() {
+  [ "$OPENBOX_CORE_SUSPENDED" = "1" ] || return 0
+  [ "${POST_SWAP:-0}" = "1" ] && return 0
+  _scs=$(openbox_core_service)
+  [ -n "$_scs" ] || return 0
+  info "把内核按原状拉起来..."
+  "$_scs" start >/dev/null 2>&1 || true
+  OPENBOX_CORE_SUSPENDED=0
+  export OPENBOX_CORE_SUSPENDED
+}
+CORE_HELPERS_READY=1
 
 # 探测专用的下载函数:比 fetch_to_file 多加连接/总时长上限,避免探测阶段卡在一个
 # 已经死掉、只是不返回错误而是一直不响应的加速站上——真正下载 106MB 正文时仍用不
@@ -1203,6 +1239,8 @@ refresh_update_script() {
     _sources="${MIRROR_PREFIX:-$BUILTIN_MIRRORS}"
   fi
   _ready=0
+  # 先停内核再取脚本:内核开着时路由器自己的 GitHub 直连会超时(见 suspend_core_for_fetch)。
+  suspend_core_for_fetch
   # 镜像先按这次选择的通道试,失败再直连;直连通道不擅自换镜像。
   for _source in $_sources direct; do
     rm -f -- "$_fresh"
@@ -1220,8 +1258,14 @@ refresh_update_script() {
     fi
   done
   if [ "$_ready" != "1" ]; then
-    write_status failed "" "" "无法获取最新升级脚本,现有安装未改动"
-    die "无法获取最新升级脚本,请检查下载通道后重试。现有安装未改动。"
+    # 取不到最新脚本不能把整次升级卡死:正在跑的这一份就是发布包里校验过的 update.sh
+    # (面板 / LuCI 的一键升级、手动 sh update.sh 都是它),继续用它升级,现有安装到
+    # 校验通过前仍然不动。GitHub 被墙、镜像也不通的环境(#672 的 192.168.3.1)以前
+    # 会直接失败,现在能照常升级,只是拿不到新脚本里的修正。
+    write_status starting "" "" "下载不到最新升级脚本,改用随包升级脚本继续"
+    info "下载不到最新升级脚本,改用随包升级脚本继续"
+    rm -f -- "$_fresh"
+    return 0
   fi
   if cancel_requested; then
     write_status cancelled "" "" "已取消(用户请求)"
@@ -1241,6 +1285,8 @@ refresh_update_script() {
   # argv 已完整接力，清掉旧 worker 环境记录；镜像暂存着旧脚本时也不会重复解析渠道。
   OPENBOX_UPDATE_CHANNEL_OVERRIDE= OPENBOX_UPDATE_MIRROR_PREFIX= OPENBOX_UPDATE_EXPECT= \
     OPENBOX_UPDATE_REFRESHED=1 OPENBOX_UPDATE_RELOCATED=1 OPENBOX_UPDATE_DISPATCHED=1 \
+    OPENBOX_UPDATE_CORE_WAS_UP="${OPENBOX_UPDATE_CORE_WAS_UP:-0}" \
+    OPENBOX_CORE_SUSPENDED="${OPENBOX_CORE_SUSPENDED:-0}" \
     exec sh "$_fresh" "$@"
 }
 
@@ -1628,6 +1674,7 @@ select_builtin_mirror() {
 # 无论脚本在哪一步退出都不留半成品。
 STAGE_DIR=""
 cleanup() {
+  [ "${CORE_HELPERS_READY:-0}" = "1" ] && restore_core_if_suspended
   safe_rm_rf "$TMP_DL"
   [ -n "$STAGE_DIR" ] && safe_rm_rf "$STAGE_DIR"
   # 只有真正执行升级逻辑的这个进程(前台同步调用,或者 --detach 派生出的后台子
@@ -1721,6 +1768,9 @@ if [ -f "$INSTALL_ROOT/panel/server/system/update-components.sh" ]; then
   fi
 fi
 if [ "$_COMPONENT_PREPARED" = "0" ]; then
+# 取包之前先停内核:内核开着时路由器自己的 GitHub 直连会被它接管,代理线路不通就超时
+# (#672 的 192.168.3.1)。取不到包时 die() 会把内核按原状拉起来;升级成功由主流程重启。
+suspend_core_for_fetch
 _dl_round=0
 while :; do
   _dl_round=$((_dl_round + 1))
@@ -1847,7 +1897,7 @@ rm -f "$CANCEL_FLAG" 2>/dev/null || true
 
 # 记住内核此刻是否在跑:升级完把它按新版本重新生成配置再拉起来,不用用户再进面板点启动
 CORE_WAS_RUNNING=0
-if [ -x "$CORE_SVC" ] && "$CORE_SVC" status 2>/dev/null | grep -q running; then
+if [ "${OPENBOX_UPDATE_CORE_WAS_UP:-0}" = "1" ] || { [ -x "$CORE_SVC" ] && "$CORE_SVC" status 2>/dev/null | grep -q running; }; then
   CORE_WAS_RUNNING=1
 fi
 

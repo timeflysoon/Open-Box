@@ -10,6 +10,8 @@ name: Release
 #   OPENBOX_KERNEL_SOURCE  upstream(默认) | build(用本仓库补丁源码自己编译,没有上游那批未公开补丁)
 #   OPENBOX_KERNEL_TAG     固定到上游某个版本(如 v0.1.283);留空 = 每次取 Latest
 #   OPENBOX_KERNEL_REPO    上游仓库,默认 liandu2024/Open-Box
+#   OPENBOX_SOURCE_TAG     内核源码包(*-source.tar.gz)固定取自上游某个版本;留空 = 与内核所取版本相同
+#                          (手动运行时填写的 source_tag 输入框优先于这个变量)
 
 on:
   push:
@@ -20,6 +22,10 @@ on:
       tag:
         description: 发布的版本号(必须以 v 开头,如 v0.1.288);会在所选分支的最新提交上自动创建这个标签
         required: true
+      source_tag:
+        description: 内核源码包(*-source.tar.gz)取自上游哪个版本(如 v0.1.341);留空 = 与内核所取的上游版本相同
+        required: false
+        default: ''
 
 permissions:
   contents: write
@@ -53,6 +59,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       tag: ${{ steps.tag.outputs.tag }}
+      source_tag: ${{ steps.tag.outputs.source_tag }}
     steps:
       # 手动触发时先检查版本号写法,写错了在这里直接停,不浪费后面的构建
       - name: Check release tag
@@ -64,17 +71,29 @@ jobs:
       - id: tag
         env:
           PINNED_TAG: ${{ vars.OPENBOX_KERNEL_TAG }}
+          SOURCE_TAG_INPUT: ${{ inputs.source_tag || vars.OPENBOX_SOURCE_TAG }}
         run: |
           set -eu
-          if [ "$OPENBOX_KERNEL_SOURCE" != upstream ]; then echo "tag=" >> "$GITHUB_OUTPUT"; exit 0; fi
+          if [ "$OPENBOX_KERNEL_SOURCE" != upstream ]; then
+            echo "tag=" >> "$GITHUB_OUTPUT"
+            echo "source_tag=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           tag="$PINNED_TAG"
           if [ -z "$tag" ]; then
             tag=$(curl -sI --retry 3 --retry-delay 2 --connect-timeout 20 "https://github.com/$OPENBOX_KERNEL_REPO/releases/latest" \
               | tr -d '\r' | sed -n 's/^[Ll]ocation: .*\/releases\/tag\/\(v[0-9][0-9A-Za-z._-]*\).*/\1/p' | head -n 1)
           fi
           case "$tag" in v[0-9]*) ;; *) echo "无法确定上游版本:「$tag」" >&2; exit 1 ;; esac
+
+          # 源码包版本:输入框 / 仓库变量留空 = 与内核同一个上游版本
+          source_tag="${SOURCE_TAG_INPUT:-$tag}"
+          case "$source_tag" in v[0-9]*) ;; *) echo "源码版本号写法不对:「$source_tag」" >&2; exit 1 ;; esac
+
           echo "上游内核版本:$OPENBOX_KERNEL_REPO@$tag"
+          echo "上游源码版本:$OPENBOX_KERNEL_REPO@$source_tag"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "source_tag=$source_tag" >> "$GITHUB_OUTPUT"
 
   kernel:
     name: Kernel (${{ matrix.arch }})
@@ -82,6 +101,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       OPENBOX_KERNEL_TAG: ${{ needs.kernel-tag.outputs.tag }}
+      OPENBOX_SOURCE_TAG: ${{ needs.kernel-tag.outputs.source_tag }}
     strategy:
       fail-fast: false
       matrix:
@@ -90,6 +110,7 @@ jobs:
       - uses: actions/checkout@v4
 
       # 默认:取上游现成的内核 + 对应源码(见 scripts/fetch-upstream-kernel.sh)
+      # 二进制取自 OPENBOX_KERNEL_TAG,源码包取自 OPENBOX_SOURCE_TAG(脚本需读取该变量)
       - name: Fetch kernel from upstream release
         if: env.OPENBOX_KERNEL_SOURCE == 'upstream'
         run: sh scripts/fetch-upstream-kernel.sh ${{ matrix.arch }} kernel-build
@@ -268,11 +289,12 @@ jobs:
           NODE_VERSION=$(grep -m1 '^NODE_VERSION=' scripts/build-release.sh | sed -E 's/^NODE_VERSION="([^"]+)"/\1/')
           SINGBOX_VERSION=$(python3 -c "import json;print(json.load(open('dist-release/open-box-linux-x64-components.json'))['components']['kernel']['version'])")
           KERNEL_TAG="${{ needs.kernel-tag.outputs.tag }}"
+          SOURCE_TAG="${{ needs.kernel-tag.outputs.source_tag }}"
           {
             echo "## Open-Box ${{ env.RELEASE_TAG }}"
             echo ""
             if [ "$OPENBOX_KERNEL_SOURCE" = upstream ]; then
-              echo "- sing-box 内核版本:\`$SINGBOX_VERSION\`(取自 \`$OPENBOX_KERNEL_REPO\` 的 \`$KERNEL_TAG\` Release;对应源码见本 Release 附件 \`sing-box-$SINGBOX_VERSION-source.tar.gz\`)"
+              echo "- sing-box 内核版本:\`$SINGBOX_VERSION\`(取自 \`$OPENBOX_KERNEL_REPO\` 的 \`$KERNEL_TAG\` Release;对应源码 \`sing-box-$SINGBOX_VERSION-source.tar.gz\` 取自 \`$SOURCE_TAG\`,见本 Release 附件)"
             else
               echo "- sing-box 内核版本:\`$SINGBOX_VERSION\`(从本仓库源码补丁构建，精简功能集，纯 Go 静态链接)"
             fi
