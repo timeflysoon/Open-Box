@@ -5,9 +5,14 @@ import "strings"
 // 出站选择相关的小函数,对应旧 Node 的 effectiveOutbound / resolveSelectionLeaf / policyChosenOutbound。
 
 // builtinTags 是内置出站的当前名字(内置出站可以改名,档案里存的 direct / block 只是占位)。
-type builtinTags struct{ direct, block string }
+// directEnabled / blockEnabled 只有 policyOutboundOptions 用:节点管理里停用了内置的直连 / 拒绝,
+// 站点集 selector 的成员里就不放它。
+type builtinTags struct {
+	direct, block               string
+	directEnabled, blockEnabled bool
+}
 
-var defaultBuiltin = builtinTags{"direct", "block"}
+var defaultBuiltin = builtinTags{"direct", "block", true, true}
 
 func parseBuiltin(v any) builtinTags {
 	m, ok := asObject(v)
@@ -17,6 +22,8 @@ func parseBuiltin(v any) builtinTags {
 	b := builtinTags{}
 	b.direct, _ = m["direct"].(string)
 	b.block, _ = m["block"].(string)
+	b.directEnabled = jsTruthy(m["directEnabled"])
+	b.blockEnabled = jsTruthy(m["blockEnabled"])
 	return b
 }
 
