@@ -6,19 +6,22 @@ import (
 	"github.com/timeflysoon/Open-Box/core/internal/protocol"
 )
 
-// 改版前的字段:地区层(regions/regionId/regionMode)和更早的老字段(categories/directRulesets/fallback)。
-// 迁移把它们翻译成站点集后从档案里删掉。
-//
-// 有意保守:adBlock / adRuleset / outboundOptions / proxyTag 这些字段原样保留,
-// 宁可少删,也不能因为拿不准而弄丢用户的设置。
-var legacyRoutingKeys = []string{"regions", "regionId", "regionMode", "categories", "directRulesets", "fallback"}
+// 改版前留在档案里的 routing 字段:地区层(regions / regionId / regionMode)、「出站」页签开关、广告拦截、
+// 更早的 categories / directRulesets / fallback,以及主 selector 名 proxyTag。迁移把它们翻译成站点集后从档案里删掉。
+var legacyRoutingKeys = []string{
+	"regions", "regionId", "regionMode", "outboundOptions", "adBlock", "adRuleset", "categories", "directRulesets", "fallback", "proxyTag",
+}
 
-// migrateStoredRouting 把存下来的 routing 迁到新模型,返回 {changed, routing}。
-// 保证:迁移前后 normalizeRouting 读出来的结果一致;已经迁过的再迁一次 changed 为 false。
-func migrateStoredRouting(routing any) (changed bool, out any) {
+// migrateStoredRoutingObj 把存下来的 routing 迁到新模型(engine/routing-model.mjs 的 migrateStoredRouting)。
+// 返回迁完的对象和 changed;没有老字段时原样返回(非对象当成 {})。
+func migrateStoredRoutingObj(routing any) (any, bool, bool) {
+	// JS 里数组也是 object:原样返回,读它的任何键都是 undefined
+	if _, isArr := routing.([]any); isArr {
+		return routing, false, true
+	}
 	raw, ok := asObject(routing)
 	if !ok {
-		return false, routing
+		raw = map[string]any{}
 	}
 	hasLegacyKey := false
 	for _, k := range legacyRoutingKeys {
@@ -28,7 +31,7 @@ func migrateStoredRouting(routing any) (changed bool, out any) {
 		}
 	}
 	if !hasLegacyKey {
-		return false, routing
+		return raw, false, true
 	}
 
 	res := make(map[string]any, len(raw)+2)
@@ -36,7 +39,7 @@ func migrateStoredRouting(routing any) (changed bool, out any) {
 		res[k] = v
 	}
 
-	// 与 normalizeRouting 同一套判定:什么时候用老字段翻译成站点集
+	// 空数组 + 有老字段,同样是一份没迁过的老档案
 	cats, _ := asArray(raw["categories"])
 	hasLegacy := len(cats) > 0
 	if dr, ok := asArray(raw["directRulesets"]); ok && !hasLegacy {
@@ -67,31 +70,42 @@ func migrateStoredRouting(routing any) (changed bool, out any) {
 			res["fallbackDefault"] = fb
 		}
 	}
-	res["policies"] = policies
-
+	// 本来就没有 policies、翻译也没翻出东西,就不写 policies:作为 patch 合并时不能把现有站点集清空
+	if hasPolicies || len(policies) > 0 {
+		res["policies"] = policies
+	}
 	for _, k := range legacyRoutingKeys {
 		delete(res, k)
 	}
-	return true, res
+	return res, true, true
 }
 
 func policyToAny(p Policy) map[string]any {
-	return map[string]any{
+	notes := make(map[string]any, len(p.Notes))
+	for k, v := range p.Notes {
+		notes[k] = v
+	}
+	m := map[string]any{
 		"id": p.ID, "name": p.Name, "icon": p.Icon, "default": p.Default, "enabled": p.Enabled,
 		"ruleUrls": toAny(p.RuleUrls), "rulesets": toAny(p.Rulesets), "domain": toAny(p.Domain),
 		"domainSuffix": toAny(p.DomainSuffix), "domainKeyword": toAny(p.DomainKeyword), "ipCidr": toAny(p.IPCidr),
+		"notes": notes,
 	}
+	if len(p.MissingRulesets) > 0 {
+		m["missingRulesets"] = toAny(p.MissingRulesets)
+	}
+	return m
 }
 
-// migrateStoredRouting(routing) → {changed, routing}
+// migrateStoredRouting(routing) → {routing, changed}
 func hMigrateStoredRouting(_ *protocol.Context, args []json.RawMessage) (any, error) {
 	raw, err := arg(args, 0)
 	if err != nil {
 		return nil, err
 	}
-	changed, out := migrateStoredRouting(raw)
+	out, changed, _ := migrateStoredRoutingObj(raw)
 	return struct {
-		Changed bool `json:"changed"`
 		Routing any  `json:"routing"`
-	}{changed, out}, nil
+		Changed bool `json:"changed"`
+	}{out, changed}, nil
 }

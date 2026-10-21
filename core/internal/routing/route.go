@@ -196,11 +196,6 @@ func BuildRoute(routing any, rulesetDir string, o RouteOptions) (map[string]any,
 		pushRule(map[string]any{"source_ip_cidr": cr.Sources, "outbound": cr.Outbound})
 	}
 
-	if conf.AdBlock {
-		tags.add(conf.AdRuleset)
-		rules = append(rules, map[string]any{"rule_set": conf.AdRuleset, "action": "reject"})
-	}
-
 	// 站点集:按用户排的顺序,规则集 + 域名 / IP 拆成紧邻的两条
 	for _, policy := range conf.ActivePolicies {
 		for _, t := range routeRulesetTags(policy.Rulesets, o.RuleLists) {

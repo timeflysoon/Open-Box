@@ -1,8 +1,8 @@
 // 生成金标准:用旧版 Node 实现(backup 分支的 panel/server/engine)对固定种子造出的输入求值,
 // 把输入和输出记进 routing_golden.json,Go 测试逐条对照。
 //
-// 用法: node core/testdata/gen-golden.mjs <旧 engine 目录> [输出文件]
-//   旧 engine 目录要含 routing-model.mjs、rule-list.mjs、dns-names.mjs(来自 origin/backup:panel/server/engine/)
+// 用法: node core/testdata/gen-golden.mjs <engine 目录> [输出文件]
+//   engine 目录(取自 catch-up-upstream:panel/server/engine,v0.1.318 快照)要含 routing-model.mjs、rule-list.mjs、dns-names.mjs(来自 origin/backup:panel/server/engine/)
 //   且该目录需要一个 {"type":"module"} 的 package.json。
 import { writeFileSync } from 'node:fs'
 import { pathToFileURL } from 'node:url'
@@ -37,17 +37,26 @@ const strs = () => Array.from({ length: Math.floor(rnd() * 4) }, () => (chance(0
 const maybe = (p, f) => (chance(p) ? f() : undefined)
 const noisy = (f) => (chance(0.12) ? garbage() : f())
 
+const NOTE_KEYS = ['geosite:cn', 'domain:a.com', ' 带空格 ', '', '__proto__', 'constructor', 'x', 'ipCidr:10.0.0.0/8']
+const LONG = ['a'.repeat(59) + '😀' + 'tail', 'b'.repeat(60), 'c'.repeat(61), '😀'.repeat(31), '  ' + 'd'.repeat(70) + '  ', '中'.repeat(65), 'e'.repeat(58) + '😀']
+const noteObj = () => Object.fromEntries(Array.from({ length: Math.floor(rnd() * 4) }, () => [pick(NOTE_KEYS), chance(0.1) ? garbage() : pick([...STRINGS, ...LONG])]))
+const GEO_POOL = ['geosite-cn', 'geoip-cn', 'geosite-netflix', 'geoip-us', 'geosite-google', 'list-deadbeef']
+const geoTagsFor = () => (chance(0.4) ? GEO_POOL.filter(() => chance(0.6)) : null)
+const withGeo = (tags, f) => { m.setAvailableGeoTags(tags); try { return f() } finally { m.setAvailableGeoTags(null) } }
 const policy = () => ({
   id: maybe(0.7, () => noisy(str)), name: maybe(0.8, () => noisy(str)), icon: maybe(0.4, () => noisy(str)),
   default: maybe(0.5, () => noisy(() => pick(['direct', 'proxy', 'block', '美国', '']))),
   enabled: maybe(0.5, () => noisy(() => chance(0.7))),
-  rulesets: maybe(0.7, () => noisy(strs)), ruleUrls: maybe(0.4, () => noisy(strs)),
+  rulesets: maybe(0.7, () => noisy(() => (chance(0.5) ? GEO_POOL.concat(['geosite-x', 'geoip-xx', ' geosite-cn ', 'geosite-cn']).filter(() => chance(0.45)) : strs()))), ruleUrls: maybe(0.4, () => noisy(strs)),
   domain: maybe(0.4, () => noisy(strs)), domainSuffix: maybe(0.4, () => noisy(strs)),
   domainKeyword: maybe(0.3, () => noisy(strs)), ipCidr: maybe(0.3, () => noisy(strs)),
+  notes: maybe(0.3, () => noisy(noteObj)),
 })
 const customRule = () => ({
   type: noisy(() => pick(['domainSuffix', 'domain', 'domainKeyword', 'ipCidr', 'geosite', 'geoip', 'ruleUrl', 'ruleset', 'port', 'bogus'])),
-  value: noisy(str), outbound: noisy(() => pick(['direct', 'block', '美国', ' 节点1 ', ''])),
+  value: noisy(() => pick(['cn', 'netflix', 'us', 'google', 'x', 'geosite-cn', 'list-deadbeef', ' cn ', ...STRINGS])),
+  outbound: noisy(() => pick(['direct', 'block', '美国', ' 节点1 ', ''])),
+  note: maybe(0.3, () => noisy(() => pick([...STRINGS, ...LONG]))),
 })
 const custom = () => ({
   name: maybe(0.4, () => noisy(str)), icon: maybe(0.3, () => noisy(str)),
@@ -96,18 +105,38 @@ const hand = [
   { custom: { rules: [{ type: 'port', value: '51820', outbound: 'direct' }, { type: 'ruleUrl', value: 'https://a/b', outbound: '节点' }] } },
   { fallbackName: '兜底', policies: [{ name: '兜底', domain: ['x'] }, { name: '其他', domain: ['y'] }, { name: 'ok', domain: ['z'] }] },
 ]
+const norm = (args, tags) => ({ fn: 'normalizeRouting', args, ...(tags ? { geoTags: tags } : {}), ...withGeo(tags, () => ({ want: rt(m.normalizeRouting(...args)), fp: m.routingFingerprint(...args) })) })
 for (const h of hand) {
   const args = h === undefined ? [] : [rt(h)]
-  cases.push({ fn: 'normalizeRouting', args, want: rt(m.normalizeRouting(...args)), fp: m.routingFingerprint(...args) })
+  cases.push(norm(args, null))
 }
+// 随包规则库缺规则集的手写用例
+for (const [tags, r] of [
+  [['geosite-cn'], { policies: [{ name: 'a', rulesets: ['geosite-cn', 'geoip-cn', 'list-deadbeef'] }, { name: 'only', rulesets: ['geoip-cn'] }, { name: 'off', enabled: false, rulesets: ['geoip-xx'], domain: ['a.com'] }] }],
+  [[], { custom: { rules: [{ type: 'geosite', value: 'cn', outbound: 'direct' }, { type: 'geoip', value: 'cn', outbound: 'direct' }, { type: 'domain', value: 'a.com', outbound: 'direct' }, { type: 'ruleset', value: 'geosite-x', outbound: 'direct' }] }, policies: [{ name: 'a', ruleUrls: ['https://e.com/x.list'], rulesets: ['geosite-cn'] }] }],
+  [['geoip-cn'], { custom: { enabled: false, rules: [{ type: 'geosite', value: 'cn', outbound: 'direct' }] }, policies: [{ name: 'a', rulesets: ['geosite-cn'], domain: ['x'] }] }],
+  [['geosite-cn', 'geoip-cn'], { directRulesets: ['geosite-cn', 'geoip-cn', 'geosite-apple'], categories: [{ ruleset: 'geosite-netflix', target: '美国' }] }],
+  [['geosite-cn'], { regionId: 'cn' }],
+]) cases.push(norm([rt(r)], tags))
 for (let i = 0; i < 450; i++) {
   const args = [rt(routing())]
-  cases.push({ fn: 'normalizeRouting', args, want: rt(m.normalizeRouting(...args)), fp: m.routingFingerprint(...args) })
+  cases.push(norm(args, geoTagsFor()))
 }
 for (let i = 0; i < 250; i++) {
   const raw = chance(0.1) ? rt(garbage()) : rt(policy())
   const args = chance(0.5) ? [raw, Math.floor(rnd() * 5)] : raw === undefined ? [] : [raw]
-  cases.push({ fn: 'normalizePolicy', args, want: rt(m.normalizePolicy(...args)) })
+  const tags = geoTagsFor()
+  cases.push({ fn: 'normalizePolicy', args, ...(tags ? { geoTags: tags } : {}), want: withGeo(tags, () => rt(m.normalizePolicy(...args))) })
+}
+// 老档案迁移:返回 { routing, changed }
+for (const h of [undefined, null, {}, [], 'x', { policies: [] }, { adBlock: true }, { proxyTag: 'P' }, { outboundOptions: {}, policies: [{ name: 'a' }] }, { adRuleset: 'x', policies: [] }, { categories: [{ ruleset: 'geosite-netflix', target: '美国' }] }, { directRulesets: ['geosite-cn'] }, { regionId: 'other', policies: [{ name: 'p', domain: ['a.com'] }] }, { regionMode: 'CN', fallbackDefault: 'proxy' }, { fallback: 'direct', policies: [] }]) {
+  const args = h === undefined ? [] : [rt(h)]
+  cases.push({ fn: 'migrateStoredRouting', args, want: rt(m.migrateStoredRouting(...args)) })
+}
+for (let i = 0; i < 260; i++) {
+  const args = [rt(routing())]
+  const tags = geoTagsFor()
+  cases.push({ fn: 'migrateStoredRouting', args, ...(tags ? { geoTags: tags } : {}), want: withGeo(tags, () => rt(m.migrateStoredRouting(...args))) })
 }
 writeFileSync(out, JSON.stringify({ generatedBy: 'gen-golden.mjs', cases }) + '\n')
 console.log('写入', cases.length, '条 →', out)

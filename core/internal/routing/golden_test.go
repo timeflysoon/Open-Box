@@ -15,10 +15,11 @@ type goldenCase struct {
 	Args []json.RawMessage `json:"args"`
 	Want any               `json:"want"`
 	FP   string            `json:"fp"`
+	Geo  *[]string         `json:"geoTags"`
 }
 
-// 金标准来自旧版 Node 实现(见 testdata/gen-golden.mjs):同一份输入,Go 的输出必须一致。
-func TestGoldenAgainstOldNode(t *testing.T) {
+// 金标准来自上游 engine 的明文实现(见 testdata/gen-golden.mjs):同一份输入,Go 的输出必须一致。
+func TestGoldenAgainstUpstream(t *testing.T) {
 	b, err := os.ReadFile("../../testdata/routing_golden.json")
 	if err != nil {
 		t.Fatal(err)
@@ -34,7 +35,7 @@ func TestGoldenAgainstOldNode(t *testing.T) {
 
 	bad := 0
 	for i, c := range g.Cases {
-		req, _ := json.Marshal(map[string]any{"protocol": 1, "method": c.Fn, "args": c.Args})
+		req, _ := json.Marshal(map[string]any{"protocol": 1, "method": c.Fn, "args": c.Args, "geoTags": c.Geo})
 		got := call(t, reg, req)
 		if !reflect.DeepEqual(got, c.Want) {
 			if bad++; bad <= 5 {
@@ -45,7 +46,7 @@ func TestGoldenAgainstOldNode(t *testing.T) {
 			}
 		}
 		if c.Fn == "normalizeRouting" {
-			req, _ := json.Marshal(map[string]any{"protocol": 1, "method": "routingFingerprint", "args": c.Args})
+			req, _ := json.Marshal(map[string]any{"protocol": 1, "method": "routingFingerprint", "args": c.Args, "geoTags": c.Geo})
 			if fp := call(t, reg, req); fp != c.FP {
 				if bad++; bad <= 5 {
 					in, _ := json.Marshal(c.Args)

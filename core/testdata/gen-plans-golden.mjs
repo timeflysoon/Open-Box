@@ -1,8 +1,7 @@
-// 生成 classes / forwardPlan / bypassPlan 的金标准(对应旧实现 policyClasses / dnsmasqForwardPlan / nativeBypassPlan)。
-// 用法: node core/testdata/gen-plans-golden.mjs <旧 engine 目录> [输出文件]
-//
-// 注意:bypassPlan 在 Node 里新增的 enabled / ignoreProxyClients 选项旧实现没有,
-// 这里不生成它们的用例,由 Go 单元测试单独覆盖。
+// 生成 classes / forwardPlan / bypassPlan / entryPlan 的金标准(对应上游 engine 的 policyClasses / dnsmasqForwardPlan /
+// nativeBypassPlan / entryModePlan)。
+// 用法: node core/testdata/gen-plans-golden.mjs <engine 目录> [输出文件]
+//   engine 目录取自 catch-up-upstream:panel/server/engine(v0.1.318 快照)。
 import { writeFileSync } from 'node:fs'
 import { pathToFileURL } from 'node:url'
 import { resolve } from 'node:path'
@@ -55,7 +54,7 @@ const routing = () => {
     policies: Array.from({ length: Math.floor(rnd() * 5) }, policy),
     fallbackDefault: pick(['direct', 'direct', 'direct', 'direct', 'direct', 'proxy', '美国', '']),
     fallbackName: chance(0.2) ? pick(['兜底', '其他']) : undefined,
-    adBlock: chance(0.04), custom: chance(0.18) ? { rules: Array.from({ length: 1 + Math.floor(rnd() * 3) }, customRule) } : undefined,
+    custom: chance(0.18) ? { rules: Array.from({ length: 1 + Math.floor(rnd() * 3) }, customRule) } : undefined,
   }
   if (chance(0.1)) { r.categories = [{ ruleset: 'geosite-netflix', target: '美国' }]; r.directRulesets = ['geosite-apple'] }
   if (chance(0.1)) r.regionMode = pick(['CN', 'HKMO', 'OTHER'])
@@ -77,7 +76,7 @@ const selections = () => {
 const clientRoutes = (b) => (chance(0.12) ? Array.from({ length: 1 + Math.floor(rnd() * 2) }, () => ({ ip: '192.168.1.5', outbound: pick([b ? b.direct : 'direct', '美国', '节点组A', '']) })) : chance(0.5) ? [] : undefined)
 
 const cases = []
-for (let i = 0; i < 900; i++) {
+for (let i = 0; i < 1600; i++) {
   const r = rt(routing())
   const b = builtin()
   const mem = members(b)
@@ -86,7 +85,7 @@ for (let i = 0; i < 900; i++) {
   const clean = (a) => { const x = [...a]; while (x.length && x[x.length - 1] === undefined) x.pop(); return rt(x.map((v) => (v === undefined ? null : v))) }
   // 参数里的 undefined 在 JSON 里变成 null;旧 JS 用默认参数,所以求值时也要按「没传」处理
   const call = (fn, a) => fn(...a.map((v) => (v === null ? undefined : v)))
-  const kind = i % 3
+  const kind = i % 4
   if (kind === 0) {
     const a = clean(base)
     cases.push({ fn: 'classes', args: a, want: rt(call(m.policyClasses, a)) })
@@ -94,12 +93,36 @@ for (let i = 0; i < 900; i++) {
     const extra = chance(0.4) ? { rewriteDomains: some(['rw.example.com', 'a.b', '', 5, 'dup.com', 'dup.com'], 3) } : undefined
     const a = clean([...base, extra])
     cases.push({ fn: 'forwardPlan', args: a, want: rt(call(m.dnsmasqForwardPlan, a)) })
-  } else {
-    const opts = { members: mem, builtin: b, selections: sel, clientRoutes: clientRoutes(b), fakeIp: chance(0.35) ? true : chance(0.3) ? false : undefined, dnsMode: pick(['dnsmasq', 'hijack', 'off', undefined]) }
+  } else if (kind === 2 || kind === 3) {
+    const opts = { members: mem, builtin: b, selections: sel, clientRoutes: clientRoutes(b), fakeIp: chance(0.35) ? true : chance(0.3) ? false : undefined, dnsMode: pick(['dnsmasq', 'hijack', 'off', undefined]), enabled: chance(0.12) ? false : undefined }
     const o = rt(opts) ?? {}
     const a = [r, o]
-    cases.push({ fn: 'bypassPlan', args: a, want: rt(m.nativeBypassPlan(r, o)) })
+    if (kind === 2) cases.push({ fn: 'bypassPlan', args: a, want: rt(m.nativeBypassPlan(r, o)) })
+    else cases.push({ fn: 'entryPlan', args: a, want: rt(m.entryModePlan(r, o)) })
   }
+}
+// 入口旁路 / 入口名单的有效路径:前面那批随机语料大多死在「没开 FakeIP」「兜底走代理」上,这一批把前提尽量凑齐,
+// 让 whitelist、pending、规则集链接、前置自定义分流这些分支都有足够的用例
+const friendlyPolicy = () => ({
+  name: pick(NAMES), default: pick(['direct', 'direct', 'proxy', 'block', '美国', '香港']), enabled: chance(0.93),
+  rulesets: some(['geoip-cn', 'geoip-us', 'geoip-jp', 'geosite-cn', 'geosite-google', 'geoip-cn'], 3), ruleUrls: chance(0.25) ? some(URLS, 2) : [],
+  domain: chance(0.15) ? some(DOMAINS, 2) : [], domainSuffix: chance(0.1) ? some(DOMAINS, 2) : [],
+  domainKeyword: chance(0.04) ? ['kw'] : [], ipCidr: chance(0.35) ? some(['10.0.0.0/8', '1.1.1.0/24', '2001:db8::/32'], 2) : [],
+})
+const friendlyRouting = () => ({
+  policies: Array.from({ length: 1 + Math.floor(rnd() * 4) }, friendlyPolicy),
+  fallbackDefault: chance(0.9) ? 'direct' : pick(['proxy', '美国']),
+  custom: chance(0.5) ? { rules: Array.from({ length: 1 + Math.floor(rnd() * 3) }, customRule) } : undefined,
+})
+for (let i = 0; i < 1000; i++) {
+  const r = rt(friendlyRouting())
+  const b = builtin()
+  const mem = members(b)
+  const sel = selections()
+  const opts = { members: mem, builtin: b, selections: sel, clientRoutes: chance(0.9) ? [] : clientRoutes(b), fakeIp: chance(0.7) ? true : chance(0.5) ? false : undefined, dnsMode: pick(['dnsmasq', 'dnsmasq', 'hijack', 'off']), enabled: chance(0.05) ? false : undefined }
+  const o = rt(opts) ?? {}
+  if (i % 2) cases.push({ fn: 'bypassPlan', args: [r, o], want: rt(m.nativeBypassPlan(r, o)) })
+  else cases.push({ fn: 'entryPlan', args: [r, o], want: rt(m.entryModePlan(r, o)) })
 }
 writeFileSync(out, JSON.stringify({ generatedBy: 'gen-plans-golden.mjs', cases }) + '\n')
 

@@ -326,10 +326,6 @@ func BuildDNS(profile any, o DNSOptions) (map[string]any, Resolvers, error) {
 		}
 	}
 
-	if conf.AdBlock {
-		rules = append(rules, map[string]any{"rule_set": conf.AdRuleset, "action": "reject"})
-	}
-
 	for index, policy := range conf.ActivePolicies {
 		if !hasDomainCondition(policy, o.RuleLists) {
 			continue

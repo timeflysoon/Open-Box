@@ -11,7 +11,7 @@ import (
 )
 
 // classes / forwardPlan / bypassPlan 对照旧版 Node(policyClasses / dnsmasqForwardPlan / nativeBypassPlan)。
-func TestPlansGoldenAgainstOldNode(t *testing.T) {
+func TestPlansGoldenAgainstUpstream(t *testing.T) {
 	b, err := os.ReadFile("../../testdata/plans_golden.json")
 	if err != nil {
 		t.Fatal(err)
@@ -52,8 +52,8 @@ func mustJSON(t *testing.T, s string) any {
 	return v
 }
 
-// Node 新增的两个选项(旧实现没有,按调用处推断)。
-func TestBypassPlanNodeOnlyOptions(t *testing.T) {
+// ignoreProxyClients 是 v0.1.318 快照之后才有的选项,没有明文实现可对照(金标准不含它),这里手写覆盖。
+func TestBypassPlanIgnoreProxyClients(t *testing.T) {
 	routing := mustJSON(t, `{"policies":[{"name":"国内","default":"direct","rulesets":["geoip-cn"]}],"fallbackDefault":"direct"}`)
 	opts := func(extra string) any {
 		return mustJSON(t, `{"members":["direct","美国"],"clientRoutes":[{"ip":"192.168.1.5","outbound":"美国"}]`+extra+`}`)
@@ -63,12 +63,6 @@ func TestBypassPlanNodeOnlyOptions(t *testing.T) {
 	}
 	if p := bypassPlan(routing, opts(`,"ignoreProxyClients":true`)); !p.Enabled || len(p.Sets) != 1 || p.Sets[0] != "geoip-cn" {
 		t.Fatalf("ignoreProxyClients 应跳过终端分流这一项: %+v", p)
-	}
-	if p := bypassPlan(routing, mustJSON(t, `{"members":["direct"],"enabled":false}`)); p.Enabled || len(p.Sets) != 0 || p.Reason == "" {
-		t.Fatalf("enabled=false 应直接关闭并说明原因: %+v", p)
-	}
-	if p := bypassPlan(routing, mustJSON(t, `{"members":["direct"],"enabled":true}`)); !p.Enabled {
-		t.Fatalf("enabled=true 应照常计算: %+v", p)
 	}
 }
 

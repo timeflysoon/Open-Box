@@ -1,4 +1,4 @@
-// Package routing 实现分流模型相关方法(对应旧 Node 的 engine/routing-model.mjs)。
+// Package routing 实现分流模型相关方法(对应上游 engine/routing-model.mjs,v0.1.318)。
 package routing
 
 import (
@@ -23,10 +23,11 @@ func Register(r *protocol.Registry) {
 		"classes":              hClasses,
 		"forwardPlan":          hForwardPlan,
 		"bypassPlan":           hBypassPlan,
+		"entryPlan":            hEntryPlan,
 	}
 	for _, m := range Methods {
 		if h, ok := done[m]; ok {
-			r.Register(m, h)
+			r.Register(m, withGeo(h))
 		} else {
 			r.Register(m, protocol.NotImplemented(m))
 		}

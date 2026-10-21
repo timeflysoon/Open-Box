@@ -79,8 +79,6 @@ func writePolicy(buf *bytes.Buffer, p Policy) {
 	quote(buf, p.Name)
 	writeField(buf, "icon", false)
 	quote(buf, p.Icon)
-	writeField(buf, "default", false)
-	quote(buf, p.Default)
 	writeField(buf, "enabled", false)
 	writeBool(buf, p.Enabled)
 	writeField(buf, "ruleUrls", false)
@@ -95,6 +93,10 @@ func writePolicy(buf *bytes.Buffer, p Policy) {
 	writeStrs(buf, p.DomainKeyword)
 	writeField(buf, "ipCidr", false)
 	writeStrs(buf, p.IPCidr)
+	if len(p.MissingRulesets) > 0 {
+		writeField(buf, "missingRulesets", false)
+		writeStrs(buf, p.MissingRulesets)
+	}
 	buf.WriteByte('}')
 }
 
@@ -109,21 +111,12 @@ func writePolicies(buf *bytes.Buffer, list []Policy) {
 	buf.WriteByte(']')
 }
 
-// stringify 复刻 JSON.stringify(normalizeRouting(...)) 的输出。
+// stringify 复刻 JSON.stringify(normalizeRouting(...), 替换函数) 的输出。替换函数把键叫 default / fallbackDefault /
+// notes / note 的整个丢掉:「默认出口」是代理页每切一次线路就写回档案的选择,备注只给界面看,都不算分流改过。
 func (r Routing) stringify() []byte {
 	var buf bytes.Buffer
 	buf.WriteByte('{')
-	writeField(&buf, "proxyTag", true)
-	quote(&buf, r.ProxyTag)
-	writeField(&buf, "outboundOptions", false)
-	buf.WriteString(`{"direct":`)
-	writeBool(&buf, r.OutboundOptions.Direct)
-	buf.WriteString(`,"reject":`)
-	writeBool(&buf, r.OutboundOptions.Reject)
-	buf.WriteString(`,"groups":`)
-	writeBool(&buf, r.OutboundOptions.Groups)
-	buf.WriteByte('}')
-	writeField(&buf, "custom", false)
+	writeField(&buf, "custom", true)
 	buf.WriteByte('{')
 	writeField(&buf, "name", true)
 	quote(&buf, r.Custom.Name)
@@ -148,7 +141,12 @@ func (r Routing) stringify() []byte {
 		quote(&buf, c.Outbound)
 		buf.WriteByte('}')
 	}
-	buf.WriteString("]}")
+	buf.WriteByte(']')
+	if len(r.Custom.MissingRulesets) > 0 {
+		writeField(&buf, "missingRulesets", false)
+		writeStrs(&buf, r.Custom.MissingRulesets)
+	}
+	buf.WriteByte('}')
 	writeField(&buf, "policies", false)
 	writePolicies(&buf, r.Policies)
 	writeField(&buf, "activePolicies", false)
@@ -159,13 +157,23 @@ func (r Routing) stringify() []byte {
 	quote(&buf, r.Fallback.Name)
 	writeField(&buf, "icon", false)
 	quote(&buf, r.Fallback.Icon)
-	writeField(&buf, "default", false)
-	quote(&buf, r.Fallback.Default)
 	buf.WriteByte('}')
-	writeField(&buf, "adBlock", false)
-	writeBool(&buf, r.AdBlock)
-	writeField(&buf, "adRuleset", false)
-	quote(&buf, r.AdRuleset)
+	if len(r.MissingRulesets) > 0 {
+		writeField(&buf, "missingRulesets", false)
+		buf.WriteByte('[')
+		for i, m := range r.MissingRulesets {
+			if i > 0 {
+				buf.WriteByte(',')
+			}
+			buf.WriteByte('{')
+			writeField(&buf, "tag", true)
+			quote(&buf, m.Tag)
+			writeField(&buf, "owner", false)
+			quote(&buf, m.Owner)
+			buf.WriteByte('}')
+		}
+		buf.WriteByte(']')
+	}
 	buf.WriteByte('}')
 	return buf.Bytes()
 }

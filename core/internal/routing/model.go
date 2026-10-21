@@ -15,8 +15,6 @@ const (
 	FallbackIcon     = "globe:earth-meridians"
 	CustomPolicyName = "前置自定义分流"
 	CustomPolicyIcon = "misc:pin"
-	defaultAdRuleset = "geosite-category-ads-all"
-	defaultProxyTag  = "PROXY"
 	ruleListPrefix   = "list-"
 )
 
@@ -96,6 +94,10 @@ type Policy struct {
 	DomainSuffix  []string `json:"domainSuffix"`
 	DomainKeyword []string `json:"domainKeyword"`
 	IPCidr        []string `json:"ipCidr"`
+	// 每条规则的备注(只给界面看,不进内核配置,也不算进指纹)
+	Notes map[string]string `json:"notes"`
+	// 随包规则库里已经没有、被去掉的规则集;没有就不带这个字段
+	MissingRulesets []string `json:"missingRulesets,omitempty"`
 }
 
 func (p Policy) hasCondition() bool {
@@ -114,14 +116,29 @@ func normalizePolicy(raw any, index int) Policy {
 	for _, u := range ruleUrls {
 		rulesets = append(rulesets, ListTagForUrl(u))
 	}
+	all := dedupe(rulesets)
+	missing := []string{}
+	available := []string{}
+	for _, t := range all {
+		if geoRulesetAvailable(t) {
+			available = append(available, t)
+		} else {
+			missing = append(missing, t)
+		}
+	}
+	if len(missing) == 0 {
+		available = all
+	}
 	p := Policy{
-		Enabled:       notFalse(get(raw, "enabled")),
-		RuleUrls:      ruleUrls,
-		Rulesets:      dedupe(rulesets),
-		Domain:        strList(get(raw, "domain")),
-		DomainSuffix:  strList(get(raw, "domainSuffix")),
-		DomainKeyword: strList(get(raw, "domainKeyword")),
-		IPCidr:        strList(get(raw, "ipCidr")),
+		Enabled:         notFalse(get(raw, "enabled")),
+		RuleUrls:        ruleUrls,
+		Rulesets:        available,
+		Notes:           normalizeNotes(get(raw, "notes")),
+		MissingRulesets: nilIfEmpty(missing),
+		Domain:          strList(get(raw, "domain")),
+		DomainSuffix:    strList(get(raw, "domainSuffix")),
+		DomainKeyword:   strList(get(raw, "domainKeyword")),
+		IPCidr:          strList(get(raw, "ipCidr")),
 	}
 	var ok bool
 	if p.ID, ok = nonEmpty(get(raw, "id")); !ok {
@@ -140,6 +157,7 @@ type CustomRule struct {
 	Type     string `json:"type"`
 	Value    string `json:"value"`
 	Outbound string `json:"outbound"`
+	Note     string `json:"note,omitempty"` // 备注,只给界面看
 }
 
 type CustomPolicy struct {
@@ -148,6 +166,8 @@ type CustomPolicy struct {
 	IconScale float64      `json:"iconScale"`
 	Enabled   bool         `json:"enabled"`
 	Rules     []CustomRule `json:"rules"`
+	// 引用的 geosite / geoip 已经不在随包规则库里、被去掉的行(原样记下,部署时提示)
+	MissingRulesets []string `json:"missingRulesets,omitempty"`
 }
 
 func normalizeCustomRule(raw any) (CustomRule, bool) {
@@ -172,7 +192,11 @@ func normalizeCustomRule(raw any) (CustomRule, bool) {
 			return CustomRule{}, false
 		}
 	}
-	return CustomRule{Type: typ, Value: value, Outbound: outbound}, true
+	note := ""
+	if n, ok := nonEmpty(m["note"]); ok {
+		note = sliceUTF16(n, noteMax)
+	}
+	return CustomRule{Type: typ, Value: value, Outbound: outbound, Note: note}, true
 }
 
 func normalizeCustomPolicy(raw any) CustomPolicy {
@@ -191,6 +215,21 @@ func normalizeCustomPolicy(raw any) CustomPolicy {
 				c.Rules = append(c.Rules, cr)
 			}
 		}
+	}
+	missing := []string{}
+	for _, r := range c.Rules {
+		if tag := customRuleTag(r); tag != "" && !geoRulesetAvailable(tag) {
+			missing = append(missing, tag)
+		}
+	}
+	if len(missing) > 0 {
+		kept := []CustomRule{}
+		for _, r := range c.Rules {
+			if geoRulesetAvailable(customRuleTag(r)) {
+				kept = append(kept, r)
+			}
+		}
+		c.Rules, c.MissingRulesets = kept, missing
 	}
 	return c
 }
@@ -396,20 +435,17 @@ func migrateRegion(raw map[string]any) ([]Policy, string) {
 
 // Routing 是 normalizeRouting 的结果。字段顺序就是 JSON 输出顺序。
 type Routing struct {
-	ProxyTag        string          `json:"proxyTag"`
-	OutboundOptions OutboundOptions `json:"outboundOptions"`
-	Custom          CustomPolicy    `json:"custom"`
-	Policies        []Policy        `json:"policies"`
-	ActivePolicies  []Policy        `json:"activePolicies"`
-	Fallback        Fallback        `json:"fallback"`
-	AdBlock         bool            `json:"adBlock"`
-	AdRuleset       string          `json:"adRuleset"`
+	Custom         CustomPolicy `json:"custom"`
+	Policies       []Policy     `json:"policies"`
+	ActivePolicies []Policy     `json:"activePolicies"`
+	Fallback       Fallback     `json:"fallback"`
+	// 随包规则库里已经没有的规则集,按「谁引用的」列出来(停用的不算);没有就不带这个字段
+	MissingRulesets []MissingRuleset `json:"missingRulesets,omitempty"`
 }
 
-type OutboundOptions struct {
-	Direct bool `json:"direct"`
-	Reject bool `json:"reject"`
-	Groups bool `json:"groups"`
+type MissingRuleset struct {
+	Tag   string `json:"tag"`
+	Owner string `json:"owner"`
 }
 
 type Fallback struct {
@@ -419,41 +455,8 @@ type Fallback struct {
 }
 
 func normalizeRouting(routing any) Routing {
-	raw, ok := asObject(routing)
-	if !ok {
-		raw = map[string]any{}
-	}
-	cats, _ := asArray(raw["categories"])
-	hasLegacy := len(cats) > 0
-	if dr, ok := asArray(raw["directRulesets"]); ok && !hasLegacy {
-		for _, t := range dr {
-			if s, isStr := t.(string); !isStr || !inList(s, cnRulesets) {
-				hasLegacy = true
-				break
-			}
-		}
-	}
-
-	var base []Policy
-	pols, hasPolicies := asArray(raw["policies"])
-	if !hasPolicies || (len(pols) == 0 && hasLegacy) {
-		base = migrateLegacy(raw)
-	} else {
-		base = make([]Policy, len(pols))
-		for i, p := range pols {
-			base[i] = normalizePolicy(p, i)
-		}
-	}
-
-	// fallbackDefault 一旦写进档案,就说明已经迁过地区层,不再重复翻译。
-	// 注意旧实现的细节:没写 fallbackDefault 时一律走 migrateRegion,
-	// 没有地区数据则兜底默认选中项是空串(不是 "direct")。
-	var regionPolicies []Policy
-	regionFallback := ""
-	_, hasFD := nonEmpty(raw["fallbackDefault"])
-	if !hasFD {
-		regionPolicies, regionFallback = migrateRegion(raw)
-	}
+	migrated, _, _ := migrateStoredRoutingObj(routing)
+	raw, _ := asObject(migrated) // 数组等读出来都是 undefined,当空对象
 
 	fallbackName, ok := nonEmpty(raw["fallbackName"])
 	if !ok {
@@ -464,8 +467,14 @@ func normalizeRouting(routing any) Routing {
 		fallbackIcon = FallbackIcon
 	}
 
+	normalized := []Policy{}
+	if pols, ok := asArray(raw["policies"]); ok {
+		for i, p := range pols {
+			normalized = append(normalized, normalizePolicy(p, i))
+		}
+	}
 	policies := []Policy{}
-	for _, p := range append(base, regionPolicies...) {
+	for _, p := range normalized {
 		if p.hasCondition() && p.Name != FallbackTag && p.Name != fallbackName {
 			policies = append(policies, p)
 		}
@@ -477,27 +486,28 @@ func normalizeRouting(routing any) Routing {
 		}
 	}
 
-	opts, _ := asObject(raw["outboundOptions"])
-	fbDefault := regionFallback
-	if d, ok := nonEmpty(raw["fallbackDefault"]); ok {
-		fbDefault = d
-	}
+	// 没写就空着:config 里 effectiveOutbound 会取成员表的第一项
+	fbDefault, _ := nonEmpty(raw["fallbackDefault"])
 
-	r := Routing{
-		ProxyTag:        defaultProxyTag,
-		OutboundOptions: OutboundOptions{notFalse(opts["direct"]), notFalse(opts["reject"]), notFalse(opts["groups"])},
-		Custom:          normalizeCustomPolicy(raw["custom"]),
+	custom := normalizeCustomPolicy(raw["custom"])
+	var missing []MissingRuleset
+	if custom.Enabled {
+		for _, t := range custom.MissingRulesets {
+			missing = append(missing, MissingRuleset{t, custom.Name})
+		}
+	}
+	for _, p := range normalized {
+		if p.Enabled {
+			for _, t := range p.MissingRulesets {
+				missing = append(missing, MissingRuleset{t, p.Name})
+			}
+		}
+	}
+	return Routing{
+		Custom:          custom,
 		Policies:        policies,
 		ActivePolicies:  active,
 		Fallback:        Fallback{Name: fallbackName, Icon: fallbackIcon, Default: fbDefault},
-		AdBlock:         raw["adBlock"] == true,
-		AdRuleset:       defaultAdRuleset,
+		MissingRulesets: missing,
 	}
-	if t, ok := nonEmpty(raw["proxyTag"]); ok {
-		r.ProxyTag = t
-	}
-	if t, ok := nonEmpty(raw["adRuleset"]); ok {
-		r.AdRuleset = t
-	}
-	return r
 }

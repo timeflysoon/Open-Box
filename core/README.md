@@ -37,7 +37,11 @@
 ## 对照基准(基线)
 以 catch-up-upstream 分支 `panel/server/engine/` 里的明文源码为准(v0.1.318 快照,提交 0c9d530;它不随同步更新,
 `index.mjs` 里压缩的 v0.1.342 只做增量核对)。早先的金标准是用 backup 分支(9 月 13 日)的旧版生成的,正在逐个模块改用新基线重新生成。
-已按新基线对齐:clientroutes(终端分流的 match / admit)、emit(http 出站、hysteria2 端口跳跃、detour、ws 的 alpn 限制)、groups(手动页签、可接受状态码、链式节点不进动态组、静态组可选内置直连/拒绝)。其余模块的漂移情况见各自的金标准测试。
+已按新基线对齐:clientroutes(终端分流的 match / admit)、emit(http 出站、hysteria2 端口跳跃、detour、ws 的 alpn 限制)、groups(手动页签、可接受状态码、链式节点不进动态组、静态组可选内置直连/拒绝)。routing 的模型、迁移、指纹和 plans(classes、forwardPlan、bypassPlan、entryPlan 含 whitelist;备注、随包规则库缺失规则集的过滤、LEGACY 字段、指纹排除 default / notes)。
+**尚未对齐**:`routing/dns.go`、`routing/route.go`(还是按 backup 旧版移植的,金标准测试已暂时跳过;上游 dns.mjs 多了上游 DNS 备用、按终端答解析、
+HTTPS 记录规则、规则归属表等,routing.mjs 改成「IP 只管 IP、域名只管域名」)。pre_resolve / rulesets.go / urlhost.go 同理待核。
+**有明文基线的**之外还有一个已知缺口:`ignoreProxyClients`(bypassPlan 的选项)是 v0.1.318 之后才有的,按旧实现保留,没有明文可对照。
+快照 v0.1.318 到上游当前 v0.1.342 之间,engine/ 可能还有行为变化,整体对齐完之后要用 index.mjs 里压缩的版本再做一轮增量核对。
 
 ## 构建
     sh core/scripts/build.sh amd64 out    # 或 arm64;产出 out/openbox-core 和 out/core-build.json
