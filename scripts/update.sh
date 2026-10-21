@@ -302,7 +302,7 @@ drain_stdin() {
 }
 
 die() {
-  [ "${CORE_HELPERS_READY:-0}" = "1" ] && restore_core_if_suspended
+  [ "${CORE_HELPERS_READY:-0}" != "1" ] || restore_core_if_suspended || true
   echo "[open-box] 错误:$*" >&2
   write_status failed "" "" "$*"
   openbox_env_report
@@ -451,9 +451,8 @@ build_url() {
   fi
 }
 
-# 内核开着时,路由器自己发出的 GitHub 直连会被内核接管;代理线路不通就 8 秒超时
-# (#672:192.168.3.1 浏览器能上 GitHub,路由器自己取不到升级脚本,面板升级直接失败)。
-# 取脚本 / 取包之前先把内核停掉,失败时按原状拉起来;升级流程本来也要停它。
+# 升级下载统一使用系统网络，不依赖代理规则或 FakeIP 开关。先暂停原本运行的
+# 内核并等待 TUN 退出，服务停止时会恢复系统 DNS；失败、取消或无需升级时恢复。
 OPENBOX_CORE_SUSPENDED=${OPENBOX_CORE_SUSPENDED:-0}
 openbox_core_service() {
   if [ -x /etc/init.d/openbox ]; then
@@ -462,17 +461,44 @@ openbox_core_service() {
     printf '%s\n' "$INSTALL_ROOT/debian/bin/openbox-ctl"
   fi
 }
+flush_system_dns_cache() {
+  # dnsmasq / resolved 可能缓存着关闭 FakeIP 之前的占位地址。停止内核后即使
+  # 配置已恢复，仍要清掉这些旧应答；不修改用户的 FakeIP 或 DNS 配置。
+  if [ -r /etc/openwrt_release ] && [ -x /etc/init.d/dnsmasq ] \
+    && /etc/init.d/dnsmasq status >/dev/null 2>&1; then
+    /etc/init.d/dnsmasq reload >/dev/null 2>&1 || die "刷新系统 DNS 缓存失败，未开始下载升级内容。"
+  elif command -v resolvectl >/dev/null 2>&1 && resolvectl status >/dev/null 2>&1; then
+    resolvectl flush-caches >/dev/null 2>&1 || die "刷新系统 DNS 缓存失败，未开始下载升级内容。"
+  fi
+  return 0
+}
 suspend_core_for_fetch() {
-  [ "$OPENBOX_CORE_SUSPENDED" = "0" ] || return 0
   _scs=$(openbox_core_service)
   [ -n "$_scs" ] || return 0
-  "$_scs" status 2>/dev/null | grep -q running || return 0
-  info "暂停内核以下载升级包(内核接管路由器自身流量时 GitHub 会超时)..."
-  "$_scs" stop >/dev/null 2>&1 || true
+  if ! "$_scs" status 2>/dev/null | grep -q running; then
+    if [ "$OPENBOX_CORE_SUSPENDED" != "1" ]; then
+      flush_system_dns_cache
+      return 0
+    fi
+  else
+    info "暂停内核，使用系统网络下载升级内容..."
+    # 停服务前记下原状态，信号或停止失败也能按原状恢复。
+    OPENBOX_CORE_SUSPENDED=1
+    OPENBOX_UPDATE_CORE_WAS_UP=1
+    export OPENBOX_CORE_SUSPENDED OPENBOX_UPDATE_CORE_WAS_UP
+    "$_scs" stop >/dev/null 2>&1 || die "暂停内核失败，未开始下载升级内容。"
+  fi
   OPENBOX_CORE_SUSPENDED=1
   OPENBOX_UPDATE_CORE_WAS_UP=1
-  # 两个都导出:取到新脚本会 exec 成另一个进程,由它负责把内核拉回来
   export OPENBOX_CORE_SUSPENDED OPENBOX_UPDATE_CORE_WAS_UP
+  # OpenWrt 的 stop 发出 SIGTERM 后就可能返回，不能立刻沿用尚未退出的 TUN。
+  _sc_wait=0
+  while "$_scs" status 2>/dev/null | grep -q running || [ -e /sys/class/net/openbox-tun ]; do
+    [ "$_sc_wait" -lt 25 ] || die "等待内核和 TUN 退出超时，未开始下载升级内容。"
+    sleep 1
+    _sc_wait=$((_sc_wait + 1))
+  done
+  flush_system_dns_cache
 }
 restore_core_if_suspended() {
   [ "$OPENBOX_CORE_SUSPENDED" = "1" ] || return 0
@@ -480,7 +506,10 @@ restore_core_if_suspended() {
   _scs=$(openbox_core_service)
   [ -n "$_scs" ] || return 0
   info "把内核按原状拉起来..."
-  "$_scs" start >/dev/null 2>&1 || true
+  if ! "$_scs" start >/dev/null 2>&1; then
+    warn "恢复原先运行的内核失败，请在面板检查内核状态。"
+    return 1
+  fi
   OPENBOX_CORE_SUSPENDED=0
   export OPENBOX_CORE_SUSPENDED
 }
@@ -1230,7 +1259,9 @@ refresh_update_script() {
   ensure_tmp_parent
   resolve_channel
   _fresh="$TMP_PARENT/.openbox-update-fresh.$$.sh"
-  trap 'rm -f -- "$_fresh"; if [ "${OPENBOX_UPDATE_RELOCATED:-0}" = "1" ]; then rm -f -- "$0"; fi' EXIT INT TERM
+  trap 'restore_core_if_suspended || true; rm -f -- "$_fresh"; if [ "${OPENBOX_UPDATE_RELOCATED:-0}" = "1" ]; then rm -f -- "$0"; fi' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
   STATUS_PID=$$
   write_status starting "" "" "正在获取最新升级脚本"
   _script_url="https://github.com/$REPO/releases/latest/download/update.sh"
@@ -1239,7 +1270,7 @@ refresh_update_script() {
     _sources="${MIRROR_PREFIX:-$BUILTIN_MIRRORS}"
   fi
   _ready=0
-  # 先停内核再取脚本:内核开着时路由器自己的 GitHub 直连会超时(见 suspend_core_for_fetch)。
+  # 脚本获取和后续组件下载使用同样的系统网络，用户无需修改 FakeIP。
   suspend_core_for_fetch
   # 镜像先按这次选择的通道试,失败再直连;直连通道不擅自换镜像。
   for _source in $_sources direct; do
@@ -1269,7 +1300,7 @@ refresh_update_script() {
   fi
   if cancel_requested; then
     write_status cancelled "" "" "已取消(用户请求)"
-    restore_core_if_suspended
+    restore_core_if_suspended || true
     rm -f "$CANCEL_FLAG" 2>/dev/null || true
     exit 0
   fi
@@ -1295,6 +1326,12 @@ refresh_update_script() {
 if [ "${OPENBOX_UPDATE_RELOCATED:-0}" = "1" ] && [ "${OPENBOX_UPDATE_REFRESHED:-0}" != "1" ]; then
   refresh_update_script
 fi
+
+# 接力脚本可能继承“内核已暂停”。在预检及临时目录创建之前就接管恢复责任，
+# 避免 set -e / 信号退出时留下已暂停的内核。--probe / --cancel / --detach 派发已返回。
+trap 'restore_core_if_suspended || true; if [ "${OPENBOX_UPDATE_RELOCATED:-0}" = "1" ]; then rm -f -- "$0"; fi' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # 走到这里,说明既不是 --probe 也不是 --cancel:这是真正要执行升级逻辑的进程
 # (前台同步调用,或 --detach 派生出的后台子进程)。从这里开始,STATUS_PID 才被
@@ -1360,6 +1397,10 @@ check_storage
 check_tmp_space
 resolve_channel
 info "预检通过(架构 $ARCH,通道 $CHANNEL)。"
+
+# 所有升级入口都在第一个联网步骤之前准备系统网络，包括旧脚本接力、手动
+# 执行、组件升级、完整包升级和回退；不能只在完整包分支暂停内核。
+suspend_core_for_fetch
 
 # ---------- 系统依赖:内核模块与命令 ----------
 # 路由器固件的默认镜像常缺其中一两样(#44 缺 kmod-nft-queue;有用户缺 kmod-veth 导致规则页不能模拟 LAN
@@ -1676,7 +1717,7 @@ select_builtin_mirror() {
 # 无论脚本在哪一步退出都不留半成品。
 STAGE_DIR=""
 cleanup() {
-  [ "${CORE_HELPERS_READY:-0}" = "1" ] && restore_core_if_suspended
+  [ "${CORE_HELPERS_READY:-0}" != "1" ] || restore_core_if_suspended || true
   safe_rm_rf "$TMP_DL"
   [ -n "$STAGE_DIR" ] && safe_rm_rf "$STAGE_DIR"
   # 只有真正执行升级逻辑的这个进程(前台同步调用,或者 --detach 派生出的后台子
@@ -1695,7 +1736,9 @@ cleanup() {
 }
 ensure_tmp_parent
 TMP_DL=$(make_tmp_dir "$TMP_PARENT/.open-box-update") || die "无法在 $TMP_PARENT 下创建临时目录。"
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # 从这里开始,cleanup() trap 已经注册好(TMP_DL 已创建)——检查点可以放心
 # exit 0,不用担心留下未追踪的临时目录。
@@ -1770,9 +1813,6 @@ if [ -f "$INSTALL_ROOT/panel/server/system/update-components.sh" ]; then
   fi
 fi
 if [ "$_COMPONENT_PREPARED" = "0" ]; then
-# 取包之前先停内核:内核开着时路由器自己的 GitHub 直连会被它接管,代理线路不通就超时
-# (#672 的 192.168.3.1)。取不到包时 die() 会把内核按原状拉起来;升级成功由主流程重启。
-suspend_core_for_fetch
 _dl_round=0
 while :; do
   _dl_round=$((_dl_round + 1))
