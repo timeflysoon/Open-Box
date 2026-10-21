@@ -34,6 +34,11 @@
 - `scripts/` 构建脚本
 - `singbox/` 预留
 
+## 对照基准(基线)
+以 catch-up-upstream 分支 `panel/server/engine/` 里的明文源码为准(v0.1.318 快照,提交 0c9d530;它不随同步更新,
+`index.mjs` 里压缩的 v0.1.342 只做增量核对)。早先的金标准是用 backup 分支(9 月 13 日)的旧版生成的,正在逐个模块改用新基线重新生成。
+已按新基线对齐:clientroutes(终端分流的 match / admit)。其余模块的漂移情况见各自的金标准测试。
+
 ## 构建
     sh core/scripts/build.sh amd64 out    # 或 arm64;产出 out/openbox-core 和 out/core-build.json
 

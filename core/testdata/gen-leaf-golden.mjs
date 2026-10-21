@@ -82,6 +82,7 @@ for (let i = 0; i < 80; i++) add('normalizeMac', [chance(0.15) ? garbage() : pic
 const route = () => ({
   id: maybe(0.7, () => pick(['r1', '', 5, null, ' x '])), name: maybe(0.7, () => pick(['电视', '', 'x', null])), enabled: maybe(0.4, () => pick([true, true, true, false, null, 0])),
   sources: maybe(0.9, () => (chance(0.1) ? garbage() : Array.from({ length: int(4) }, () => (chance(0.1) ? garbage() : chance(0.75) ? pick(['192.168.1.5', '192.168.1.0/24', '192.168.2.9/32', '10.0.0.1/8', '2001:db8::/64', '2001:db8::1', '10.0.0.1/33', 'fe80::1%eth0', 'bad']) : cidr())))),
+  match: maybe(0.5, () => pick(['ip', 'mac', 'mac', 'ip', 'x', null, 5])), admit: maybe(0.2, () => pick([true, true, false, 'true', 1])),
   bypass: maybe(0.4, () => pick([true, false, 'true', 1])), macs: maybe(0.6, () => (chance(0.1) ? garbage() : Array.from({ length: int(4) }, () => pick(MACS)))),
   outbound: maybe(0.85, () => pick(['美国', ' 香港 ', '美国', 'direct', '', 5, null, '直连X'])),
 })

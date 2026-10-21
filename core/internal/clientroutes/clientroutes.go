@@ -1,5 +1,5 @@
 // Package clientroutes 整理「终端分流」:按局域网来源 IP / 网段指定出口
-// (对应旧 Node 的 engine/client-routes.mjs)。
+// (对应上游 engine/client-routes.mjs,v0.1.318)。
 package clientroutes
 
 import (
@@ -70,19 +70,64 @@ func NormalizeMac(raw any) string {
 	return ""
 }
 
-// Route 是整理后的一条终端分流。
+// Route 是整理后的一条终端分流。字段顺序就是 JSON 键序(对应 JS 里 { id, name, match, outbound, bypass?, sources, macs? })。
 type Route struct {
-	ID       string   `json:"id"`
-	Name     string   `json:"name"`
-	Sources  []string `json:"sources"`
-	Outbound string   `json:"outbound"`
-	Bypass   bool     `json:"bypass,omitempty"`
-	// 指针:bypass 的路由即使 MAC 列表为空也要输出 "macs":[],非 bypass 的路由则整个字段不出现
-	Macs *[]string `json:"macs,omitempty"`
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	Match    string `json:"match"` // "ip" 或 "mac"
+	Outbound string `json:"outbound"`
+	Bypass   bool   `json:"bypass,omitempty"`
+	// ip 模式:来源网段(去重、非空);mac 模式:空数组(不能省略)
+	Sources []string `json:"sources"`
+	// 只在 mac 模式出现,去重、非空;ip 模式整个字段不出现
+	Macs []string `json:"macs,omitempty"`
 }
 
-// NormalizeClientRoutes:只留启用的、来源合法的;bypass=true 时按 MAC 在入口放行,
-// 没有 auto_redirect 时退回「直连」出站(outbound 写成内置直连的 tag)。
+// ClientMatch:一条终端规则按什么认终端。显式写了 match(ip / mac)就用它;老档案没有这个字段,
+// 「不进内核」(bypass)和「只让这些进内核」(admit)当时必须填 MAC,macs 非空算 mac,其余算 ip。
+func ClientMatch(r any) string {
+	m := jsx.Get(r, "match")
+	if m == "ip" || m == "mac" {
+		return m.(string)
+	}
+	if (jsx.Get(r, "bypass") == true || jsx.Get(r, "admit") == true) && jsx.Get(r, "macs") != nil {
+		if a, ok := jsx.Get(r, "macs").([]any); ok && len(a) > 0 {
+			return "mac"
+		}
+	}
+	return "ip"
+}
+
+func cleanSources(r any) []string {
+	out := []string{}
+	seen := map[string]bool{}
+	if a, ok := jsx.Get(r, "sources").([]any); ok {
+		for _, s := range a {
+			if c := NormalizeCidr(s); c != "" && !seen[c] {
+				seen[c] = true
+				out = append(out, c)
+			}
+		}
+	}
+	return out
+}
+
+func cleanMacs(r any) []string {
+	out := []string{}
+	seen := map[string]bool{}
+	if a, ok := jsx.Get(r, "macs").([]any); ok {
+		for _, m := range a {
+			if v := NormalizeMac(m); v != "" && !seen[v] {
+				seen[v] = true
+				out = append(out, v)
+			}
+		}
+	}
+	return out
+}
+
+// NormalizeClientRoutes:只留启用的、来源合法的;admit(只让这些进内核)不是分流规则,在这里直接跳过;
+// bypass=true 时出口取内置直连的 tag。mac 模式没有合法 MAC、ip 模式没有合法网段的整条丢弃。
 func NormalizeClientRoutes(list any, directTag any) []Route {
 	arr, ok := list.([]any)
 	if !ok {
@@ -98,32 +143,16 @@ func NormalizeClientRoutes(list any, directTag any) []Route {
 		if en, isBool := jsx.Get(r, "enabled").(bool); isBool && !en {
 			continue
 		}
-		sources := []string{}
-		if a, ok := jsx.Get(r, "sources").([]any); ok {
-			for _, s := range a {
-				if c := NormalizeCidr(s); c != "" {
-					sources = append(sources, c)
-				}
-			}
+		if jsx.Get(r, "admit") == true {
+			continue
 		}
+		match := ClientMatch(r)
 		bypass := jsx.Get(r, "bypass") == true
-		macs := []string{}
-		if bypass {
-			seen := map[string]bool{}
-			if a, ok := jsx.Get(r, "macs").([]any); ok {
-				for _, m := range a {
-					if v := NormalizeMac(m); v != "" && !seen[v] {
-						seen[v] = true
-						macs = append(macs, v)
-					}
-				}
-			}
-		}
-		var outbound string
 		trimmed, isStr := jsx.Get(r, "outbound").(string)
 		if isStr {
 			trimmed = jsx.Trim(trimmed)
 		}
+		var outbound string
 		if bypass {
 			switch {
 			case jsx.Truthy(directTag):
@@ -136,12 +165,22 @@ func NormalizeClientRoutes(list any, directTag any) []Route {
 		} else if isStr {
 			outbound = trimmed
 		}
-		if len(sources) == 0 || outbound == "" {
+		if outbound == "" {
 			continue
 		}
-		route := Route{ID: orEmpty(jsx.Get(r, "id")), Name: orEmpty(jsx.Get(r, "name")), Sources: sources, Outbound: outbound}
-		if bypass {
-			route.Bypass, route.Macs = true, &macs
+		route := Route{ID: orEmpty(jsx.Get(r, "id")), Name: orEmpty(jsx.Get(r, "name")), Match: match, Outbound: outbound, Bypass: bypass}
+		if match == "mac" {
+			macs := cleanMacs(r)
+			if len(macs) == 0 {
+				continue
+			}
+			route.Sources, route.Macs = []string{}, macs
+		} else {
+			sources := cleanSources(r)
+			if len(sources) == 0 {
+				continue
+			}
+			route.Sources = sources
 		}
 		out = append(out, route)
 	}
