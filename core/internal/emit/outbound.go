@@ -175,7 +175,8 @@ func BuildTransport(t any) (map[string]any, bool) {
 
 // BuildTls:quic=true 表示 tuic / hysteria2 这类基于 QUIC 的出站,内核在这条路径上不支持 uTLS,一律不写 utls。
 // insecure 恒开(节点服务器证书归谁常常对不上),REALITY 例外(它用公钥验证)。
-func BuildTls(tls any, quic bool) (map[string]any, bool) {
+// http1:传输层是 ws / httpupgrade(HTTP/1.1 的 Upgrade)时写了 alpn 的一律换成只有 http/1.1(GitHub #374)。
+func BuildTls(tls any, quic bool, http1 bool) (map[string]any, bool) {
 	if !jsx.Truthy(tls) || !jsx.Truthy(jsx.Get(tls, "enabled")) {
 		return nil, false
 	}
@@ -184,7 +185,11 @@ func BuildTls(tls any, quic bool) (map[string]any, bool) {
 		out["server_name"] = v
 	}
 	if a, ok := jsx.Get(tls, "alpn").([]any); ok && len(a) > 0 {
-		out["alpn"] = a
+		if http1 {
+			out["alpn"] = []any{"http/1.1"}
+		} else {
+			out["alpn"] = a
+		}
 	}
 	utls := jsx.Get(tls, "utls")
 	utlsOn := jsx.Truthy(utls) && jsx.Truthy(jsx.Get(utls, "enabled"))
@@ -235,8 +240,13 @@ func withTransport(o map[string]any, f any) map[string]any {
 	return o
 }
 
+// 传输层先写好(withTransport)再写 TLS:按生成出来的传输类型判断要不要把 alpn 限成 http/1.1。
 func withTls(o map[string]any, f any, quic bool) map[string]any {
-	if t, ok := BuildTls(jsx.Get(f, "tls"), quic); ok {
+	http1 := false
+	if t, ok := o["transport"].(map[string]any); ok {
+		http1 = t["type"] == "ws" || t["type"] == "httpupgrade"
+	}
+	if t, ok := BuildTls(jsx.Get(f, "tls"), quic, http1); ok {
 		o["tls"] = t
 	}
 	return o
@@ -244,6 +254,18 @@ func withTls(o map[string]any, f any, quic bool) map[string]any {
 
 // EmitOutbound 把一个节点翻译成 sing-box 出站。wireguard 是 endpoint,不走这里。
 func EmitOutbound(node any) (map[string]any, error) {
+	out, err := emitOutbound(node)
+	if err != nil {
+		return nil, err
+	}
+	// 链式代理:经上游那条线路去连这个节点(engine/chain-proxy.mjs)
+	if d, ok := jsx.Get(node, "detour").(string); ok && d != "" {
+		out["detour"] = d
+	}
+	return out, nil
+}
+
+func emitOutbound(node any) (map[string]any, error) {
 	typ := jsx.Get(node, "type")
 	if typ == "wireguard" {
 		return nil, fmt.Errorf("wireguard must be emitted as an endpoint (use emitEndpoint)")
@@ -292,6 +314,13 @@ func EmitOutbound(node any) (map[string]any, error) {
 		if jsx.Truthy(fget("obfs")) {
 			o["obfs"] = fget("obfs")
 		}
+		// 端口跳跃(GitHub #171):写坏的整个不带
+		if ports := normalizeHopPorts(fget("server_ports")); len(ports) > 0 {
+			o["server_ports"] = ports
+			if iv := normalizeHopInterval(fget("hop_interval")); iv != "" {
+				o["hop_interval"] = iv
+			}
+		}
 		// sing-box 1.14 起 hysteria2 默认模仿 Chrome 的 QUIC 握手指纹,服务端用 Ed25519 证书时会失败;
 		// 订阅里没有这个信息,节点自带这个字段时原样带过去
 		if fget("disable_chrome_parrot") == true || fget("disableChromeParrot") == true {
@@ -311,6 +340,16 @@ func EmitOutbound(node any) (map[string]any, error) {
 			o["password"] = str(v)
 		}
 		return o, nil
+	case "http":
+		// http 代理出站(住宅代理商的 http:// / https:// 账号):账号密码,https:// 的带 TLS
+		o := withBase("http", node)
+		if v := fget("username"); jsx.Truthy(v) {
+			o["username"] = str(v)
+		}
+		if v := fget("password"); jsx.Truthy(v) {
+			o["password"] = str(v)
+		}
+		return withTls(o, f, false), nil
 	case "tuic":
 		o := withBase("tuic", node)
 		set(o, "uuid", fget("uuid"))

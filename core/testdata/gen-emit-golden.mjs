@@ -1,6 +1,6 @@
-// 生成节点 → 出站 / endpoint 的金标准(旧实现 emitOutbound / emitEndpoint)。
-// 用法: node core/testdata/gen-emit-golden.mjs <旧 engine 目录> [输出文件]
-//   旧 engine 目录要含 emit-outbound.mjs、emit-endpoint.mjs、node-fields.mjs
+// 生成节点 → 出站 / endpoint 的金标准(上游 engine 的 emitOutbound / emitEndpoint)。
+// 用法: node core/testdata/gen-emit-golden.mjs <engine 目录(取自 catch-up-upstream:panel/server/engine)> [输出文件]
+//   engine 目录(取自 catch-up-upstream:panel/server/engine)要含 emit-outbound.mjs、emit-endpoint.mjs、node-fields.mjs
 //   且需要一个 {"type":"module"} 的 package.json。
 import { writeFileSync } from 'node:fs'
 import { pathToFileURL } from 'node:url'
@@ -72,11 +72,16 @@ const node = (type) => {
       break
     case 'hysteria2':
       add('password', maybe(0.9, () => pick(['pw', '']))); add('tls', tls()); add('obfs', maybe(0.4, () => pick([{ type: 'salamander', password: 'x' }, '', null, 'o'])))
+      add('server_ports', maybe(0.5, () => pick(['20000-40000', '20000-40000,50000', '20000:40000', '50000', '80~90', ['20000-40000', '50000'], [], 5, null, '1-65536', '0-10', '10-5', 'x', '1,2,3', '  ', '20000 - 40000', ['a'], '20000-40000，50000', 123456, true, [1000, null], '100;200', '70000', '00080-00090', ' 5 ', '\ufeff80-90', '80\u00a0-\u00a090', '80 \u3000,\u2003 90', '80-90,\ufeff', '443,8443,10000-20000', '1-65535', '65535-65535,1-2', ['80\u00a0-\u00a090'], ['80\u3000~\u200190'], ['\ufeff80-90'], '80\ufeff90', '80\u202f90', '80\u202890', '80\u202990', '80\u168090', '80\u205f-\u205f90', ['7', ' 8-9 '], { a: 1 }])))
+      add('hop_interval', maybe(0.5, () => pick([null, '', 5, 4, '30', 30, '30s', '5m', '1h', '100ms', '30 s', 'abc', 0, '0', '007', '4', 1e21, '10m ', ' 10 ', true, [], {}, '5', 5.5])))
       add('disable_chrome_parrot', maybe(0.3, () => pick([true, false, 'true', 1]))); add('disableChromeParrot', maybe(0.3, () => pick([true, false, 'true'])))
       break
     case 'socks':
       add('version', maybe(0.6, () => pick([5, '5', 4, '4a', '', 0, null, undefined]))); add('username', maybe(0.5, () => pick(['u', '', 7, null])))
       add('password', maybe(0.5, () => pick(['p', '', 8, null]))); add('transport', transport()); add('tls', tls())
+      break
+    case 'http':
+      add('username', maybe(0.6, () => pick(['u', '', 7, null]))); add('password', maybe(0.6, () => pick(['p', '', 8, null]))); add('tls', tls()); add('transport', transport())
       break
     case 'tuic':
       add('uuid', maybe(0.9, () => pick(['u-3', '']))); add('password', maybe(0.9, () => pick(['pw', '']))); add('tls', tls())
@@ -88,7 +93,7 @@ const node = (type) => {
       add('local_address', maybe(0.9, () => pick([['172.16.0.2'], ['172.16.0.2', '2606:4700::1'], ['10.0.0.2/24', ' 10.0.0.3 '], [], '172.16.0.2', null, [5, '']])))
       break
   }
-  return { type, ...common(), fields: f }
+  return { type, ...common(), ...(chance(0.15) ? { detour: pick(['上游', '', null, 5, ' x ', true, 'a']) } : {}), fields: f }
 }
 
 const cases = []
@@ -96,8 +101,10 @@ const run = (fn, f, n) => {
   const input = rt(n)
   try { cases.push({ fn, node: input, want: rt(f(input)) }) } catch (e) { cases.push({ fn, node: input, error: e.message }) }
 }
-const TYPES = ['shadowsocks', 'vmess', 'vless', 'trojan', 'anytls', 'hysteria2', 'socks', 'tuic']
+const TYPES = ['shadowsocks', 'vmess', 'vless', 'trojan', 'anytls', 'hysteria2', 'socks', 'tuic', 'http']
 for (let i = 0; i < 800; i++) run('emitOutbound', ob.emitOutbound, node(TYPES[i % TYPES.length]))
+// 端口跳跃的语料要密一些:大部分随机写法都是非法的,多放一批才能碰到合法的
+for (let i = 0; i < 300; i++) run('emitOutbound', ob.emitOutbound, node('hysteria2'))
 for (let i = 0; i < 120; i++) run('emitEndpoint', ep.emitEndpoint, node('wireguard'))
 // 边界:类型不对
 for (const t of ['wireguard', 'bogus', undefined, null, 5]) run('emitOutbound', ob.emitOutbound, { type: t, tag: 'x', fields: {} })
