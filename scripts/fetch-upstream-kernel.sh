@@ -6,6 +6,8 @@
 # 环境变量:
 #   OPENBOX_KERNEL_REPO   上游仓库,默认 liandu2024/Open-Box
 #   OPENBOX_KERNEL_TAG    固定到某个上游版本(如 v0.1.283);留空 = 取 Latest
+#   OPENBOX_SOURCE_TAG    内核源码包(*-source.tar.gz)取自上游哪个版本(如 v0.1.341);
+#                         留空 = 与内核二进制同一个版本。只影响源码包,二进制仍取 OPENBOX_KERNEL_TAG
 #
 # 为什么不自己编:上游内核带着一批没有公开的补丁(直连应答放行、出站热替换、tun 放行标记等),
 # 面板的某些功能要靠它们,而这些补丁的内容不在公开仓库里,只能取现成的二进制。
@@ -22,6 +24,7 @@ set -eu
 
 REPO="${OPENBOX_KERNEL_REPO:-liandu2024/Open-Box}"
 TAG="${OPENBOX_KERNEL_TAG:-}"
+SOURCE_TAG="${OPENBOX_SOURCE_TAG:-}"
 
 die() { echo "[fetch-kernel] 错误:$*" >&2; exit 1; }
 log() { echo "[fetch-kernel] $*" >&2; }
@@ -51,7 +54,15 @@ case "$TAG" in
   *) die "无法确定上游版本(取到的是「$TAG」)。可用 OPENBOX_KERNEL_TAG=vX.Y.Z 指定。" ;;
 esac
 case "$TAG" in *[!A-Za-z0-9._-]*) die "版本号含非法字符:$TAG" ;; esac
+# 源码包版本:没指定就与二进制同一个版本
+[ -n "$SOURCE_TAG" ] || SOURCE_TAG="$TAG"
+case "$SOURCE_TAG" in
+  v[0-9]*) ;;
+  *) die "源码版本号写法不对(取到的是「$SOURCE_TAG」),应为 vX.Y.Z" ;;
+esac
+case "$SOURCE_TAG" in *[!A-Za-z0-9._-]*) die "源码版本号含非法字符:$SOURCE_TAG" ;; esac
 log "上游 $REPO 版本:$TAG(架构 $GOARCH)"
+[ "$SOURCE_TAG" = "$TAG" ] || log "源码包改取自上游版本:$SOURCE_TAG"
 
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/open-box-kernel.XXXXXX")
 trap 'rm -rf "$TMP"' EXIT INT TERM
@@ -125,13 +136,13 @@ log "内核已就绪:$BUNDLE"
 
 # ---- 4. 对应源码(GPL:分发二进制就要能拿到对应源码;发布时附在 Release 里)----
 SRC="sing-box-$KERNEL_VERSION-source.tar.gz"
-if fetch "$BASE/download/$TAG/$SRC" "$OUT/$SRC" && fetch "$BASE/download/$TAG/$SRC.sha256" "$OUT/$SRC.sha256"; then
+if fetch "$BASE/download/$SOURCE_TAG/$SRC" "$OUT/$SRC" && fetch "$BASE/download/$SOURCE_TAG/$SRC.sha256" "$OUT/$SRC.sha256"; then
   [ "$(awk 'NR==1{print $1}' "$OUT/$SRC.sha256")" = "$(sha_of "$OUT/$SRC")" ] \
     || die "$SRC 的 sha256 校验失败"
-  log "对应源码已取回:$SRC"
+  log "对应源码已取回:$SRC(取自 $SOURCE_TAG)"
 else
   rm -f "$OUT/$SRC" "$OUT/$SRC.sha256"
-  die "取不到内核对应源码 $SRC;没有源码不能分发这个二进制"
+  die "取不到内核对应源码 $SRC(上游版本 $SOURCE_TAG);没有源码不能分发这个二进制"
 fi
 
 # ---- 5. 缺 madvise 的固件用的兼容库(属于上游 app 组件;取不到只警告,不影响其它固件)----
@@ -151,6 +162,7 @@ fi
 {
   echo "repo=$REPO"
   echo "tag=$TAG"
+  echo "source_tag=$SOURCE_TAG"
   echo "kernel_version=$KERNEL_VERSION"
   echo "arch=$GOARCH"
   echo "fetched_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
