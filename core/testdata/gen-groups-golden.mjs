@@ -1,6 +1,6 @@
 // 生成节点组三个方法的金标准:normalizeGroups / builtinTags / emitGroups(旧实现里叫 emitUserGroups)。
-// 用法: node core/testdata/gen-groups-golden.mjs <旧 engine 目录> [输出文件]
-//   旧 engine 目录要含 user-groups.mjs、rename.mjs、duration.mjs、test-url.mjs、dictionaries.mjs、countries.mjs
+// 用法: node core/testdata/gen-groups-golden.mjs <engine 目录(取自 catch-up-upstream:panel/server/engine)> [输出文件]
+//   engine 目录(取自 catch-up-upstream:panel/server/engine)要含 user-groups.mjs、rename.mjs、duration.mjs、test-url.mjs、dictionaries.mjs、countries.mjs
 //   且需要一个 {"type":"module"} 的 package.json。
 import { writeFileSync } from 'node:fs'
 import { pathToFileURL } from 'node:url'
@@ -35,9 +35,11 @@ const NUMS = [0, 100, -5, '50', null, 1.5, 'abc', true, [], 1e9, '0x10', 7, 6000
 const SCALES = [0, 3, -30, 25, '4', null, 2.5, -2.5, 'x', 0.49999999999999994, -0.5, [5], true]
 const INTERVALS = ['300s', '5m', '1h', '90s', 'abc', '', '1s', '25h', ' 10m ', '5000ms', '30', 'x1h30m']
 
+const EXPECTED = ['', '*', '204', '200/204', '200-299/302', ' 200 - 299 ', '200,204', 'x', '99', '600', '300-200', '2000', '//', ' / ', 204, null, true, '200-', '-200', '200\u00a0-\u00a0299', '200\u3000-299', '200\ufeff-\ufeff299', '200\u2028-\u2029299', '200\u202f-299', '200 \u1680- 299', '200\u205f-\u2000299', '200\u200a-299', '200\u000b-299', '200\f-\r299', '200\t-\n299', '200-299/', '/204', ' * ', '100-599', '099-200', '404 / 403', '200–299', '2xx', '200/200', '300-300', ['204'], {}]
 const lane = () => ({
   id: maybe(0.7, () => pick(['l1', 'l2', 'l1', ' l3 ', ''])), name: maybe(0.5, () => pick(['主用', '备用 1', ' '])),
   icon: maybe(0.3, () => pick(ICONS)), members: noisy(() => [pick(NODE_TAGS), ...some(NODE_TAGS, 2), ...(chance(0.1) ? ['不存在', ' 香港-01 '] : [])]),
+  manual: maybe(0.4, () => pick([true, true, false, 'true', 1, null])),
 })
 const failoverObj = () => ({
   timeoutMs: maybe(0.6, () => pick(NUMS)), failureThreshold: maybe(0.6, () => pick(NUMS)),
@@ -54,7 +56,7 @@ const group = () => {
     enabled: maybe(0.5, () => noisy(() => pick([true, false, null, 0]))),
     icon: maybe(0.6, () => pick(ICONS)), iconScale: maybe(0.4, () => pick(SCALES)),
     keywords: maybe(0.6, () => noisy(() => some(KEYWORDS, 3))), members: maybe(0.7, () => noisy(() => some(MEMBERS, 4))),
-    testUrl: maybe(0.3, () => pick(['', ' ', 'https://a.com/204', null])), interval: maybe(0.5, () => pick(INTERVALS)),
+    testUrl: maybe(0.3, () => pick(['', ' ', 'https://a.com/204', null])), expectedStatus: maybe(0.35, () => pick(EXPECTED)), interval: maybe(0.5, () => pick(INTERVALS)),
     tolerance: maybe(0.5, () => pick(NUMS)), idleTimeout: maybe(0.4, () => pick(['12h', '5m', '1h', 'abc', '', '30'])),
     lanes: maybe(0.7, () => noisy(() => Array.from({ length: Math.floor(rnd() * 5) }, () => (chance(0.08) ? garbage() : lane())))),
     failover: maybe(0.5, () => noisy(failoverObj)),
@@ -71,7 +73,7 @@ const groupList = () => {
   return list
 }
 const nodes = () => {
-  const list = [...new Set([...NODE_TAGS.slice(0, 3), ...some(NODE_TAGS, 12)])].map((tag) => ({ tag, regionName: pick(REGIONS) }))
+  const list = [...new Set([...NODE_TAGS.slice(0, 3), ...some(NODE_TAGS, 12)])].map((tag) => ({ tag, regionName: pick(REGIONS), ...(chance(0.25) ? { chain: pick([true, true, false, 'x', 0, null, 1]) } : {}) }))
   if (chance(0.1) && list.length) list.push({ ...list[0] }) // 重名
   return list
 }
@@ -82,7 +84,7 @@ for (let i = 0; i < 700; i++) {
   const k = i % 5
   if (k === 0) N('normalizeGroups', [rt(groupList())])
   else if (k === 1) N('builtinTags', [rt(groupList())])
-  else N('emitGroups', [rt(groupList()), rt(nodes()), rt(chance(0.3) ? { testUrl: pick(['https://t.example/204', '', ' ']) } : chance(0.5) ? {} : undefined) ?? {}])
+  else N('emitGroups', [rt(groupList()), rt(nodes()), rt(chance(0.3) ? { testUrl: pick(['https://t.example/204', '', ' ']), ...(chance(0.6) ? { expectedStatus: pick(EXPECTED) } : {}) } : chance(0.3) ? { expectedStatus: pick(EXPECTED) } : chance(0.5) ? {} : undefined) ?? {}])
 }
 // 手写几条:默认组、环、空组占位、故障转移
 const hand = [
@@ -92,6 +94,15 @@ const hand = [
   [[{ id: 'f', name: '主备', type: 'failover', lanes: [{ id: 'p', members: ['香港-01', '香港-02'] }, { id: 'q', members: ['美国-01'] }, { members: ['不存在'] }] }], [{ tag: '香港-01' }, { tag: '香港-02' }, { tag: '美国-01' }], {}],
   [[{ id: 'builtin-block', name: '拒绝', enabled: false }, { id: 'f', name: '主备', type: 'failover', lanes: [{ id: 'p', members: ['香港-01'] }] }], [{ tag: '香港-01' }], {}],
 ]
+hand.push(
+  [[{ id: 'builtin-direct', name: '直连', enabled: true }, { id: 's1', name: 'S1', type: 'selector', members: ['直连', '拒绝', '香港-01'] }], [{ tag: '香港-01' }], {}],
+  [[{ id: 'builtin-direct', name: '直连', enabled: false }, { id: 'builtin-block', name: '拒绝', enabled: false }, { id: 's1', name: 'S1', type: 'selector', members: ['直连', '拒绝', '香港-01'] }], [{ tag: '香港-01' }], {}],
+  [[{ id: 's2', name: 'S2', type: 'urltest', mode: 'dynamic' }, { id: 's3', name: 'S3', type: 'selector', mode: 'dynamic', keywords: ['香港'] }], [{ tag: '香港-01', chain: true }, { tag: '香港-02' }], {}],
+  [[{ id: 's4', name: 'S4', type: 'selector', mode: 'dynamic' }], [{ tag: '香港-01', chain: true }], {}],
+  [[{ id: 'f', name: '主备', type: 'failover', expectedStatus: '204', lanes: [{ id: 'p', manual: true, members: ['香港-01', '香港-02'] }, { id: 'q', members: ['美国-01', '美国-02'] }] }], [{ tag: '香港-01' }, { tag: '香港-02' }, { tag: '美国-01' }, { tag: '美国-02' }], { expectedStatus: '200' }],
+)
+// 可接受状态码的每一种写法都过一遍 normalizeGroups(随机语料里碰到每种写法的次数不稳)
+for (const v of EXPECTED) N('normalizeGroups', [[{ id: 'x', name: 'X', type: 'urltest', expectedStatus: v }]])
 // 关键词边界:短码(2~3 位 ASCII)前后不能是字母;cn 不匹配 cn2 线路;国旗 emoji 还原成字母
 const dyn = (id, kw) => ({ id, name: id, type: 'selector', mode: 'dynamic', keywords: kw })
 hand.push(

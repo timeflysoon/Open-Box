@@ -6,7 +6,7 @@ import (
 	"github.com/timeflysoon/Open-Box/core/internal/jsx"
 )
 
-// 对应旧 Node 的 emitUserGroups:把节点组翻译成 sing-box 出站,并挡住内核不拦的三类问题
+// 对应上游 engine/user-groups.mjs(v0.1.318)的 emitUserGroups:把节点组翻译成 sing-box 出站,并挡住内核不拦的三类问题
 // (成员为空 / 引用不存在的出站 / 环)。
 
 // Outbound 是写进 sing-box 配置的出站。键顺序和旧实现一致。
@@ -20,6 +20,7 @@ type Outbound struct {
 	IdleTimeout               string   `json:"idle_timeout,omitempty"`
 	Default                   string   `json:"default,omitempty"`
 	InterruptExistConnections bool     `json:"interrupt_exist_connections,omitempty"`
+	ExpectedStatus            string   `json:"expected_status,omitempty"` // 可接受状态码,放最后(JS 里是 { ...outbound, expected_status })
 }
 
 type Dropped struct {
@@ -44,6 +45,7 @@ type FailoverRuntimeSettings struct {
 	IntervalMs       float64 `json:"intervalMs"`
 	Tolerance        float64 `json:"tolerance"`
 	TestURL          string  `json:"testUrl"`
+	ExpectedStatus   string  `json:"expectedStatus,omitempty"`
 	TimeoutMs        int64   `json:"timeoutMs"`
 	FailureThreshold int64   `json:"failureThreshold"`
 	RestorePrimary   bool    `json:"restorePrimary"`
@@ -88,15 +90,16 @@ func orStr(s, fallback string) string {
 	return fallback
 }
 
-// resolveMembers:动态组按关键词从节点里现挑(不带关键词 = 全部节点,只认节点);
-// 静态组用显式成员,剔除重复 / 自引用 / 指向不存在的东西的条目。
-func resolveMembers(g *Group, nodeTags []string, nodeTagSet, groupNames map[string]bool, matchText map[string]string) []string {
+// resolveMembers:动态组按关键词从 dynamicTags 里现挑(不带关键词 = 全部;链式代理的节点不在里面,
+// 住宅线路不该悄悄混进自动择优池);静态组用显式成员,可以是节点、别的组、启用的内置直连 / 拒绝,
+// 剔除重复 / 自引用 / 指向不存在的东西的条目。
+func resolveMembers(g *Group, dynamicTags []string, nodeTagSet, memberNames map[string]bool, matchText map[string]string) []string {
 	if g.Mode == "dynamic" {
 		if len(g.Keywords) == 0 {
-			return append([]string{}, nodeTags...)
+			return append([]string{}, dynamicTags...)
 		}
 		out := []string{}
-		for _, tag := range nodeTags {
+		for _, tag := range dynamicTags {
 			text, ok := matchText[tag]
 			if !ok {
 				text = normalizeForMatch(tag)
@@ -116,7 +119,7 @@ func resolveMembers(g *Group, nodeTags []string, nodeTagSet, groupNames map[stri
 		if seen[m] || m == g.Name {
 			continue
 		}
-		if !nodeTagSet[m] && !groupNames[m] {
+		if !nodeTagSet[m] && !memberNames[m] {
 			continue
 		}
 		seen[m] = true
@@ -161,7 +164,10 @@ func dropCycles(groups []*Group) []*Group {
 	return accepted
 }
 
-type nodeInfo struct{ tag, regionName string }
+type nodeInfo struct {
+	tag, regionName string
+	chain           bool // 链式代理节点
+}
 
 func parseNodes(v any) ([]nodeInfo, error) {
 	if !jsx.Truthy(v) {
@@ -175,6 +181,7 @@ func parseNodes(v any) ([]nodeInfo, error) {
 	for i, n := range arr {
 		out[i].tag, _ = jsx.Get(n, "tag").(string)
 		out[i].regionName, _ = jsx.Get(n, "regionName").(string)
+		out[i].chain = jsx.Truthy(jsx.Get(n, "chain"))
 	}
 	return out, nil
 }
@@ -192,23 +199,30 @@ func (s *orderedSet) add(v string) {
 	}
 }
 
-// EmitUserGroups 生成出站。options 里只用 testUrl。
+// EmitUserGroups 生成出站。options 里用 testUrl 和 expectedStatus(档案里的全局设置)。
 func EmitUserGroups(groupsRaw any, nodesRaw any, options any) (*EmitResult, error) {
 	testURL := DefaultTestURL
 	if s, ok := jsx.Get(options, "testUrl").(string); ok && s != "" {
 		testURL = s
 	}
+	// 可接受状态码:组自己的优先,没写用全局设置;都没写就不往配置里写这个字段
+	expectedDefault, _ := NormalizeExpectedStatus(jsx.Get(options, "expectedStatus"))
+	expectedOf := func(g *Group) string { return orStr(g.ExpectedStatus, expectedDefault) }
 	normalized := NormalizeGroups(groupsRaw)
 	nodes, err := parseNodes(nodesRaw)
 	if err != nil {
 		return nil, err
 	}
 	nodeTags := make([]string, len(nodes))
+	dynamicTags := []string{}
 	matchText := map[string]string{}
 	nodeTagSet := map[string]bool{}
 	for i, n := range nodes {
 		nodeTags[i] = n.tag
 		nodeTagSet[n.tag] = true
+		if !n.chain {
+			dynamicTags = append(dynamicTags, n.tag)
+		}
 		matchText[n.tag] = normalizeForMatch(n.regionName + " " + n.tag)
 	}
 
@@ -236,9 +250,16 @@ func EmitUserGroups(groupsRaw any, nodesRaw any, options any) (*EmitResult, erro
 			dropped = append(dropped, Dropped{g.Name, "cycle"})
 		}
 	}
-	groupNames := map[string]bool{}
+	// 静态组的成员还能是内置的直连 / 拒绝(停用的不认:拒绝停用时配置里根本没有它,直连停用的意思是「选不到它」)
+	memberNames := map[string]bool{}
 	for _, g := range withoutCycles {
-		groupNames[g.Name] = true
+		memberNames[g.Name] = true
+	}
+	if builtin.DirectEnabled {
+		memberNames[builtin.Direct] = true
+	}
+	if builtin.BlockEnabled {
+		memberNames[builtin.Block] = true
 	}
 
 	outbounds := []Outbound{}
@@ -282,12 +303,20 @@ func EmitUserGroups(groupsRaw any, nodesRaw any, options any) (*EmitResult, erro
 				}
 				usedTags[subTag] = true
 				internal.add(subTag)
+				// 手动选择的页签:内部子组是 selector,默认第一个节点,之后按用户在代理页点的
+				if lane.Manual {
+					outbounds = append(outbounds, Outbound{Type: "selector", Tag: subTag, Outbounds: valid, Default: valid[0]})
+					st.Mode, st.Ref, st.SubTag = "selector", &subTag, &subTag
+					refs = append(refs, subTag)
+					lanes = append(lanes, st)
+					continue
+				}
 				interval := orStr(g.Interval, "300s")
 				tol := g.Tolerance
 				outbounds = append(outbounds, Outbound{
 					Type: "urltest", Tag: subTag, Outbounds: valid,
 					URL: orStr(g.TestURL, testURL), Interval: interval, Tolerance: &tol,
-					IdleTimeout: idleTimeoutFor(DefaultIdleTimeout, interval),
+					IdleTimeout: idleTimeoutFor(DefaultIdleTimeout, interval), ExpectedStatus: expectedOf(g),
 				})
 				st.Mode, st.Ref, st.SubTag = "urltest", &subTag, &subTag
 				refs = append(refs, subTag)
@@ -327,7 +356,7 @@ func EmitUserGroups(groupsRaw any, nodesRaw any, options any) (*EmitResult, erro
 		failover = append(failover, FailoverState{
 			ID: g.ID, Tag: g.Name, Lanes: lanes, RejectTag: rejectTag,
 			Settings: FailoverRuntimeSettings{
-				Interval: interval, IntervalMs: parseDuration(interval), Tolerance: g.Tolerance, TestURL: orStr(g.TestURL, testURL),
+				Interval: interval, IntervalMs: parseDuration(interval), Tolerance: g.Tolerance, TestURL: orStr(g.TestURL, testURL), ExpectedStatus: expectedOf(g),
 				TimeoutMs: fo.TimeoutMs, FailureThreshold: fo.FailureThreshold, RestorePrimary: fo.RestorePrimary, RecoveryHoldMs: fo.RecoveryHoldMs,
 			},
 		})
@@ -347,7 +376,7 @@ func EmitUserGroups(groupsRaw any, nodesRaw any, options any) (*EmitResult, erro
 			emitFailover(g)
 			continue
 		}
-		members := resolveMembers(g, nodeTags, nodeTagSet, groupNames, matchText)
+		members := resolveMembers(g, dynamicTags, nodeTagSet, memberNames, matchText)
 		if len(members) == 0 {
 			// 空组不能原样写进配置(内核会 FATAL),也不该整个丢掉:挂一个直连占位
 			members = []string{builtin.Direct}
@@ -358,7 +387,7 @@ func EmitUserGroups(groupsRaw any, nodesRaw any, options any) (*EmitResult, erro
 			tol := g.Tolerance
 			outbounds = append(outbounds, Outbound{
 				Type: "urltest", Tag: g.Name, Outbounds: members, URL: orStr(g.TestURL, testURL),
-				Interval: interval, Tolerance: &tol, IdleTimeout: idleTimeoutFor(g.IdleTimeout, interval),
+				Interval: interval, Tolerance: &tol, IdleTimeout: idleTimeoutFor(g.IdleTimeout, interval), ExpectedStatus: expectedOf(g),
 			})
 		} else {
 			outbounds = append(outbounds, Outbound{Type: "selector", Tag: g.Name, Outbounds: members})

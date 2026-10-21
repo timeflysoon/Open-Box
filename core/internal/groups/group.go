@@ -48,6 +48,8 @@ type Lane struct {
 	Name    string   `json:"name"`
 	Icon    string   `json:"icon"`
 	Members []string `json:"members"`
+	// 多节点页签在页签内怎么挑节点:true = 手动选择(内部 selector);不写 / false = 自动优选(内部 urltest)
+	Manual bool `json:"manual,omitempty"`
 }
 
 // FailoverSettings 是故障转移的检测参数。
@@ -72,13 +74,15 @@ type Group struct {
 	Kind      string // direct / block / 空
 
 	// 只有对应类型才有的字段;extras 记录它们来自哪种类型(内置出站会改写 Type,但这些字段原样保留)
-	extras      string // "" / urltest / failover
-	TestURL     string
-	Interval    string
-	Tolerance   float64
-	IdleTimeout string
-	Lanes       []Lane
-	Failover    *FailoverSettings
+	extras  string // "" / urltest / failover
+	TestURL string
+	// 可接受状态码(内核 tcp19):空 = 用档案里的全局设置
+	ExpectedStatus string
+	Interval       string
+	Tolerance      float64
+	IdleTimeout    string
+	Lanes          []Lane
+	Failover       *FailoverSettings
 
 	// 内置出站的默认值是一份固定对象:没有 iconScale,键顺序也不同
 	pristineBuiltin bool
@@ -127,12 +131,14 @@ func (g *Group) MarshalJSON() ([]byte, error) {
 	switch g.extras {
 	case "urltest":
 		put("testUrl", g.TestURL)
+		put("expectedStatus", g.ExpectedStatus)
 		put("interval", g.Interval)
 		put("tolerance", g.Tolerance)
 		put("idleTimeout", g.IdleTimeout)
 	case "failover":
 		put("lanes", g.Lanes)
 		put("testUrl", g.TestURL)
+		put("expectedStatus", g.ExpectedStatus)
 		put("interval", g.Interval)
 		put("tolerance", g.Tolerance)
 		put("failover", g.Failover)
@@ -224,7 +230,7 @@ func normalizeLanes(raw any) []Lane {
 		}
 		name, _ := jsx.NonEmpty(jsx.Get(lane, "name"))
 		icon, _ := jsx.NonEmpty(jsx.Get(lane, "icon"))
-		out = append(out, Lane{ID: id, Name: name, Icon: icon, Members: members})
+		out = append(out, Lane{ID: id, Name: name, Icon: icon, Members: members, Manual: jsx.Get(lane, "manual") == true})
 	}
 	return out
 }
@@ -264,6 +270,7 @@ func normalizeGroup(raw any, index int) *Group {
 	case "urltest":
 		g.extras = "urltest"
 		g.TestURL, _ = jsx.NonEmpty(jsx.Get(raw, "testUrl"))
+		g.ExpectedStatus, _ = NormalizeExpectedStatus(jsx.Get(raw, "expectedStatus"))
 		if g.Interval, ok = jsx.NonEmpty(jsx.Get(raw, "interval")); !ok {
 			g.Interval = DefaultInterval
 		}
@@ -284,6 +291,7 @@ func normalizeGroup(raw any, index int) *Group {
 		g.Keywords, g.Members = []string{}, []string{}
 		g.Lanes = normalizeLanes(jsx.Get(raw, "lanes"))
 		g.TestURL, _ = jsx.NonEmpty(jsx.Get(raw, "testUrl"))
+		g.ExpectedStatus, _ = NormalizeExpectedStatus(jsx.Get(raw, "expectedStatus"))
 		interval, _ := jsx.NonEmpty(jsx.Get(raw, "interval"))
 		ms := parseDuration(interval)
 		if ms >= failoverIntervalMs[0] && ms <= failoverIntervalMs[1] {
