@@ -415,6 +415,8 @@ now_ms() {
 # 在开发机 / CI 上直接跑通。POSIX sh 的函数必须先定义才能调用,所以这几个函数不能
 # 留在原来"预检通过之后"的位置。
 DOWNLOADER=""
+OPENBOX_FETCH_PROXY=""
+OPENBOX_FETCH_NO_PROXY=""
 detect_downloader() {
   if command -v curl >/dev/null 2>&1; then
     DOWNLOADER="curl"
@@ -427,15 +429,15 @@ detect_downloader() {
 
 fetch_to_stdout() {
   case "$DOWNLOADER" in
-    curl) curl -fsSL --connect-timeout 15 --max-time 60 "$1" ;;
-    wget) wget -q --timeout=60 -O - "$1" ;;
+    curl) env http_proxy="${OPENBOX_FETCH_PROXY:-${http_proxy:-}}" https_proxy="${OPENBOX_FETCH_PROXY:-${https_proxy:-}}" no_proxy="${OPENBOX_FETCH_NO_PROXY:-${no_proxy:-}}" curl -fsSL --connect-timeout 15 --max-time 60 "$1" ;;
+    wget) env http_proxy="${OPENBOX_FETCH_PROXY:-${http_proxy:-}}" https_proxy="${OPENBOX_FETCH_PROXY:-${https_proxy:-}}" no_proxy="${OPENBOX_FETCH_NO_PROXY:-${no_proxy:-}}" wget -q --timeout=60 -O - "$1" ;;
   esac
 }
 
 fetch_to_file() {
   case "$DOWNLOADER" in
-    curl) curl -fsSL --connect-timeout 15 --max-time 300 -o "$2" "$1" ;;
-    wget) wget -q --timeout=60 -O "$2" "$1" ;;
+    curl) env http_proxy="${OPENBOX_FETCH_PROXY:-${http_proxy:-}}" https_proxy="${OPENBOX_FETCH_PROXY:-${https_proxy:-}}" no_proxy="${OPENBOX_FETCH_NO_PROXY:-${no_proxy:-}}" curl -fsSL --connect-timeout 15 --max-time 300 -o "$2" "$1" ;;
+    wget) env http_proxy="${OPENBOX_FETCH_PROXY:-${http_proxy:-}}" https_proxy="${OPENBOX_FETCH_PROXY:-${https_proxy:-}}" no_proxy="${OPENBOX_FETCH_NO_PROXY:-${no_proxy:-}}" wget -q --timeout=60 -O "$2" "$1" ;;
   esac
 }
 
@@ -451,8 +453,9 @@ build_url() {
   fi
 }
 
-# 升级下载统一使用系统网络，不依赖代理规则或 FakeIP 开关。先暂停原本运行的
-# 内核并等待 TUN 退出，服务停止时会恢复系统 DNS；失败、取消或无需升级时恢复。
+# 下载和校验沿用当前可用网络：FakeIP 应答和代理出网依赖正在运行的内核，
+# 不能在获取脚本或升级包之前停掉它。只在全部校验通过、进入替换阶段时停服务。
+# 旧升级入口可能已经停核再接力到本脚本，保留恢复逻辑以兼容这种入口。
 OPENBOX_CORE_SUSPENDED=${OPENBOX_CORE_SUSPENDED:-0}
 openbox_core_service() {
   if [ -x /etc/init.d/openbox ]; then
@@ -472,32 +475,19 @@ flush_system_dns_cache() {
   fi
   return 0
 }
-suspend_core_for_fetch() {
+prepare_core_for_fetch() {
+  restore_core_if_suspended || die "恢复升级入口暂停的内核失败，未开始下载升级内容。"
   _scs=$(openbox_core_service)
   [ -n "$_scs" ] || return 0
-  if ! "$_scs" status 2>/dev/null | grep -q running; then
-    if [ "$OPENBOX_CORE_SUSPENDED" != "1" ]; then
-      flush_system_dns_cache
-      return 0
-    fi
-  else
-    info "暂停内核，使用系统网络下载升级内容..."
-    # 停服务前记下原状态，信号或停止失败也能按原状恢复。
-    OPENBOX_CORE_SUSPENDED=1
-    OPENBOX_UPDATE_CORE_WAS_UP=1
-    export OPENBOX_CORE_SUSPENDED OPENBOX_UPDATE_CORE_WAS_UP
-    "$_scs" stop >/dev/null 2>&1 || die "暂停内核失败，未开始下载升级内容。"
+  if "$_scs" status 2>/dev/null | grep -q running; then
+    # 和面板测速共用的固定 mixed 入站。CONNECT 将域名交给内核，避免本机 / 上游
+    # 缓存的 FakeIP 或入口旁路影响升级连接；仍按用户原有规则选择直连或代理。
+    # 仅传给下载子进程，不把代理环境带进升级后启动的面板 / 内核服务。
+    OPENBOX_FETCH_PROXY="http://127.0.0.1:7891"
+    OPENBOX_FETCH_NO_PROXY="localhost,127.0.0.1,::1"
+    return 0
   fi
-  OPENBOX_CORE_SUSPENDED=1
-  OPENBOX_UPDATE_CORE_WAS_UP=1
-  export OPENBOX_CORE_SUSPENDED OPENBOX_UPDATE_CORE_WAS_UP
-  # OpenWrt 的 stop 发出 SIGTERM 后就可能返回，不能立刻沿用尚未退出的 TUN。
-  _sc_wait=0
-  while "$_scs" status 2>/dev/null | grep -q running || [ -e /sys/class/net/openbox-tun ]; do
-    [ "$_sc_wait" -lt 25 ] || die "等待内核和 TUN 退出超时，未开始下载升级内容。"
-    sleep 1
-    _sc_wait=$((_sc_wait + 1))
-  done
+  # 原本没开内核时仍走系统网络，只清掉可能遗留的 FakeIP 缓存，不启动内核。
   flush_system_dns_cache
 }
 restore_core_if_suspended() {
@@ -513,6 +503,23 @@ restore_core_if_suspended() {
   OPENBOX_CORE_SUSPENDED=0
   export OPENBOX_CORE_SUSPENDED
 }
+stop_core_for_commit() {
+  _scs=$(openbox_core_service)
+  [ -n "$_scs" ] || return 0
+  if "$_scs" status 2>/dev/null | grep -q running; then
+    # 替换之前失败仍可恢复原内核；面板此时还在运行。
+    OPENBOX_CORE_SUSPENDED=1
+    OPENBOX_UPDATE_CORE_WAS_UP=1
+    export OPENBOX_CORE_SUSPENDED OPENBOX_UPDATE_CORE_WAS_UP
+    "$_scs" stop >/dev/null 2>&1 || die "停止内核失败，未替换安装文件。"
+  fi
+  _sc_wait=0
+  while "$_scs" status 2>/dev/null | grep -q running || [ -e /sys/class/net/openbox-tun ]; do
+    [ "$_sc_wait" -lt 25 ] || die "等待内核和 TUN 退出超时，未替换安装文件。"
+    sleep 1
+    _sc_wait=$((_sc_wait + 1))
+  done
+}
 CORE_HELPERS_READY=1
 
 # 探测专用的下载函数:比 fetch_to_file 多加连接/总时长上限,避免探测阶段卡在一个
@@ -520,8 +527,8 @@ CORE_HELPERS_READY=1
 # 限时的 fetch_to_file,不希望网络慢的用户被这里的短超时误伤。
 fetch_to_file_probe() {
   case "$DOWNLOADER" in
-    curl) curl -fsSL --connect-timeout 8 --max-time 20 -o "$2" "$1" ;;
-    wget) wget -q --timeout=20 -O "$2" "$1" ;;
+    curl) env http_proxy="${OPENBOX_FETCH_PROXY:-${http_proxy:-}}" https_proxy="${OPENBOX_FETCH_PROXY:-${https_proxy:-}}" no_proxy="${OPENBOX_FETCH_NO_PROXY:-${no_proxy:-}}" curl -fsSL --connect-timeout 8 --max-time 20 -o "$2" "$1" ;;
+    wget) env http_proxy="${OPENBOX_FETCH_PROXY:-${http_proxy:-}}" https_proxy="${OPENBOX_FETCH_PROXY:-${https_proxy:-}}" no_proxy="${OPENBOX_FETCH_NO_PROXY:-${no_proxy:-}}" wget -q --timeout=20 -O "$2" "$1" ;;
   esac
 }
 
@@ -558,7 +565,7 @@ probe_content_length() {
   _pcl_url="$1"
   case "$DOWNLOADER" in
     curl)
-      curl -sIL --connect-timeout 8 --max-time 20 "$_pcl_url" 2>/dev/null \
+      env http_proxy="${OPENBOX_FETCH_PROXY:-${http_proxy:-}}" https_proxy="${OPENBOX_FETCH_PROXY:-${https_proxy:-}}" no_proxy="${OPENBOX_FETCH_NO_PROXY:-${no_proxy:-}}" curl -sIL --connect-timeout 8 --max-time 20 "$_pcl_url" 2>/dev/null \
         | tr -d '\r' | tr 'A-Z' 'a-z' \
         | awk '/^content-length:/{v=$2} END{if (v != "") print v}'
       ;;
@@ -609,8 +616,8 @@ download_with_progress_once() {
   rm -f "$_dwp_out"
   # 同 install.sh 的 fetch_to_file:不限总时长,卡住不动 60 秒就失败(以前会一直挂在「下载中」)
   case "$DOWNLOADER" in
-    curl) curl -fsSL --connect-timeout 15 --speed-limit 1024 --speed-time 60 -o "$_dwp_out" "$_dwp_url" & ;;
-    wget) wget -q --timeout=60 -O "$_dwp_out" "$_dwp_url" & ;;
+    curl) env http_proxy="${OPENBOX_FETCH_PROXY:-${http_proxy:-}}" https_proxy="${OPENBOX_FETCH_PROXY:-${https_proxy:-}}" no_proxy="${OPENBOX_FETCH_NO_PROXY:-${no_proxy:-}}" curl -fsSL --connect-timeout 15 --speed-limit 1024 --speed-time 60 -o "$_dwp_out" "$_dwp_url" & ;;
+    wget) env http_proxy="${OPENBOX_FETCH_PROXY:-${http_proxy:-}}" https_proxy="${OPENBOX_FETCH_PROXY:-${https_proxy:-}}" no_proxy="${OPENBOX_FETCH_NO_PROXY:-${no_proxy:-}}" wget -q --timeout=60 -O "$_dwp_out" "$_dwp_url" & ;;
   esac
   _dwp_pid=$!
   write_status downloading 0 "$_dwp_total" ""
@@ -1270,8 +1277,8 @@ refresh_update_script() {
     _sources="${MIRROR_PREFIX:-$BUILTIN_MIRRORS}"
   fi
   _ready=0
-  # 脚本获取和后续组件下载使用同样的系统网络，用户无需修改 FakeIP。
-  suspend_core_for_fetch
+  # 保持现有内核及 DNS 接管；旧入口若已暂停内核，先恢复再获取脚本。
+  prepare_core_for_fetch
   # 镜像先按这次选择的通道试,失败再直连;直连通道不擅自换镜像。
   for _source in $_sources direct; do
     rm -f -- "$_fresh"
@@ -1398,9 +1405,9 @@ check_tmp_space
 resolve_channel
 info "预检通过(架构 $ARCH,通道 $CHANNEL)。"
 
-# 所有升级入口都在第一个联网步骤之前准备系统网络，包括旧脚本接力、手动
-# 执行、组件升级、完整包升级和回退；不能只在完整包分支暂停内核。
-suspend_core_for_fetch
+# 所有升级入口在联网前恢复旧入口可能暂停的内核；正在运行的内核保持运行，
+# FakeIP、直连不进内核及用户的 DNS / 分流设置均保持不变。
+prepare_core_for_fetch
 
 # ---------- 系统依赖:内核模块与命令 ----------
 # 路由器固件的默认镜像常缺其中一两样(#44 缺 kmod-nft-queue;有用户缺 kmod-veth 导致规则页不能模拟 LAN
@@ -1609,12 +1616,12 @@ detect_downloader
 # 新版本也会因为这里拿不到 tag 而装回镜像缓存的旧包,审查第六项)。
 resolve_latest_tag_from() {
   case "$DOWNLOADER" in
-    curl) curl -sI --connect-timeout 8 --max-time 12 "$1" 2>/dev/null ;;
+    curl) env http_proxy="${OPENBOX_FETCH_PROXY:-${http_proxy:-}}" https_proxy="${OPENBOX_FETCH_PROXY:-${https_proxy:-}}" no_proxy="${OPENBOX_FETCH_NO_PROXY:-${no_proxy:-}}" curl -sI --connect-timeout 8 --max-time 12 "$1" 2>/dev/null ;;
     # OpenWrt 自带的 wget 是 uclient-fetch,没有 -S / --max-redirect(错误会被吞掉,
     # 静默退回稳定资产名,镜像缓存旧包的问题就回来了):改为跟着 302 把 releases/latest
     # 的页面拉下来,从里面的 /releases/tag/<tag> 链接取版本号
     # 页面里还有 /releases/tag/*name 这种模板链接,只认 v 开头的版本号
-    wget) wget -q -O - --timeout=12 "$1" 2>/dev/null | sed -n 's|.*/releases/tag/\(v[0-9][0-9A-Za-z._-]*\).*|\1|p' | head -n 1 ;;
+    wget) env http_proxy="${OPENBOX_FETCH_PROXY:-${http_proxy:-}}" https_proxy="${OPENBOX_FETCH_PROXY:-${https_proxy:-}}" no_proxy="${OPENBOX_FETCH_NO_PROXY:-${no_proxy:-}}" wget -q -O - --timeout=12 "$1" 2>/dev/null | sed -n 's|.*/releases/tag/\(v[0-9][0-9A-Za-z._-]*\).*|\1|p' | head -n 1 ;;
   esac | sed -n 's/^[Ll]ocation: .*\/releases\/tag\/\(v[0-9][0-9A-Za-z._-]*\).*/\1/p; /^v[0-9][0-9A-Za-z._-]*$/p' | head -n 1
 }
 LATEST_URL="https://github.com/$REPO/releases/latest"
@@ -1944,13 +1951,9 @@ if [ "${OPENBOX_UPDATE_CORE_WAS_UP:-0}" = "1" ] || { [ -x "$CORE_SVC" ] && "$COR
 fi
 
 info "停止服务..."
+stop_core_for_commit
 if [ -x "$PANEL_SVC" ]; then
   "$PANEL_SVC" stop >/dev/null 2>&1 || true
-fi
-if [ -x "$CORE_SVC" ]; then
-  # 会顺带触发 P5 的安全清理(摘掉指向旧内核的 DNS 接管、移除 v6 拦截),
-  # 这正是升级窗口期间希望的状态:内核马上要被换掉,不该让残留的接管卡住 LAN 上网。
-  "$CORE_SVC" stop >/dev/null 2>&1 || true
 fi
 
 info "替换 node/ panel/ bin/ openwrt/(保留 data/ 与 etc/)..."
