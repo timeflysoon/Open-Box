@@ -30,16 +30,21 @@
 - `internal/leafgolden/` 只有测试:上面几个叶子包统一对照旧实现的金标准
 - `internal/jsx/` 复刻旧 Node 实现用到的 JS 语义(Number() 转换、trim、undefined 与 null 的区别)
 - `testdata/` 金标准:同一份输入喂旧版 Node 实现(backup 分支)得到的输出;
-  `gen-golden.mjs`、`gen-plans-golden.mjs`、`gen-groups-golden.mjs`、`gen-emit-golden.mjs`、`gen-leaf-golden.mjs`、`gen-dns-golden.mjs`、`gen-route-golden.mjs` 可重新生成(用法见脚本开头注释)
+  `gen-golden.mjs`、`gen-plans-golden.mjs`、`gen-groups-golden.mjs`、`gen-emit-golden.mjs`、`gen-leaf-golden.mjs`、`gen-dns-golden.mjs`、`gen-route-golden.mjs` 可重新生成(用法见脚本开头注释)。
+  基线的 `panel/server/engine/` 已不在当前分支(同步提交把 server 换掉了),要从历史里取:`git archive 0c9d530 panel/server/engine | tar -x -C <临时目录>`,上层补一个 `{"type":"module"}` 的 package.json
 - `scripts/` 构建脚本
 - `singbox/` 预留
 
 ## 对照基准(基线)
 以 catch-up-upstream 分支 `panel/server/engine/` 里的明文源码为准(v0.1.318 快照,提交 0c9d530;它不随同步更新,
 `index.mjs` 里压缩的 v0.1.342 只做增量核对)。早先的金标准是用 backup 分支(9 月 13 日)的旧版生成的,正在逐个模块改用新基线重新生成。
-已按新基线对齐:clientroutes(终端分流的 match / admit)、emit(http 出站、hysteria2 端口跳跃、detour、ws 的 alpn 限制)、groups(手动页签、可接受状态码、链式节点不进动态组、静态组可选内置直连/拒绝)。routing 的模型、迁移、指纹和 plans(classes、forwardPlan、bypassPlan、entryPlan 含 whitelist;备注、随包规则库缺失规则集的过滤、LEGACY 字段、指纹排除 default / notes)。
-**尚未对齐**:`routing/dns.go`、`routing/route.go`(还是按 backup 旧版移植的,金标准测试已暂时跳过;上游 dns.mjs 多了上游 DNS 备用、按终端答解析、
-HTTPS 记录规则、规则归属表等,routing.mjs 改成「IP 只管 IP、域名只管域名」)。pre_resolve / rulesets.go / urlhost.go 同理待核。
+已按新基线对齐:clientroutes(终端分流的 match / admit,以及 dns 用的 SourceMatch / TerminalDNSRedirected)、emit(http 出站、hysteria2 端口跳跃、detour、ws 的 alpn 限制)、groups(手动页签、可接受状态码、链式节点不进动态组、静态组可选内置直连/拒绝)。routing 的模型、迁移、指纹和 plans(classes、forwardPlan、bypassPlan、entryPlan 含 whitelist;备注、随包规则库缺失规则集的过滤、LEGACY 字段、指纹排除 default / notes)。
+**dns**(`routing/dns.go`,对应 dns.mjs 的 buildDnsWithResolvers)及它的两个叶子模块 `routing/dnsupstream.go`(对应 dns-upstream.mjs:上游 DNS 记号 wan、直连 / 代理上游与备用上游、端口协议、`dnsServerEntry`)、
+`routing/flip.go`(对应 flip.mjs:热切换开关 tag、`andRule`、`flipFlagMap`、占位规则集):备用上游并发竞速、站点集 / 兜底的热切换成对规则、按终端答解析(dns-terminal-direct)、
+HTTPS / SVCB 空应答、dnsmasq 模式本地主机名、FakeIP(198.19.0.0/16)、IPv6 分层、规则归属表 `ruleOwners`。金标准 `testdata/dns_golden.json` 已换成新基线生成。
+只有 Node 进程用、不属于 core 的没有移植:dns-upstream 的 regionDnsDefaults / regionDnsError、dns 的 directResolverServers / applyProxyUpstreamRoutes / dnsPolicyClasses、flip 的 flattenFlipRule。
+**尚未对齐**:`routing/route.go`(还是按 backup 旧版移植的,金标准测试已暂时跳过;routing.mjs 改成「IP 只管 IP、域名只管域名」,路由规则也要像 dns 一样包热切换开关)。pre_resolve 同理待核;
+`rulesets.go`(routeRulesetTags / dnsRulesetTags / policyOutboundOptions / splitRuleSetConditions)和 `urlhost.go` 已对 v0.1.318 的 routing-model.mjs 逐条核过,dns 的金标准里也覆盖到了。
 **有明文基线的**之外还有一个已知缺口:`ignoreProxyClients`(bypassPlan 的选项)是 v0.1.318 之后才有的,按旧实现保留,没有明文可对照。
 快照 v0.1.318 到上游当前 v0.1.342 之间,engine/ 可能还有行为变化,整体对齐完之后要用 index.mjs 里压缩的版本再做一轮增量核对。
 
@@ -55,11 +60,12 @@ chainNodes / dnsRuleOwners,这几项没有旧代码可对照)。
 - 阶段 A(叶子模块,有金标准):**已完成**(emit、ipx、clientroutes、servers、directhosts、dnsrewrite)
 - 阶段 B:
   - dnsfilter:**已完成**
-  - dns(`routing/dns.go`,对应旧 dns.mjs 的 buildDnsWithResolvers)及它用到的规则集函数
+  - dns(`routing/dns.go` + `dnsupstream.go` + `flip.go`,对应基线 dns.mjs / dns-upstream.mjs / flip.mjs)及它用到的规则集函数
     (`routing/rulesets.go`:routeRulesetTags / dnsRulesetTags / policyOutboundOptions / splitRuleSetConditions)、
-    `routing/urlhost.go`(extractHost:按 WHATWG 规则取 `new URL().hostname`,对 Node 做过两万条差分):**已完成**,
-    金标准 `testdata/dns_golden.json`(`gen-dns-golden.mjs` 生成),做过变异测试
-  - routing(`routing/route.go`,对应旧 routing.mjs 的 buildRoute):**已完成**,金标准 `testdata/route_golden.json`
-    (`gen-route-golden.mjs` 生成),做过变异测试。旧文件里的 preResolveRules 正式生成不启用(config.mjs 不传 resolvers),没有移植
+    `routing/urlhost.go`(extractHost:按 WHATWG 规则取 `new URL().hostname`,对 Node 做过两万条差分):**已按新基线对齐**,
+    金标准 `testdata/dns_golden.json`(`gen-dns-golden.mjs` 生成,1000 条 buildDns + upstream / flip / 终端分流判定的直接对照),
+    做过变异测试(28 个变异全部被抓到)
+  - routing(`routing/route.go`,对应 routing.mjs 的 buildRoute):**待按新基线对齐**(目前是旧版移植,金标准 `testdata/route_golden.json`
+    是旧基线生成的,测试暂时跳过)。旧文件里的 preResolveRules 正式生成不启用(config.mjs 不传 resolvers),没有移植
 - 阶段 C:buildConfig 装配(阶段 B 的零件已齐),以及新增字段和 dnsRuleOwners
 - 阶段 D:旧 JS 金标准 + 真实 sing-box 1.13.14 `check` + 对照 templates/reference-1.13.14.json

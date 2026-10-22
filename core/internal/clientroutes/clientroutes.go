@@ -186,3 +186,66 @@ func NormalizeClientRoutes(list any, directTag any) []Route {
 	}
 	return out
 }
+
+// SourceMatch:一条整理过的终端规则在路由 / DNS 规则里的来源条件。按 IP 的写 source_ip_cidr,
+// 按 MAC 的写 source_mac_address(sing-box 1.14,内核按邻居表 / DHCP 租约认 MAC);没有终端的返回 nil。
+func SourceMatch(cr Route) map[string]any {
+	if cr.Match == "mac" {
+		if len(cr.Macs) > 0 {
+			return map[string]any{"source_mac_address": cr.Macs}
+		}
+		return nil
+	}
+	if len(cr.Sources) > 0 {
+		return map[string]any{"source_ip_cidr": cr.Sources}
+	}
+	return nil
+}
+
+// IsDirectClientRoute:终端分流里出口是「直连」的终端(不含「不进内核」那种):连接进了内核也是直连。
+func IsDirectClientRoute(cr Route, directTag string) bool {
+	return !cr.Bypass && directTag != "" && cr.Outbound == directTag
+}
+
+// IsProxyClientRoute:终端分流里出口是节点 / 节点组的终端(不是直连、拒绝,也不是「不进内核」)。
+func IsProxyClientRoute(cr Route, directTag, blockTag string) bool {
+	return !cr.Bypass && cr.Outbound != "" && cr.Outbound != directTag && cr.Outbound != blockTag
+}
+
+// TerminalDNSOptions 对应 terminalDnsRedirected 的第二个参数。缺省值(JS 解构默认值):dnsMode 'hijack'、
+// autoRedirect false、directBypass true、splitDns true。Go 这边没有「缺省」,调用方按上面的默认值填。
+type TerminalDNSOptions struct {
+	DNSMode      string
+	AutoRedirect bool
+	DirectBypass bool
+	SplitDNS     bool
+	DirectTag    string
+	BlockTag     string
+}
+
+// TerminalDNSRedirected:哪些终端的 DNS 要由内核按终端答——入口把它们的查询转给内核的 DNS 入站,
+// 内核才看得到是哪台终端在查。要按终端答的有三类:
+//   - 「不进内核」的终端;
+//   - 出口是「直连」、会在首包预判时放行的终端(「直连不进内核」开着、有 nft 重定向)——只有 dnsmasq 模式要转,
+//     劫持模式下它们的查询内核本来就接得到;
+//   - dnsmasq 模式下出口是节点 / 节点组的终端(整台进内核,解析也跟着它的出口)。
+//
+// 拒绝的终端整台进内核,dnsmasq 模式下解析仍按域名规则答。没开分流解析(dns.split)时所有查询都是直连解析,不用转。
+func TerminalDNSRedirected(cr Route, o TerminalDNSOptions) bool {
+	if !o.AutoRedirect || !o.SplitDNS {
+		return false
+	}
+	if o.DNSMode != "dnsmasq" && o.DNSMode != "hijack" {
+		return false
+	}
+	if cr.Bypass {
+		return true
+	}
+	if o.DNSMode != "dnsmasq" {
+		return false
+	}
+	if IsProxyClientRoute(cr, o.DirectTag, o.BlockTag) {
+		return true
+	}
+	return o.DirectBypass && IsDirectClientRoute(cr, o.DirectTag)
+}

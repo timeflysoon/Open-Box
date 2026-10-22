@@ -1,7 +1,8 @@
-// 生成 DNS 配置(旧 engine/dns.mjs 的 buildDnsWithResolvers)的金标准,以及 extractHost 的对照用例。
-// 用法: node core/testdata/gen-dns-golden.mjs <旧 engine 目录> [输出文件]
-//   旧 engine 目录取自 origin/backup:panel/server/engine(要含 dns.mjs、routing-model.mjs、rule-list.mjs、
-//   dns-names.mjs、dns-rewrite.mjs),且上层要有 {"type":"module"} 的 package.json。
+// 生成 DNS 配置(上游 engine/dns.mjs 的 buildDnsWithResolvers)的金标准,以及 dns-upstream / flip 纯函数、extractHost 的对照用例。
+// 用法: node core/testdata/gen-dns-golden.mjs <engine 目录> [输出文件]
+//   engine 目录取自 catch-up-upstream 的 0c9d530(v0.1.318 快照,同步提交里 panel/server/ 已被换掉,要从历史里取):
+//     git archive 0c9d530 panel/server/engine | tar -x -C <临时目录>
+//   且上层(panel/server/)要有 {"type":"module"} 的 package.json。
 import { writeFileSync } from 'node:fs'
 import { pathToFileURL } from 'node:url'
 import { resolve } from 'node:path'
@@ -9,7 +10,7 @@ import { resolve } from 'node:path'
 const dir = resolve(process.argv[2] || '.')
 const out = resolve(process.argv[3] || new URL('./dns_golden.json', import.meta.url).pathname)
 const imp = (f) => import(pathToFileURL(resolve(dir, f)).href)
-const [dnsMod, rl] = await Promise.all([imp('dns.mjs'), imp('rule-list.mjs')])
+const [dnsMod, rl, crMod, upMod, flipMod, rm] = await Promise.all([imp('dns.mjs'), imp('rule-list.mjs'), imp('client-routes.mjs'), imp('dns-upstream.mjs'), imp('flip.mjs'), imp('routing-model.mjs')])
 
 let seed = 4242
 const rnd = () => {
@@ -80,16 +81,38 @@ const ruleLists = () => {
   for (const t of LIST_TAGS) if (chance(0.7)) o[t] = pick([{ domain: true, ip: true }, { domain: true, ip: false }, { domain: false, ip: true }, { domain: false, ip: false }, null, true, {}])
   return o
 }
+// 终端分流:造原始规则(含 mac / bypass / admit / 停用 / 缺出口),再走真实的 normalizeClientRoutes,
+// 保证喂给 buildDns 的形状和生产里一样(Node 先整理再传进来)
 const clientRoutes = (b) => {
-  if (chance(0.5)) return pick([undefined, []])
-  return Array.from({ length: 1 + Math.floor(rnd() * 3) }, (_, i) => ({
-    id: 'c' + i, name: 'n' + i, sources: some(['192.168.1.5/32', '192.168.1.0/24', '10.0.0.7/32'], 2).concat(['192.168.9.9/32']),
-    outbound: pick([b ? b.direct : 'direct', b ? b.block : 'block', '美国', '节点组A', '节点组B', '不存在的出口']),
-  }))
+  if (chance(0.45)) return pick([undefined, []])
+  const raw = Array.from({ length: 1 + Math.floor(rnd() * 5) }, (_, i) => {
+    const kind = pick(['ip', 'ip', 'ip', 'mac', 'bypass-ip', 'bypass-mac', 'admit'])
+    const r = {
+      id: 'c' + i, name: 'n' + i, enabled: chance(0.93),
+      outbound: pick([b ? b.direct : 'direct', b ? b.block : 'block', '美国', '节点组A', '节点组B', '不存在的出口', '', undefined]),
+    }
+    if (kind === 'mac' || kind === 'bypass-mac') { r.match = 'mac'; r.macs = some(['AA:BB:CC:00:11:22', 'aa-bb-cc-00-11-33', 'bad-mac', '00:11:22:33:44:55'], 2) }
+    else r.sources = some(['192.168.1.5', '192.168.1.0/24', '10.0.0.7/32', 'fe80::1%eth0', '2001:db8::/32', 'bad'], 3)
+    if (kind.startsWith('bypass')) r.bypass = true
+    if (kind === 'admit') r.admit = true
+    if (chance(0.1)) delete r.match
+    return r
+  })
+  return crMod.normalizeClientRoutes(raw, { directTag: chance(0.9) ? (b ? b.direct : 'direct') : '' })
 }
 
 // ---- 档案(profile)里和 DNS 有关的部分 ----
-const PROXIES = ['1.1.1.1', '8.8.8.8', 'tcp://1.1.1.1', 'https://dns.google/dns-query', 'tls://[2001:4860:4860::8888]:853', '8.8.4.4:53', 'DNS.Google', undefined, null, '', 5]
+const PROXIES = ['1.1.1.1', '8.8.8.8', '1.1.1.1', 'tcp://1.1.1.1', 'https://1.1.1.1/dns-query', 'https://dns.google/dns-query', 'tls://[2001:4860:4860::8888]:853',
+  '[2001:4860:4860::8888]', '2001:4860:4860::8888', '8.8.4.4:53', 'DNS.Google', ' 8.8.8.8 ', '[ 1.1.1.1 ]', '0.0.0.0', '::', '1:2:3:4:5:6:7:8:9', 'wan', 'wan', undefined, null, '', 5]
+const DIRECTS = [undefined, 'wan', 'wan', 'wan', '223.5.5.5', '119.29.29.29', '', 'https://223.5.5.5/dns-query', '[2400:3200::1]', '2400:3200::1', 'example.com', ' 1.1.1.1 ', '0.0.0.0', 5, null]
+const PROTOCOLS = [undefined, undefined, 'udp', 'tcp', 'tls', 'https', '', 5]
+const PORTS = [undefined, undefined, undefined, 53, 853, 5353, 0, 65536, 53.5, '53', null, 65535, 1]
+const extraItem = () => pick([
+  { server: 'wan' }, { server: 'wan', protocol: 'tcp', port: 5353 }, { server: '8.8.8.8', protocol: 'udp', port: 5353 }, { server: '1.0.0.1' }, { server: '1.1.1.1' },
+  { server: '223.5.5.5' }, { server: 'dns.google' }, { server: '2606:4700:4700::1111', protocol: 'tcp' }, { server: 'https://9.9.9.9/dns-query' },
+  { server: '' }, { server: 5 }, {}, null, 0, 'str', [],
+])
+const extras = () => (chance(0.5) ? undefined : pick([[], [], Array.from({ length: Math.floor(rnd() * 6) }, extraItem)]))
 const rewrite = () => (chance(0.65) ? undefined : {
   enabled: chance(0.85), initialized: chance(0.6),
   rules: Array.from({ length: Math.floor(rnd() * 4) }, () => (chance(0.5)
@@ -98,8 +121,10 @@ const rewrite = () => (chance(0.65) ? undefined : {
 })
 const profile = () => ({
   dns: {
-    mode: pick(['hijack', 'hijack', 'hijack', 'dnsmasq', 'off']),
-    split: chance(0.88), proxy: pick(PROXIES), direct: pick([undefined, undefined, '223.5.5.5', '119.29.29.29', '']),
+    mode: pick(['hijack', 'hijack', 'hijack', 'dnsmasq', 'dnsmasq', 'off']),
+    split: chance(0.9), proxy: pick(PROXIES), proxyProtocol: pick(PROTOCOLS), proxyPort: pick(PORTS), proxyExtras: extras(),
+    direct: pick(DIRECTS), directProtocol: pick(PROTOCOLS), directPort: pick(PORTS), directExtras: extras(),
+    region: pick([undefined, 'cn', 'intl', 'x']),
     fakeIpForProxy: chance(0.4), rewrite: rewrite(),
   },
   ipv6: chance(0.55), ipv6Proxy: pick(['node', 'ipv4', 'bypass', undefined, 'x']),
@@ -117,20 +142,88 @@ const add = (args) => {
     cases.push({ fn: 'buildDns', args: input, want: rt(dnsMod.buildDnsWithResolvers(p2, opts)) })
   } catch (e) { cases.push({ fn: 'buildDns', args: input, error: e.constructor.name }) }
 }
-for (let i = 0; i < 900; i++) {
+for (let i = 0; i < 1000; i++) {
   const b = builtin()
   const p = profile()
-  if (i % 60 === 7) p.dns = pick([null, undefined])
+  if (i % 80 === 7) p.dns = pick([null, undefined])
   const dh = chance(0.5) ? { domains: some(['dh1.com', 'dh2.net', 'node.example.org'], 3), cidrs: [] } : pick([null, undefined])
   const known = chance(0.4) ? undefined : [...new Set(['direct', 'block', '直连', '拒绝', ...some(['美国', '香港', '节点组A', '节点组B', '节点1', '节点2'], 5)])]
   const opts = {
-    systemDns: pick([undefined, undefined, [], ['223.5.5.5'], [null, '8.8.8.8'], ['', 0], [5], 'x']),
+    systemDns: pick([undefined, undefined, [], ['223.5.5.5'], ['192.168.1.1', '192.168.1.2'], [null, '8.8.8.8'], ['', 0], [5], 'x', ['2400:3200::1']]),
     groupTags: groupTags(b), builtin: b, selections: selections(), directHosts: dh, ruleLists: ruleLists(),
+    directHostSets: chance(0.4) ? { domain: 'ob-direct-domain', ip: 'ob-direct-ip' } : undefined,
     clientRoutes: clientRoutes(b), knownOutbounds: known,
     filterRules: chance(0.2) ? [{ rule_set: ['f-block'], action: 'predefined', rcode: 'NXDOMAIN' }] : undefined,
+    terminalDns: chance(0.3) ? undefined : { autoRedirect: chance(0.65), directBypass: pick([true, false, undefined]), admitDirect: pick(['', '', 'dns-in-direct']) },
   }
   add([p, opts])
 }
+
+// ---- dns-upstream 纯函数的对照用例 ----
+const UP_VALUES = ['1.1.1.1', ' 1.1.1.1 ', '0.0.0.0', '255.255.255.255', '256.1.1.1', '01.1.1.1', '1.1.1', '::', '::1', '2001:db8::1', '2001:DB8::1', '1::2::3', '1:2:3:4:5:6:7:8', '1:2:3:4:5:6:7:8:9', ':::',
+  '[::1]', '[2001:db8::1]', '[ 1.1.1.1 ]', '[1.1.1.1]', '1.1.1.1]', '[1.1.1.1', '[]', '[', ']', 'wan', 'example.com', 'fe80::1%eth0', 'g::1', '', '   ', '\t1.1.1.1\n',
+  'https://1.1.1.1/dns-query', 'tcp://1.1.1.1:53', 'tls://[2001:4860:4860::8888]:853', 'udp://8.8.8.8', 'HTTPS://8.8.4.4', 'https://dns.google/dns-query', 'https://[::1]/x', 'h2+x://1.1.1.1', 'a1b://1.1.1.1', 'a.b-c://9.9.9.9',
+  'https://0x7f.1/', 'https://127.1', 'https://1.1.1.1.', 'https://u:p@1.1.1.1', 'https://', 'tcp://', '://1.1.1.1', '1x://1.1.1.1', 'ſ://1.1.1.1', 'K://1.1.1.1', '1.1.1.1:53', '1.1.1.1/dns-query',
+  null, undefined, 5, true, {}, [], ['1.1.1.1']]
+for (const v of UP_VALUES) {
+  cases.push({ fn: 'normalizeDnsUpstream', args: v === undefined ? [] : [v], want: upMod.normalizeDnsUpstream(v) })
+  cases.push({ fn: 'isValidDnsUpstream', args: v === undefined ? [] : [v], want: upMod.isValidDnsUpstream(v) })
+}
+
+// ---- flip 纯函数的对照用例:用 normalizeRouting 的结果 ----
+for (let i = 0; i < 120; i++) {
+  const r = routing()
+  const conf = rm.normalizeRouting(r)
+  const names = [...conf.activePolicies.map((x) => x.name), conf.fallback.name]
+  const classes = {}
+  for (const n of [...names, '不在 conf 里的']) if (chance(0.8)) classes[n] = pick(['direct', 'proxy', 'block', '美国'])
+  cases.push({
+    fn: 'flip', args: [rt(r), classes],
+    want: {
+      flagMap: [...flipMod.flipFlagMap(conf)],
+      flagStates: flipMod.flipFlagStates(conf, classes),
+      bypassCandidates: flipMod.flipBypassCandidates(conf),
+      flagTags: conf.activePolicies.map((x) => flipMod.flipFlagTag(x)),
+    },
+  })
+}
+// flipFlagTag 的边界:id 优先、没有 id 退到名字、都没有退到空串(normalizeRouting 总会补 id,经 buildDns 走不到这几条)
+for (const pol of [{ id: 'policy-0', name: 'A' }, { id: '', name: 'abc' }, { name: '中文名' }, { id: 'x' }, {}, { id: 'a', name: 'b' }, { id: '😀', name: '' }]) {
+  cases.push({ fn: 'flipFlagTag', args: [pol], want: flipMod.flipFlagTag(pol) })
+}
+
+// 终端分流的 DNS 判定:所有组合穷举(经 buildDns 时劫持模式短路、dnsmasq 之外的模式根本不问,单独对照)
+{
+  const routes = [
+    { id: 'b', name: 'b', match: 'ip', outbound: 'direct', bypass: true, sources: ['10.0.0.1/32'] },
+    { id: 'bm', name: 'bm', match: 'mac', outbound: 'direct', bypass: true, sources: [], macs: ['aa:bb:cc:00:11:22'] },
+    { id: 'd', name: 'd', match: 'ip', outbound: 'direct', sources: ['10.0.0.2/32'] },
+    { id: 'x', name: 'x', match: 'ip', outbound: 'block', sources: ['10.0.0.3/32'] },
+    { id: 'p', name: 'p', match: 'ip', outbound: '美国', sources: ['10.0.0.4/32'] },
+    { id: 'pm', name: 'pm', match: 'mac', outbound: '美国', sources: [], macs: ['aa:bb:cc:00:11:33'] },
+    { id: 'e', name: 'e', match: 'ip', outbound: '直连', sources: ['10.0.0.5/32'] },
+    { id: 'n', name: 'n', match: 'mac', outbound: 'direct', sources: [], macs: [] },
+    { id: 'n2', name: 'n2', match: 'ip', outbound: 'direct', sources: [] },
+  ]
+  for (const cr of routes) {
+    cases.push({ fn: 'clientSourceMatch', args: [cr], want: crMod.clientSourceMatch(cr) ?? null })
+    for (const dnsMode of ['hijack', 'dnsmasq', 'off', 'x'])
+      for (const autoRedirect of [true, false])
+        for (const directBypass of [true, false, undefined])
+          for (const splitDns of [true, false])
+            for (const [directTag, blockTag] of [['direct', 'block'], ['直连', '拒绝'], ['', '']]) {
+              const o = { dnsMode, autoRedirect, directBypass, splitDns, directTag, blockTag }
+              cases.push({ fn: 'terminalDnsRedirected', args: [cr, o], want: crMod.terminalDnsRedirected(cr, o) })
+            }
+  }
+}
+
+cases.push({ fn: 'flipConsts', args: [], want: {
+  fallback: flipMod.FLIP_FALLBACK_TAG, bypassTag: flipMod.flipBypassTag('geoip-cn'), needTag: flipMod.flipNeedTag('geoip-cn'), needFixed: flipMod.FLIP_NEED_FIXED,
+  on: flipMod.FLIP_FLAG_ON, off: flipMod.FLIP_FLAG_OFF, content: [flipMod.flipFlagContent(true), flipMod.flipFlagContent(false)], placeholderSource: flipMod.flipPlaceholderSource(),
+  placeholderSrs: flipMod.FLIP_PLACEHOLDER_SRS_BASE64, placeholder: flipMod.FLIP_BYPASS_PLACEHOLDER,
+  fakeIpCachePath: dnsMod.fakeIpCachePath('/var/lib/openbox/cache.db'), v4: dnsMod.FAKEIP_V4, v6: dnsMod.FAKEIP_V6,
+} })
 
 // ---- extractHost(dns.mjs 里没导出,这里原样抄一份) ----
 const extractHost = (url) => {
@@ -168,11 +261,15 @@ console.log('写入', cases.length, '条 →', out)
 console.log('buildDns:', dnsCases.length, '条,其中抛错', dnsCases.filter((c) => c.error).length)
 console.log(' 未分流(split=false):', cnt((d) => !d.servers.some((s) => s.tag === 'dns-proxy')))
 console.log(' 含 fakeip:', cnt((d) => d.servers.some((s) => s.type === 'fakeip')))
-console.log(' 含 dns-custom-*:', cnt((d) => d.servers.some((s) => /^dns-custom-/.test(s.tag))))
-console.log(' 含 dns-client-*:', cnt((d) => d.servers.some((s) => /^dns-client-/.test(s.tag))))
-console.log(' 含 dns-policy-*:', cnt((d) => d.servers.some((s) => /^dns-policy-/.test(s.tag))))
-console.log(' 含 AAAA 预定义空答案:', cnt((d) => (d.rules || []).some((r) => r.rcode === 'NOERROR')))
-console.log(' 含规则集拆分(同一 server 相邻两条):', cnt((d) => (d.rules || []).some((r, i) => i && r.rule_set && d.rules[i - 1].rule_set === undefined && d.rules[i - 1].server === r.server)))
+console.log(' 含 AAAA 预定义空答案:', cnt((d) => (d.rules || []).some((r) => r.rcode === 'NOERROR' && JSON.stringify(r).includes('AAAA'))))
+console.log(' 含 HTTPS 空应答规则:', cnt((d) => (d.rules || []).some((r) => Array.isArray(r.query_type) && r.query_type[0] === 'HTTPS')))
+console.log(' 含竞速(race):', cnt((d) => (d.rules || []).some((r) => r.race === true)))
+console.log(' 含直连备用上游(dns-direct__alt):', cnt((d) => d.servers.some((s) => /^dns-direct__alt/.test(s.tag))))
+console.log(' 含代理备用上游(dns-proxy__alt):', cnt((d) => d.servers.some((s) => /^dns-proxy__alt/.test(s.tag))))
+console.log(' 含 dns-terminal-direct:', cnt((d) => d.servers.some((s) => s.tag === 'dns-terminal-direct')))
+console.log(' 含 dns-local:', cnt((d) => d.servers.some((s) => s.tag === 'dns-local')))
+console.log(' 含热切换开关(obflip-):', cnt((d) => JSON.stringify(d.rules || []).includes('obflip-')))
 console.log(' 含 list-* 规则集:', cnt((d) => JSON.stringify(d.rules || []).includes('list-')))
 console.log(' 含 dns-rewrite:', cnt((d) => d.servers.some((s) => s.tag === 'dns-rewrite')))
-console.log(' final=dns-direct/dns-proxy:', cnt((d) => d.final === 'dns-direct'), cnt((d) => d.final === 'dns-proxy'))
+console.log(' 含 server_port:', cnt((d) => d.servers.some((s) => s.server_port !== undefined)))
+console.log(' 有 ruleOwners:', dnsCases.filter((c) => c.want && c.want.ruleOwners.length).length, ',kinds:', [...new Set(dnsCases.flatMap((c) => (c.want ? c.want.ruleOwners.map((o) => o.kind) : [])))].join('/'))
