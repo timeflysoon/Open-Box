@@ -476,9 +476,23 @@ flush_system_dns_cache() {
   return 0
 }
 prepare_core_for_fetch() {
+  _pc_restored=0
+  [ "$OPENBOX_CORE_SUSPENDED" = "1" ] && _pc_restored=1
   restore_core_if_suspended || die "恢复升级入口暂停的内核失败，未开始下载升级内容。"
   _scs=$(openbox_core_service)
   [ -n "$_scs" ] || return 0
+  # 旧升级入口(≤0.1.345)会先把内核停掉再接力,这里刚把它拉起来:procd 起实例
+  # 要几秒,状态可能还是 starting。此时直接按“没在跑”处理会退回系统网络,而系统
+  # 网络此刻仍在内核遗留的 FakeIP / dnsmasq 接管状态下,镜像探测全部超时失败
+  # (0.1.345→346 实测)。刚由本函数拉起的,先等它真的 running 再决定下载网络。
+  if [ "$_pc_restored" = "1" ]; then
+    _pc_wait=0
+    while ! "$_scs" status 2>/dev/null | grep -q running; do
+      [ "$_pc_wait" -lt 30 ] || break
+      sleep 1
+      _pc_wait=$((_pc_wait + 1))
+    done
+  fi
   if "$_scs" status 2>/dev/null | grep -q running; then
     # 和面板测速共用的固定 mixed 入站。CONNECT 将域名交给内核，避免本机 / 上游
     # 缓存的 FakeIP 或入口旁路影响升级连接；仍按用户原有规则选择直连或代理。
