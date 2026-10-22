@@ -68,6 +68,10 @@ func TestHostnameKnown(t *testing.T) {
 		{"https://xn--.example.com/", "", false},
 		{"https://xn--a.example.com/", "", false},
 		{"https://xn--fiq228c.example.com/", "xn--fiq228c.example.com", true},
+		// 解出来只有 ASCII 的 xn-- 标签(xn--a- 解成 a)Node 照收
+		{"https://xn--a-.example.com/", "xn--a-.example.com", true},
+		{"https://xn--abc-/", "xn--abc-", true},
+		{"https://xn--ab--/", "xn--ab--", true},
 		{"https://h.example.com:99999/", "", false},
 		{"file://a:", "", true},
 		{"foo:opaque", "", true},

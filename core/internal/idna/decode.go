@@ -86,21 +86,18 @@ func punycodeDecode(s string) ([]rune, bool) {
 	return out, true
 }
 
-// validACELabel 检查以 xn-- 开头的纯 ASCII 标签:必须是合法 punycode,解出来非空,且至少含一个非 ASCII 字符。
+// validACELabel 检查以 xn-- 开头的纯 ASCII 标签:必须是合法 punycode,解出来非空,且不含 UTS46 的禁用字符。
+// 解出来只有 ASCII 的(如 xn--a-,解成 a)Node 照收,不能因此拒绝。
 func validACELabel(l string) bool {
 	dec, ok := punycodeDecode(l[4:])
 	if !ok || len(dec) == 0 {
 		return false
 	}
-	nonASCII := false
 	for _, r := range dec {
 		// 解出来的字符不能是 UTS46 的禁用字符(最常见的几类:C1 控制字符、替换符、非字符)
 		if (r >= 0x80 && r <= 0x9f) || r == 0xFFFD || r == 0xFFFE || r == 0xFFFF {
 			return false
 		}
-		if r > 0x7f {
-			nonASCII = true
-		}
 	}
-	return nonASCII
+	return true
 }
