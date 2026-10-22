@@ -1,7 +1,8 @@
 // 生成「configDetailed 叶子模块」的金标准:IP/CIDR 工具、终端分流、服务端入站、直连主机、DNS 重写。
-// 用法: node core/testdata/gen-leaf-golden.mjs <旧 engine 目录> [输出文件]
-//   旧 engine 目录要含 client-routes.mjs、servers.mjs、direct-hosts.mjs、dns-rewrite.mjs、dns-names.mjs,
-//   以及 local-subnets.mjs(来自 origin/backup:panel/server/system/local-subnets.mjs);且需要 {"type":"module"} 的 package.json。
+// 基线:上游 v0.1.318 快照(tag engine-snapshot)里 panel/server/engine/ 的明文源码。
+// 用法: node core/testdata/gen-leaf-golden.mjs <engine 基线目录> [输出文件]
+//   目录要含 client-routes.mjs、servers.mjs、direct-hosts.mjs、dns-rewrite.mjs、dns-names.mjs、cidr.mjs;
+//   上层 panel/server/ 需要 {"type":"module"} 的 package.json。
 import net from 'node:net'
 import { writeFileSync } from 'node:fs'
 import { pathToFileURL } from 'node:url'
@@ -10,7 +11,7 @@ import { resolve } from 'node:path'
 const dir = resolve(process.argv[2] || '.')
 const out = resolve(process.argv[3] || new URL('./leaf_golden.json', import.meta.url).pathname)
 const imp = (f) => import(pathToFileURL(resolve(dir, f)).href)
-const [cr, sv, dh, dr, ls] = await Promise.all([imp('client-routes.mjs'), imp('servers.mjs'), imp('direct-hosts.mjs'), imp('dns-rewrite.mjs'), imp('local-subnets.mjs')])
+const [cr, sv, dh, dr, ls] = await Promise.all([imp('client-routes.mjs'), imp('servers.mjs'), imp('direct-hosts.mjs'), imp('dns-rewrite.mjs'), imp('cidr.mjs')])
 
 let seed = 31337
 const rnd = () => {
@@ -99,10 +100,19 @@ for (let i = 0; i < 250; i++) add('buildServerInbounds', [chance(0.05) ? garbage
 // ---------- 直连主机 ----------
 const HOSTS = ['a.com', 'B.EXAMPLE.com', 'localhost', '1.2.3.4', '999.1.1.1', '2001:db8::1', 'bad_host.com', 'nodot', '中文.com', 'sub.中文.cn', '', ' ', 'a b.com', 'x.com.']
 const URLS = ['https://sub.example.com/path?x=1', 'http://Example.COM:8443/a', 'https://1.2.3.4:443/x', 'http://[2001:db8::1]:80/', 'http://[2001:DB8:0:0:0:0:0:1]/', 'sub.example.com/path', 'ss://user@h.example.org:1/#n',
-  'https://中文.com/订阅', 'ftp://files.example.net/', 'mailto:a@b.com', '//host.com/x', 'http://', 'http://a b.com/', 'http://a.com:abc/', ' https://trim.example.com ', 'https://u:p@auth.example.com/', 'HTTPS://UP.EXAMPLE.COM', 'http://localhost:8080/', 'https://[::1]/', 'https://a.com./', '', 5, null, 'vmess://abcd==']
+  'https://中文.com/订阅', 'ftp://files.example.net/', 'mailto:a@b.com', '//host.com/x', 'http://', 'http://a b.com/', 'http://a.com:abc/', ' https://trim.example.com ', 'https://u:p@auth.example.com/', 'HTTPS://UP.EXAMPLE.COM', 'http://localhost:8080/', 'https://[::1]/', 'https://a.com./', '', 5, null, 'vmess://abcd==',
+  // 奇怪写法:IPv4 简写 / 反斜杠 / userinfo / 无斜杠 / 非特殊协议 / 非法 punycode / 端口越界(WHATWG 主机解析)
+  'http://0x7f.1/', 'http://127.1:80/', 'http://1.2.3/', 'http://0300.0250.1.1/', 'http://4294967295/', 'http://4294967296/', 'http://1.2.3.4.5/', 'http://256.1.1.1/', 'http:\\\\back.example.com\\path', 'https:/one.example.com/', 'https:noslash.example.com/x', 'https://u:p@at.example.com:8080/', 'https://a@b@c.example.com/', 'https://:@e.example.com/', 'https://h.example.com:99999/', 'https://h.example.com:0080/', 'https://h.example.com:/', 'https://[2001:db8:0:0:0:0:0:1]:8443/', 'https://[::ffff:1.2.3.4]/', 'https://[::]/', 'https://[1:2:3:4:5:6:7:8]/', 'https://[1::2::3]/', 'https://%41.example.com/', 'https://a%2eb.example.com/', 'https://a%zz.example.com/', 'https://xn--fiq228c.example.com/', 'https://xn--.example.com/', 'https://xn--a.example.com/', 'https://例え.jp/', 'https://пример.рф/', 'https://a_b.example.com/', 'https://a b.example.com/', 'https://a..b.com/', 'https://.a.com/', 'https://a.com../', 'file:///C:/x', 'file://host.example.com/x', 'foo://opaque.example.com/x', 'foo:opaque', 'foo:/x', 'a+b://plus.example.com/', '1http://x.com/', 'HTTP://MiXeD.ExAmPlE.CoM', 'ws://ws.example.com:80/', 'wss://wss.example.com/', '\thttps://tab.example.com/\n', 'https://tab\t.example.com/', 'https:// space.example.com/', 'https://[fe80::1%25eth0]/']
 const node = () => (chance(0.1) ? garbage() : { server: maybe(0.9, () => (chance(0.5) ? pick(HOSTS) : pick([5, null, true]))) })
 const sub = () => (chance(0.1) ? garbage() : { url: maybe(0.7, () => pick(URLS)), urls: maybe(0.5, () => (chance(0.1) ? garbage() : Array.from({ length: int(3) }, () => pick(URLS)))) })
 for (let i = 0; i < 250; i++) add('collectDirectHosts', [Array.from({ length: int(5) }, node), Array.from({ length: int(4) }, sub)], (n, s) => dh.collectDirectHosts(n, s))
+
+// 常量与规则集条目(config 装配用)
+const CDN = ['173.245.48.0/20', '104.16.0.0/13', '162.158.0.0/15', '131.0.72.0/22', '2606:4700::/32', '2a06:98c0::/29', '2c0f:f248::/32']
+const cdnLike = () => pick([() => pick(CDN), () => pick(CDN).replace(/\/\d+$/, '/' + (8 + int(24))), () => pick(CDN).replace(/\/\d+$/, '/' + (30 + int(3))), () => pick(CDN).split('/')[0], () => cidr(), () => cidr(), () => pick(['', ' ', 'x', null, 5, '1.2.3.4/8', '0.0.0.0/0', '::/0', '104.16.0.1', '8.8.8.8/32'])])()
+for (let i = 0; i < 300; i++) add('isSharedCdnCidr', [cdnLike()], (c) => dh.isSharedCdnCidr(c))
+for (const d of ['/opt/open-box/data/rulesets', '/tmp/x', '', 'a b', '中文/目录', '/trailing/']) add('nodeDirectRuleSets', [d], (dir) => dh.nodeDirectRuleSets(dir))
+add('nodeDirectConsts', [], () => ({ domainTag: dh.NODE_DIRECT_DOMAIN_TAG, ipTag: dh.NODE_DIRECT_IP_TAG, placeholder: dh.NODE_DIRECT_PLACEHOLDER, cdn: dh.SHARED_CDN_CIDRS }))
 
 // ---------- DNS 重写 ----------
 const DOMS = ['services.googleapis.cn', 'Example.COM', '*.example.com', '*.', '*', 'a*.com', 'x.com.', 'x.com..', '-bad.com', 'bad-.com', 'under_score.com', 'a..b', ' pad.com ', '', 'x'.repeat(64) + '.com', '*.*.com', 'ok-1.net', '中文.com', 5, null]

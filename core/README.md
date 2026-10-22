@@ -26,18 +26,18 @@
 - `internal/emit/` 节点 → sing-box 出站 / endpoint
 - `internal/ipx/` Node 同款 isIPv4/isIPv6 正则 + CIDR 运算(解析、重叠、包含、挖洞)
 - `internal/clientroutes/` 终端分流;`internal/servers/` 共享网络服务端入站;`internal/directhosts/` 订阅和节点站点直连;
-  `internal/dnsrewrite/` DNS 重写;`internal/idna/` 域名转 punycode
-- `internal/leafgolden/` 只有测试:上面几个叶子包统一对照旧实现的金标准
+  `internal/dnsrewrite/` DNS 重写;`internal/idna/` 域名转 punycode;`internal/urlx/` 按 WHATWG 规则取 `new URL(x).hostname`
+- `internal/leafgolden/` 只有测试:上面几个叶子包统一对照基线的金标准
 - `internal/jsx/` 复刻旧 Node 实现用到的 JS 语义(Number() 转换、trim、undefined 与 null 的区别)
-- `testdata/` 金标准:同一份输入喂旧版 Node 实现(backup 分支)得到的输出;
-  `gen-golden.mjs`、`gen-plans-golden.mjs`、`gen-groups-golden.mjs`、`gen-emit-golden.mjs`、`gen-leaf-golden.mjs`、`gen-dns-golden.mjs`、`gen-route-golden.mjs` 可重新生成(用法见脚本开头注释)。
-  基线的 `panel/server/engine/` 已不在当前分支(同步提交把 server 换掉了),要从历史里取:`git archive 0c9d530 panel/server/engine | tar -x -C <临时目录>`,上层补一个 `{"type":"module"}` 的 package.json
+- `testdata/` 金标准:同一份输入喂基线(engine 明文;urlx 用 Node 内置的 URL)得到的输出;
+  `gen-golden.mjs`、`gen-plans-golden.mjs`、`gen-groups-golden.mjs`、`gen-emit-golden.mjs`、`gen-leaf-golden.mjs`、`gen-dnsfilter-golden.mjs`、`gen-dns-golden.mjs`、`gen-route-golden.mjs`、`gen-urlx-golden.mjs` 可重新生成(用法见脚本开头注释)。
+  基线的 `panel/server/engine/` 已不在当前分支(同步提交把 server 换掉了),要从 tag 里取:`git archive engine-snapshot panel/server/engine panel/server/system/panel-port.mjs | tar -x -C <临时目录>`(servers.mjs 引了 system/panel-port.mjs),`<临时目录>/panel/server/` 下补一个 `{"type":"module"}` 的 package.json
 - `scripts/` 构建脚本
 - `singbox/` 预留
 
 ## 对照基准(基线)
 以 catch-up-upstream 分支 `panel/server/engine/` 里的明文源码为准(v0.1.318 快照,提交 0c9d530;它不随同步更新,
-`index.mjs` 里压缩的 v0.1.342 只做增量核对)。早先的金标准是用 backup 分支(9 月 13 日)的旧版生成的,正在逐个模块改用新基线重新生成。
+`index.mjs` 里压缩的 v0.1.342 只做增量核对)。
 已按新基线对齐:clientroutes(终端分流的 match / admit,以及 dns 用的 SourceMatch / TerminalDNSRedirected)、emit(http 出站、hysteria2 端口跳跃、detour、ws 的 alpn 限制)、groups(手动页签、可接受状态码、链式节点不进动态组、静态组可选内置直连/拒绝)。routing 的模型、迁移、指纹和 plans(classes、forwardPlan、bypassPlan、entryPlan 含 whitelist;备注、随包规则库缺失规则集的过滤、LEGACY 字段、指纹排除 default / notes)。
 **dns**(`routing/dns.go`,对应 dns.mjs 的 buildDnsWithResolvers)及它的两个叶子模块 `routing/dnsupstream.go`(对应 dns-upstream.mjs:上游 DNS 记号 wan、直连 / 代理上游与备用上游、端口协议、`dnsServerEntry`)、
 `routing/flip.go`(对应 flip.mjs:热切换开关 tag、`andRule`、`flipFlagMap`、占位规则集):备用上游并发竞速、站点集 / 兜底的热切换成对规则、按终端答解析(dns-terminal-direct)、
@@ -47,7 +47,14 @@ HTTPS / SVCB 空应答、dnsmasq 模式本地主机名、FakeIP(198.19.0.0/16)�
 「IP 只管 IP、域名只管域名」(按 IP 判的那份规则带 `domain_regex` 的「连接没有域名」前提,前置自定义分流的规则集链接拆成域名 / IP 两条)、屏蔽 QUIC(UDP 443 reject)、
 首包预判放行(bypass,排在 sniff 前面)、名单外终端的专用 DNS 入站、NTP 对时直连、订阅和节点站点直连的两份本地规则集、终端分流按 MAC 匹配。金标准 `testdata/route_golden.json` 已换成新基线生成。
 没移植:preResolveRules(正式生成不启用,config.mjs 不传 resolvers,所以 buildRoute 也没有 resolvers 入参)。
-`rulesets.go`(routeRulesetTags / dnsRulesetTags / policyOutboundOptions / splitRuleSetConditions)和 `urlhost.go` 已对 v0.1.318 的 routing-model.mjs 逐条核过,dns 的金标准里也覆盖到了。
+`rulesets.go`(routeRulesetTags / dnsRulesetTags / policyOutboundOptions / splitRuleSetConditions)和 `urlhost.go`(extractHost,主机解析在 `internal/urlx`)已对 v0.1.318 的 routing-model.mjs 逐条核过,dns 的金标准里也覆盖到了。
+**叶子模块**(ipx 对应 cidr.mjs、servers、directhosts、dnsrewrite、clientroutes)和 **dnsfilter**:用基线重新生成金标准,与此前提交的逐字节相同(dnsfilter)/ 逐条相同(叶子,0 条不一致),已确认和基线一致;
+生成脚本现在直接读基线(ipx 用 cidr.mjs,不再用 backup 的 local-subnets.mjs)。directhosts 补了 config 装配要用的导出(`SharedCdnCidrs` / `IsSharedCdnCidr` / `NodeDirect*` 标签、占位值、`NodeDirectRuleSets`),
+金标准里加了 300 条 isSharedCdnCidr 和约 50 种奇怪写法的订阅链接(0x7f.1、反斜杠、userinfo、非法 punycode、端口越界等)。nodeDirectSources 只有 client-build 用,没有移植。
+**urlx**(`internal/urlx`,从 `routing/urlhost.go` 抽出,directhosts 订阅链接主机、dns 的 extractHost、dnsupstream 共用):金标准 `testdata/urlx_golden.json`(4000 条,Node 内置 URL 当标准答案),
+另对 Node 做过 10 万条随机差分(语料避开下面的已知缺口)0 条不一致;变异测试 28 个里抓到 24 个,存活的 4 个是等价变异(空变异、IPv4 超长被末段上限覆盖、域名已小写所以 0X 到不了、punycode 溢出保护在 64 位下被后面的码点上限覆盖)。
+**urlx / idna 的已知缺口**:没有 UTS46 字符映射表和双向规则。把这类字符(ﬁ、ǆ、ẞ、²、软连字符、零宽字符、希伯来字母混拉丁字母)放进随机语料(`gen-urlx-golden.mjs --wide`)约 3.7% 的条数与 Node 不一致,
+表现是:Node 会映射或拒绝的写法 Go 放行并按原字符编码。实际影响只是订阅链接 / 上游地址里出现这种主机名时「站点直连」多收或漏收一个域名;补齐需要引入 Unicode 表(见 idna 包注释),目前没做。
 **有明文基线的**之外还有一个已知缺口:`ignoreProxyClients`(bypassPlan 的选项)是 v0.1.318 之后才有的,按旧实现保留,没有明文可对照。
 快照 v0.1.318 到上游当前 v0.1.342 之间,engine/ 可能还有行为变化,整体对齐完之后要用 index.mjs 里压缩的版本再做一轮增量核对。
 
@@ -62,10 +69,10 @@ chainNodes / dnsRuleOwners,这几项没有旧代码可对照)。
 
 - 阶段 A(叶子模块,有金标准):**已完成**(emit、ipx、clientroutes、servers、directhosts、dnsrewrite)
 - 阶段 B:
-  - dnsfilter:**已完成**
+  - dnsfilter:**已完成**,用基线重新生成金标准与已提交的逐字节相同
   - dns(`routing/dns.go` + `dnsupstream.go` + `flip.go`,对应基线 dns.mjs / dns-upstream.mjs / flip.mjs)及它用到的规则集函数
     (`routing/rulesets.go`:routeRulesetTags / dnsRulesetTags / policyOutboundOptions / splitRuleSetConditions)、
-    `routing/urlhost.go`(extractHost:按 WHATWG 规则取 `new URL().hostname`,对 Node 做过两万条差分):**已按新基线对齐**,
+    `routing/urlhost.go`(extractHost,主机解析在 `internal/urlx`):**已按新基线对齐**,
     金标准 `testdata/dns_golden.json`(`gen-dns-golden.mjs` 生成,1000 条 buildDns + upstream / flip / 终端分流判定的直接对照),
     做过变异测试(28 个变异全部被抓到)
   - routing(`routing/route.go`,对应基线 routing.mjs 的 buildRoute / preMatchBypassRules;`routing/rulesets.go` 里补了 noDomainGuard / isIPRuleSetTag / policyRouteMatches):**已按新基线对齐**,

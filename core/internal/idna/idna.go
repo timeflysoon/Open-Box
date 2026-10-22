@@ -1,8 +1,11 @@
 // Package idna 提供「小写 + 逐标签 punycode」的域名转 ASCII。
 //
-// 已知差异:Node 的 domainToASCII 是完整的 UTS46(字符映射、NFC 规范化、禁用字符检查),
-// 这里只做逐标签 punycode。中文 / 日文 / 西里尔字母 / emoji 这类常见写法结果一致;
-// 全角字母、ß、需要规范化的组合字符这类极少见的写法会不同。
+// 已知差异:Node 的 domainToASCII 是完整的 UTS46,这里只做逐标签 punycode,并补了 xn-- 标签的校验
+// (必须是合法 punycode、解出非空且含非 ASCII、不含最常见的几类禁用字符;含非 ASCII 的 xn-- 标签直接拒绝)。
+// 没有的:需要字符映射表的写法(NFKC 兼容分解如 ﬁ → fi、² → 2,大小写折叠如 ǅ,忽略字符如软连字符 / 零宽字符,
+// 全角句号以外的标点)和双向规则(同一标签里混希伯来 / 阿拉伯字母和拉丁字母要拒绝)。
+// 中文 / 日文 / 西里尔字母 / emoji / 带音标的拉丁字母 / 全角字母这类常见写法与 Node 一致。
+// 要补齐只能引入 Unicode 映射表(golang.org/x/net/idna + x/text 的 norm、bidi,约 4 MB 表数据),目前没做。
 package idna
 
 import (
@@ -22,7 +25,13 @@ func ToASCII(d string) (string, bool) {
 			}
 		}
 		if ascii {
+			if len(l) >= 4 && strings.EqualFold(l[:4], "xn--") && !validACELabel(l) {
+				return "", false // UTS46:xn-- 标签必须能解码,且解出非 ASCII
+			}
 			continue
+		}
+		if len(l) >= 4 && strings.EqualFold(l[:4], "xn--") {
+			return "", false // UTS46:xn-- 开头的标签必须是纯 ASCII 的合法 punycode
 		}
 		enc, ok := punycodeEncode(l)
 		if !ok {

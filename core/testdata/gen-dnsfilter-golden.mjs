@@ -1,6 +1,7 @@
 // 生成 DNS 过滤(buildFilterConfig)的金标准。
-// 用法: node core/testdata/gen-dnsfilter-golden.mjs <旧 engine 目录> [输出文件]
-//   旧 engine 目录要含 dns-filter.mjs(来自 origin/backup:panel/server/engine/),且需要 {"type":"module"} 的 package.json。
+// 基线:上游 v0.1.318 快照(tag engine-snapshot)里 panel/server/engine/ 的明文源码。
+// 用法: node core/testdata/gen-dnsfilter-golden.mjs <engine 基线目录> [输出文件]
+//   目录要含 dns-filter.mjs,上层 panel/server/ 需要 {"type":"module"} 的 package.json。
 import { writeFileSync } from 'node:fs'
 import { pathToFileURL } from 'node:url'
 import { resolve } from 'node:path'

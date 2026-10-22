@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/timeflysoon/Open-Box/core/internal/jsx"
+	"github.com/timeflysoon/Open-Box/core/internal/urlx"
 )
 
 // 对应上游 engine/dns-upstream.mjs(基线 v0.1.318 快照)。档案里的两个 DNS 上游(dns.direct / dns.proxy)和各自的
@@ -79,7 +80,7 @@ func normalizeDNSUpstream(value any) string {
 	}
 	host := jsx.Trim(s)
 	if dnsSchemeRe.MatchString(host) {
-		h, ok := urlHostname(host) // new URL(host).hostname;抛错 → ''
+		h, ok := urlx.Hostname(host) // new URL(host).hostname;抛错 → ''
 		if !ok {
 			return ""
 		}
