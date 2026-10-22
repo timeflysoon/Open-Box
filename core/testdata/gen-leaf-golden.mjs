@@ -129,6 +129,40 @@ for (let i = 0; i < 150; i++) add('normalizeDomain', [chance(0.1) ? garbage() : 
 for (let i = 0; i < 80; i++) add('normalizeRule', [chance(0.1) ? garbage() : rule(), int(5)], (r, i2) => dr.normalizeRule(r, i2))
 add('rewriteDnsServer', [], () => dr.rewriteDnsServer())
 
+// 终端来源 / 共享网络入站防护(config 装配用):读的是档案里原样的列表,不是整理过的
+const friendly = () => ({ ...route(), enabled: pick([true, true, true, false, undefined]), bypass: pick([true, true, false, undefined, 'true']), admit: pick([true, true, false, undefined, 1]), match: pick(['ip', 'mac', undefined, 'ip']),
+  sources: pick([['192.168.1.5', '192.168.1.0/24'], ['10.0.0.1/8', '10.0.0.1/8'], ['bad', '2001:db8::1'], []]), macs: pick([['aa:bb:cc:dd:ee:ff', 'AA-BB-CC-DD-EE-FF'], ['11:22:33:44:55:66'], ['bad'], []]) })
+const rawList = () => (chance(0.05) ? garbage() : Array.from({ length: int(6) }, () => (chance(0.08) ? garbage() : chance(0.7) ? friendly() : route())))
+for (let i = 0; i < 200; i++) { const l = rawList(); add('bypassSources', [l], (x) => cr.bypassSources(x)); add('admitSources', [l], (x) => cr.admitSources(x)) }
+const dnsOpt = () => pick([{}, {}, { dnsMode: 'hijack', autoRedirect: true, splitDns: true }, { dnsMode: 'dnsmasq', autoRedirect: true, splitDns: true }, { dnsMode: 'off', autoRedirect: true, splitDns: true }, { dnsMode: 'hijack', autoRedirect: false, splitDns: true }, { dnsMode: 'hijack', autoRedirect: true, splitDns: false },
+  { autoRedirect: true }, { autoRedirect: true, splitDns: null }, { autoRedirect: 1, splitDns: 'yes', dnsMode: 'dnsmasq' }, { dnsMode: null, autoRedirect: true }, { dnsMode: 'HIJACK', autoRedirect: true }, { autoRedirect: 0 }])
+for (let i = 0; i < 300; i++) add('admitDnsDirect', [rawList(), dnsOpt()], (l, o) => cr.admitDnsDirect(l, o))
+const cond = () => pick([() => ({ source_ip_cidr: ['192.168.1.5/32'] }), () => ({ source_mac_address: ['aa:bb:cc:dd:ee:ff'] }), () => ({ source_ip_cidr: [], source_mac_address: [] }), () => ({ domain_suffix: ['a.com'] }), () => ({ rule_set: ['geosite-cn'], ip_version: 6 })])()
+const guardRule = () => pick([
+  () => ({ ...cond(), outbound: pick(['美国', 'direct']) }),
+  () => ({ ...cond(), domain: ['a.com'], port: [443], action: 'route', outbound: 'x' }),
+  () => ({ ...cond(), rule_set: ['r1'], network: 'udp', action: 'reject', method: 'default' }),
+  () => ({ ...cond(), server: 'dns-x', action: 'route', strategy: 'ipv4_only', disable_cache: true }),
+  () => ({ ...cond(), type: pick(['default', 'logical', 'x']), mode: pick(['or', 'and']), rules: pick([[], [{ domain: ['b.com'] }], 5]) }),
+  () => ({ ...cond(), inbound: ['dns-in'], invert: false, query_type: ['A'], protocol: 'dns' }),
+  () => ({ domain: ['no-source.com'], outbound: 'x' }),
+  () => ({ action: 'sniff' }),
+  () => ({ type: 'logical', mode: 'and', rules: [cond(), { domain: ['c.com'] }], outbound: 'x' }),
+  () => ({ type: 'logical', mode: 'and', rules: [{ domain: ['c.com'] }, { ip_cidr: ['1.2.3.4/32'] }], outbound: 'x' }),
+  () => ({ type: 'logical', mode: 'or', rules: [cond(), cond()], outbound: 'x' }),
+  () => ({ type: 'logical', rules: [cond()], outbound: 'x' }),
+  () => ({ type: 'logical', mode: 'and', rules: 'x', outbound: 'x' }),
+  () => ({ type: 'logical', mode: 'and', outbound: 'x' }),
+  () => pick([null, 'str', 5, [], {}, [cond()], true]),
+])()
+const shareTags = () => pick([['share-a'], ['share-a', 'share-b'], [], ['', 'share-a'], [5, null, 'share-x'], [''], null, 'share-a', {}, undefined, ['share-1', 'share-1']])
+for (let i = 0; i < 400; i++) add('guardTerminalRules', [chance(0.04) ? pick([null, 'x', {}, 5]) : Array.from({ length: int(6) }, guardRule), shareTags()], (r, t) => cr.guardTerminalRules(r, t))
+
+// 逐个键过一遍:每个条件键、每个常见动作键各一条带来源的规则(规则拆开时按键名分「条件」和「动作」)
+const COND_KEYS = ['source_ip_cidr', 'source_mac_address', 'domain', 'domain_suffix', 'domain_keyword', 'domain_regex', 'rule_set', 'query_type', 'ip_version', 'network', 'protocol', 'port', 'port_range', 'ip_cidr', 'ip_is_private', 'inbound', 'invert', 'source_port', 'source_port_range']
+const ACTION_KEYS = ['outbound', 'action', 'server', 'tag', 'strategy', 'method', 'disable_cache', 'rewrite_ttl', 'client_subnet', 'rcode', 'answer', 'no_drop', 'timeout', 'override_address', 'override_port', 'sniffer', 'domain_resolver', 'ip_accept_any', 'clash_mode', 'rule_set_ip_cidr_match_source', 'source_geoip', 'geoip', 'type', 'mode', 'rules']
+for (const k of COND_KEYS.concat(ACTION_KEYS)) for (const src of [{ source_ip_cidr: ['192.168.1.5/32'] }, { source_mac_address: ['aa:bb:cc:dd:ee:ff'] }]) add('guardTerminalRules', [[{ ...src, [k]: pick(['v', ['v'], 1, true]) }], ['share-a']], (r, t) => cr.guardTerminalRules(r, t))
+
 writeFileSync(out, JSON.stringify({ generatedBy: 'gen-leaf-golden.mjs', cases }) + '\n')
 const by = {}
 for (const c of cases) by[c.fn] = (by[c.fn] || 0) + 1

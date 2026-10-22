@@ -1,7 +1,8 @@
 // Package idna 提供「小写 + 逐标签 punycode」的域名转 ASCII。
 //
 // 已知差异:Node 的 domainToASCII 是完整的 UTS46,这里只做逐标签 punycode,并补了 xn-- 标签的校验
-// (必须是合法 punycode、解出非空且含非 ASCII、不含最常见的几类禁用字符;含非 ASCII 的 xn-- 标签直接拒绝)。
+// (必须是合法 punycode、解出非空、不含最常见的几类禁用字符;解出来只有 ASCII 的如 xn--a- Node 照收;
+// 含非 ASCII 字符的 xn-- 标签直接拒绝)。
 // 没有的:需要字符映射表的写法(NFKC 兼容分解如 ﬁ → fi、² → 2,大小写折叠如 ǅ,忽略字符如软连字符 / 零宽字符,
 // 全角句号以外的标点)和双向规则(同一标签里混希伯来 / 阿拉伯字母和拉丁字母要拒绝)。
 // 中文 / 日文 / 西里尔字母 / emoji / 带音标的拉丁字母 / 全角字母这类常见写法与 Node 一致。
@@ -26,7 +27,7 @@ func ToASCII(d string) (string, bool) {
 		}
 		if ascii {
 			if len(l) >= 4 && strings.EqualFold(l[:4], "xn--") && !validACELabel(l) {
-				return "", false // UTS46:xn-- 标签必须能解码,且解出非 ASCII
+				return "", false // UTS46:xn-- 标签必须能解码,且解出的字符里没有禁用字符
 			}
 			continue
 		}

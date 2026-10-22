@@ -60,6 +60,14 @@ func call(fn string, a []any) (any, error) {
 		return servers.BuildServerInbounds(arg(a, 0), arg(a, 1)), nil
 	case "collectDirectHosts":
 		return directhosts.Collect(arg(a, 0), arg(a, 1)), nil
+	case "bypassSources":
+		return clientroutes.BypassSources(arg(a, 0)), nil
+	case "admitSources":
+		return clientroutes.AdmitSources(arg(a, 0)), nil
+	case "admitDnsDirect":
+		return clientroutes.AdmitDNSDirect(arg(a, 0), arg(a, 1)), nil
+	case "guardTerminalRules":
+		return clientroutes.GuardTerminalRules(arg(a, 0), arg(a, 1)), nil
 	case "isSharedCdnCidr":
 		return directhosts.IsSharedCdnCidr(arg(a, 0)), nil
 	case "nodeDirectRuleSets":

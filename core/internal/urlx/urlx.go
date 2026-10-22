@@ -21,8 +21,10 @@ func isSpecialScheme(s string) bool {
 	return false
 }
 
-// Hostname 相当于 new URL(input).hostname;ok=false 表示 new URL 会抛错(没有协议头的相对写法也算)。
-func Hostname(input string) (string, bool) {
+// prep 做 URL 解析的前半段:去掉首尾控制字符和空格、删掉制表换行、取协议名、跳过协议后面的斜杠。
+// ok=false 表示 new URL 会抛错(没有合法协议头);scheme 已转小写;rest 是 // 之后(权威部分开头)的内容。
+// opaque=true:没有 // 的非特殊协议(路径不透明,主机为空)或 file 的无主机写法。
+func prep(input string) (scheme string, special bool, rest string, opaque bool, ok bool) {
 	// 去掉首尾的 C0 控制字符和空格,并删掉所有制表 / 换行
 	input = strings.TrimFunc(input, func(r rune) bool { return r <= 0x20 })
 	input = strings.Map(func(r rune) rune {
@@ -43,24 +45,36 @@ func Hostname(input string) (string, bool) {
 		break
 	}
 	if i == 0 || i >= len(input) || input[i] != ':' {
-		return "", false
+		return "", false, "", false, false
 	}
-	scheme := strings.ToLower(input[:i])
-	special := isSpecialScheme(scheme)
-	rest := input[i+1:]
+	scheme = strings.ToLower(input[:i])
+	special = isSpecialScheme(scheme)
+	rest = input[i+1:]
 	isSlash := func(c byte) bool { return c == '/' || (special && c == '\\') }
 	if scheme == "file" {
 		if len(rest) < 2 || !isSlash(rest[0]) || !isSlash(rest[1]) {
-			return "", true // file:/x、file:x → 主机为空
+			return scheme, special, rest, true, true // file:/x、file:x → 主机为空
 		}
 		rest = rest[2:]
 	} else if special {
 		rest = strings.TrimLeft(rest, `/\`)
 	} else {
 		if len(rest) < 2 || rest[0] != '/' || rest[1] != '/' {
-			return "", true // 没有 // 的非特殊协议:路径不透明,主机为空
+			return scheme, special, rest, true, true // 没有 // 的非特殊协议:路径不透明,主机为空
 		}
 		rest = rest[2:]
+	}
+	return scheme, special, rest, false, true
+}
+
+// Hostname 相当于 new URL(input).hostname;ok=false 表示 new URL 会抛错(没有协议头的相对写法也算)。
+func Hostname(input string) (string, bool) {
+	scheme, special, rest, opaque, ok := prep(input)
+	if !ok {
+		return "", false
+	}
+	if opaque {
+		return "", true
 	}
 	end := len(rest)
 	for j, r := range rest {

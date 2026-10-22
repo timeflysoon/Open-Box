@@ -52,7 +52,8 @@ HTTPS / SVCB 空应答、dnsmasq 模式本地主机名、FakeIP(198.19.0.0/16)�
 生成脚本现在直接读基线(ipx 用 cidr.mjs,不再用 backup 的 local-subnets.mjs)。directhosts 补了 config 装配要用的导出(`SharedCdnCidrs` / `IsSharedCdnCidr` / `NodeDirect*` 标签、占位值、`NodeDirectRuleSets`),
 金标准里加了 300 条 isSharedCdnCidr 和约 50 种奇怪写法的订阅链接(0x7f.1、反斜杠、userinfo、非法 punycode、端口越界等)。nodeDirectSources 只有 client-build 用,没有移植。
 **urlx**(`internal/urlx`,从 `routing/urlhost.go` 抽出,directhosts 订阅链接主机、dns 的 extractHost、dnsupstream 共用):金标准 `testdata/urlx_golden.json`(4000 条,Node 内置 URL 当标准答案),
-另对 Node 做过 10 万条随机差分(语料避开下面的已知缺口)0 条不一致;变异测试 28 个里抓到 24 个,存活的 4 个是等价变异(空变异、IPv4 超长被末段上限覆盖、域名已小写所以 0X 到不了、punycode 溢出保护在 64 位下被后面的码点上限覆盖)。
+另对 Node 做过 10 万条随机差分(语料避开下面的已知缺口)0 条不一致;当时的变异测试 28 个抓到 24 个,存活的 4 个是等价变异(空变异、IPv4 超长被末段上限覆盖、域名已小写所以 0X 到不了、punycode 溢出保护在 64 位下被后面的码点上限覆盖)。之后 xn-- 校验按 Node 实测改过一次(解出来只有 ASCII 的如 xn--a- 照收),该规则的变异测试没有重跑。
+**urlx.Parse**(`internal/urlx/parse.go`):除主机外还给出用户名 / 密码 / 端口(缺省端口省掉)/ 路径(点段、百分号编码)/ 查询 / 片段,供 node-dns 的 DoH 地址解析用。金标准 `testdata/urlx_parts_golden.json`(3000 条,`gen-urlx-parts-golden.mjs` 生成),对 Node 另做过 10 万条随机差分 0 条不一致;变异测试 29 个抓到 25 个,存活 4 个都是等价变异或不支持项(空变异、前导零端口(digits 已去零)、路径编码集里的 `?`(切路径前已按查询分隔)、file 协议的权威部分(file 只填 Scheme / Hostname,DoH 只收 https))。非特殊协议下点段吃光路径时序列化成空串(Node 实测),特殊协议补 `/`。
 **urlx / idna 的已知缺口**:没有 UTS46 字符映射表和双向规则。把这类字符(ﬁ、ǆ、ẞ、²、软连字符、零宽字符、希伯来字母混拉丁字母)放进随机语料(`gen-urlx-golden.mjs --wide`)约 3.7% 的条数与 Node 不一致,
 表现是:Node 会映射或拒绝的写法 Go 放行并按原字符编码。实际影响只是订阅链接 / 上游地址里出现这种主机名时「站点直连」多收或漏收一个域名;补齐需要引入 Unicode 表(见 idna 包注释),目前没做。
 **有明文基线的**之外还有一个已知缺口:`ignoreProxyClients`(bypassPlan 的选项)是 v0.1.318 之后才有的,按旧实现保留,没有明文可对照。
@@ -78,5 +79,12 @@ chainNodes / dnsRuleOwners,这几项没有旧代码可对照)。
   - routing(`routing/route.go`,对应基线 routing.mjs 的 buildRoute / preMatchBypassRules;`routing/rulesets.go` 里补了 noDomainGuard / isIPRuleSetTag / policyRouteMatches):**已按新基线对齐**,
     金标准 `testdata/route_golden.json`(`gen-route-golden.mjs` 生成,1000 条 buildRoute + 400 条 preMatchBypassRules;终端分流先过真实的 normalizeClientRoutes),
     做过变异测试(26 个变异全部被抓到)。旧文件里的 preResolveRules 正式生成不启用(config.mjs 不传 resolvers),没有移植
-- 阶段 C:buildConfig 装配(阶段 B 的零件已齐),以及新增字段和 dnsRuleOwners
+- 阶段 C 的零件(config.mjs 要用、之前 Go 里没有的):
+  - `internal/config/tunoptions.go`(tun-options.mjs:TunStack / TunMTU / TunTCPMss / 接口名)、`nodedns.go`(node-dns.mjs:ValidateNodeDNS / NormalizeNodeDNS / NodeDNSServers / PlanNodeDNS / WithNodeResolver)、
+    `consts.go`(config.mjs 开头的常量、FlipDirFor、FindDuplicateTag;以及 TUN 排除表 / END_OF_ADDRESS_SPACE 等没有导出、不能直接对照的常量,抄自基线,留给整份配置的金标准验证):
+    金标准 `testdata/configparts_golden.json`(`gen-configparts-golden.mjs` 生成,4602 条,直接 import 基线的 tun-options / node-dns / config;基线的 config.mjs 经 chain-proxy → subscription → clash 引了 npm 包 yaml 2.8.2,生成时要在 panel/server 下 npm install),
+    变异测试 38 个抓到 35 个,存活 3 个是等价变异(空变异、MTU 为 0 时不特判结果相同、tun 是数组时当空对象结果相同)
+  - `internal/clientroutes/sources.go`(client-routes.mjs:BypassSources / AdmitSources / AdmitDNSDirect / GuardTerminalRules / NotShareInbound):金标准并入 `leaf_golden.json`(新增 1188 条,旧用例 3676 条原样不变),变异测试 27 个抓到 26 个(存活的是空变异)
+  - 还没做:chain-proxy(依赖 subscription.mjs / sharelink.mjs)、终端 IPv6 绑定(新版才有)、platform / clientBindings(基线没有)
+- 阶段 C:buildConfig 装配(阶段 B 的零件基本已齐,见上),以及新增字段和 dnsRuleOwners
 - 阶段 D:旧 JS 金标准 + 真实 sing-box 1.13.14 `check` + 对照 templates/reference-1.13.14.json
