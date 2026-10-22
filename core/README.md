@@ -43,7 +43,10 @@
 `routing/flip.go`(对应 flip.mjs:热切换开关 tag、`andRule`、`flipFlagMap`、占位规则集):备用上游并发竞速、站点集 / 兜底的热切换成对规则、按终端答解析(dns-terminal-direct)、
 HTTPS / SVCB 空应答、dnsmasq 模式本地主机名、FakeIP(198.19.0.0/16)、IPv6 分层、规则归属表 `ruleOwners`。金标准 `testdata/dns_golden.json` 已换成新基线生成。
 只有 Node 进程用、不属于 core 的没有移植:dns-upstream 的 regionDnsDefaults / regionDnsError、dns 的 directResolverServers / applyProxyUpstreamRoutes / dnsPolicyClasses、flip 的 flattenFlipRule。
-**尚未对齐**:`routing/route.go`(还是按 backup 旧版移植的,金标准测试已暂时跳过;routing.mjs 改成「IP 只管 IP、域名只管域名」,路由规则也要像 dns 一样包热切换开关)。pre_resolve 同理待核;
+**route**(`routing/route.go`,对应 routing.mjs 的 buildRoute 和 preMatchBypassRules):路由规则包热切换开关(v6 / QUIC 拒绝恒定成对写,挂在站点集 / 兜底的开关上)、
+「IP 只管 IP、域名只管域名」(按 IP 判的那份规则带 `domain_regex` 的「连接没有域名」前提,前置自定义分流的规则集链接拆成域名 / IP 两条)、屏蔽 QUIC(UDP 443 reject)、
+首包预判放行(bypass,排在 sniff 前面)、名单外终端的专用 DNS 入站、NTP 对时直连、订阅和节点站点直连的两份本地规则集、终端分流按 MAC 匹配。金标准 `testdata/route_golden.json` 已换成新基线生成。
+没移植:preResolveRules(正式生成不启用,config.mjs 不传 resolvers,所以 buildRoute 也没有 resolvers 入参)。
 `rulesets.go`(routeRulesetTags / dnsRulesetTags / policyOutboundOptions / splitRuleSetConditions)和 `urlhost.go` 已对 v0.1.318 的 routing-model.mjs 逐条核过,dns 的金标准里也覆盖到了。
 **有明文基线的**之外还有一个已知缺口:`ignoreProxyClients`(bypassPlan 的选项)是 v0.1.318 之后才有的,按旧实现保留,没有明文可对照。
 快照 v0.1.318 到上游当前 v0.1.342 之间,engine/ 可能还有行为变化,整体对齐完之后要用 index.mjs 里压缩的版本再做一轮增量核对。
@@ -65,7 +68,8 @@ chainNodes / dnsRuleOwners,这几项没有旧代码可对照)。
     `routing/urlhost.go`(extractHost:按 WHATWG 规则取 `new URL().hostname`,对 Node 做过两万条差分):**已按新基线对齐**,
     金标准 `testdata/dns_golden.json`(`gen-dns-golden.mjs` 生成,1000 条 buildDns + upstream / flip / 终端分流判定的直接对照),
     做过变异测试(28 个变异全部被抓到)
-  - routing(`routing/route.go`,对应 routing.mjs 的 buildRoute):**待按新基线对齐**(目前是旧版移植,金标准 `testdata/route_golden.json`
-    是旧基线生成的,测试暂时跳过)。旧文件里的 preResolveRules 正式生成不启用(config.mjs 不传 resolvers),没有移植
+  - routing(`routing/route.go`,对应基线 routing.mjs 的 buildRoute / preMatchBypassRules;`routing/rulesets.go` 里补了 noDomainGuard / isIPRuleSetTag / policyRouteMatches):**已按新基线对齐**,
+    金标准 `testdata/route_golden.json`(`gen-route-golden.mjs` 生成,1000 条 buildRoute + 400 条 preMatchBypassRules;终端分流先过真实的 normalizeClientRoutes),
+    做过变异测试(26 个变异全部被抓到)。旧文件里的 preResolveRules 正式生成不启用(config.mjs 不传 resolvers),没有移植
 - 阶段 C:buildConfig 装配(阶段 B 的零件已齐),以及新增字段和 dnsRuleOwners
 - 阶段 D:旧 JS 金标准 + 真实 sing-box 1.13.14 `check` + 对照 templates/reference-1.13.14.json

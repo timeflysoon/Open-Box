@@ -51,7 +51,8 @@ func DNSStrategy(profile any) string {
 }
 
 // DirectHostSets:订阅和节点站点直连的本地规则集(部署时的 directHostSets)。地址变了只换文件、不重启内核。
-type DirectHostSets struct{ Domain string }
+// DirectHostSets 是订阅和节点站点直连的两份本地规则集 tag(域名 / IP);dns 只用域名那份,route 两份都用。
+type DirectHostSets struct{ Domain, IP string }
 
 // TerminalDNS 对应 options.terminalDns。
 type TerminalDNS struct {

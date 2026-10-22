@@ -1,8 +1,10 @@
-// 生成路由配置(旧 engine/routing.mjs 的 buildRoute)的金标准。
-// 用法: node core/testdata/gen-route-golden.mjs <旧 engine 目录> [输出文件]
-//   旧 engine 目录取自 origin/backup:panel/server/engine(要含 routing.mjs、routing-model.mjs、rule-list.mjs、dns-names.mjs),
-//   且上层要有 {"type":"module"} 的 package.json。
-// 说明:旧 buildRoute 的 rejectV6For 是回调,这里用 rejectV6Tags(出口名单)/ rejectV6All 两个可序列化的写法代替。
+// 生成路由配置(上游 engine/routing.mjs 的 buildRoute、preMatchBypassRules)的金标准。
+// 用法: node core/testdata/gen-route-golden.mjs <engine 目录> [输出文件]
+//   engine 目录取自 catch-up-upstream 的 0c9d530(v0.1.318 快照,同步提交里 panel/server/ 已被换掉,要从历史里取):
+//     git archive 0c9d530 panel/server/engine | tar -x -C <临时目录>
+//   且上层(panel/server/)要有 {"type":"module"} 的 package.json。
+// 说明:buildRoute 的 rejectV6For / rejectQuicFor 是回调,这里用 rejectV6Tags / rejectV6All、rejectQuicTags / rejectQuicAll 两组可序列化的写法代替。
+// 终端分流先过真实的 normalizeClientRoutes,和生产里 Node 整理完再传进来的形状一致。
 import { writeFileSync } from 'node:fs'
 import { pathToFileURL } from 'node:url'
 import { resolve } from 'node:path'
@@ -10,7 +12,7 @@ import { resolve } from 'node:path'
 const dir = resolve(process.argv[2] || '.')
 const out = resolve(process.argv[3] || new URL('./route_golden.json', import.meta.url).pathname)
 const imp = (f) => import(pathToFileURL(resolve(dir, f)).href)
-const [routeMod, rl] = await Promise.all([imp('routing.mjs'), imp('rule-list.mjs')])
+const [routeMod, rl, crMod, rm] = await Promise.all([imp('routing.mjs'), imp('rule-list.mjs'), imp('client-routes.mjs'), imp('routing-model.mjs')])
 
 let seed = 8128
 const rnd = () => {
@@ -81,55 +83,94 @@ const ruleLists = () => {
   for (const t of LIST_TAGS) if (chance(0.7)) o[t] = pick([{ domain: true, ip: true }, { domain: true, ip: false }, { domain: false, ip: true }, { domain: false, ip: false }, null, true, {}])
   return o
 }
-const clientRoutes = (b) => {
-  if (chance(0.5)) return pick([undefined, []])
-  return Array.from({ length: 1 + Math.floor(rnd() * 3) }, (_, i) => ({
-    id: 'c' + i, name: 'n' + i, sources: some(['192.168.1.5/32', '192.168.1.0/24', '10.0.0.7/32'], 2).concat(['192.168.9.9/32']),
-    outbound: pick([b ? b.direct : 'direct', b ? b.block : 'block', '美国', '节点组A', '节点组B', '不存在的出口']),
-  }))
-}
 
+
+// 终端分流:造原始规则(含 mac / bypass / admit / 停用 / 缺出口),再走真实的 normalizeClientRoutes
+const normClients = (b, dTag) => {
+  if (chance(0.45)) return pick([undefined, []])
+  const raw = Array.from({ length: 1 + Math.floor(rnd() * 5) }, (_, i) => {
+    const kind = pick(['ip', 'ip', 'ip', 'mac', 'bypass-ip', 'bypass-mac', 'admit'])
+    const r = {
+      id: 'c' + i, name: 'n' + i, enabled: chance(0.93),
+      outbound: pick([dTag, b, '美国', '节点组A', '节点组B', '不存在的出口', '香港', '', undefined]),
+    }
+    if (kind === 'mac' || kind === 'bypass-mac') { r.match = 'mac'; r.macs = some(['AA:BB:CC:00:11:22', 'aa-bb-cc-00-11-33', 'bad-mac', '00:11:22:33:44:55'], 2) }
+    else r.sources = some(['192.168.1.5', '192.168.1.0/24', '10.0.0.7/32', 'fe80::1%eth0', '2001:db8::/32', 'bad'], 3)
+    if (kind.startsWith('bypass')) r.bypass = true
+    if (kind === 'admit') r.admit = true
+    if (chance(0.1)) delete r.match
+    return r
+  })
+  return crMod.normalizeClientRoutes(raw, { directTag: chance(0.9) ? dTag : '' })
+}
 
 const cases = []
 const SOME_OUT = ['美国', '香港', '节点组A', '节点组B', '节点1', '节点2', '不存在的出口']
-for (let i = 0; i < 900; i++) {
+for (let i = 0; i < 1000; i++) {
   const directTag = pick(['direct', '直连', undefined, ''])
   const blockTag = pick(['block', '拒绝', undefined])
   const dTag = directTag || 'direct'
   const bTag = blockTag || 'block'
   const r = rt(routing())
   const known = chance(0.4) ? undefined : [...new Set([dTag, bTag, ...some(SOME_OUT, 6)])]
-  const cr = chance(0.5) ? pick([undefined, []]) : Array.from({ length: 1 + Math.floor(rnd() * 3) }, (_, k) => ({
-    id: 'c' + k, name: 'n' + k, sources: some(['192.168.1.5/32', '192.168.1.0/24'], 2).concat(['192.168.9.9/32']),
-    outbound: pick([dTag, bTag, ...SOME_OUT]),
-  }))
+  const cr = normClients(bTag, dTag)
   const allOut = [dTag, bTag, '美国', '香港', '节点组A', '其他', '兜底', ...NAMES]
   const o = rt({
     dnsMode: pick(['hijack', 'hijack', 'dnsmasq', 'off', undefined]),
     directTag, blockTag,
     directHosts: pick([undefined, null, { domains: [], cidrs: [] }, { domains: some(['dh1.com', 'n.example.org'], 2).concat(['x.io']), cidrs: [] }, { domains: [], cidrs: ['1.2.3.4/32'] }, { domains: ['a.b'], cidrs: ['5.6.7.8/32', '9.9.9.9/32'] }]),
+    directHostSets: chance(0.35) ? { domain: 'obdirect-domain', ip: 'obdirect-ip' } : undefined,
     rejectV6Tags: chance(0.3) ? some(allOut, 5) : undefined, rejectV6All: chance(0.08) ? true : undefined,
+    rejectQuicTags: chance(0.3) ? some(allOut, 5) : undefined, rejectQuicAll: chance(0.08) ? true : undefined,
     tunCidrs: pick([undefined, [], ['172.19.0.0/30'], ['172.19.0.0/30', 'fdfe:dcba:9876::/126']]),
     dnsmasqTag: pick(['', 'dnsmasq', undefined, 'dnsmasq']),
+    dnsDirectInbound: pick([undefined, undefined, 'dns-in-direct']),
+    preMatchBypass: chance(0.5) ? true : pick([undefined, false]),
     clientRoutes: cr, knownOutbounds: known, ruleLists: ruleLists(),
   })
   const dir2 = pick(['/opt/open-box/data/rulesets', '/r'])
   const opts = { ...o }
-  delete opts.rejectV6Tags; delete opts.rejectV6All
+  delete opts.rejectV6Tags; delete opts.rejectV6All; delete opts.rejectQuicTags; delete opts.rejectQuicAll
   if (Array.isArray(opts.knownOutbounds)) opts.knownOutbounds = new Set(opts.knownOutbounds)
   if (o.rejectV6All) opts.rejectV6For = () => true
   else if (o.rejectV6Tags) opts.rejectV6For = (t) => o.rejectV6Tags.includes(t)
+  if (o.rejectQuicAll) opts.rejectQuicFor = () => true
+  else if (o.rejectQuicTags) opts.rejectQuicFor = (t) => o.rejectQuicTags.includes(t)
   const { route, rulesetTags } = routeMod.buildRoute(r, dir2, opts)
   cases.push({ fn: 'buildRoute', args: [r, dir2, o], want: rt({ route, rulesetTags: [...rulesetTags] }) })
 }
+
+// preMatchBypassRules 单独对照(buildRoute 只在 preMatchBypass 开着时才走到它)
+for (let i = 0; i < 400; i++) {
+  const directTag = pick(['direct', '直连', undefined])
+  const dTag = directTag || 'direct'
+  const bTag = pick(['block', '拒绝'])
+  const r = rt(routing())
+  const known = chance(0.4) ? undefined : [...new Set([dTag, bTag, ...some(SOME_OUT, 6)])]
+  const o = rt({
+    clientRoutes: normClients(bTag, dTag),
+    directHosts: pick([undefined, null, { domains: [], cidrs: [] }, { domains: ['a.b'], cidrs: ['5.6.7.8/32', '9.9.9.9/32'] }]),
+    directHostSet: pick(['', '', 'obdirect-ip', undefined]),
+    directTag, blockTag: bTag, ruleLists: ruleLists(), knownOutbounds: known,
+    tunCidrs: pick([undefined, [], ['172.19.0.0/30'], ['172.19.0.0/30', 'fdfe:dcba:9876::/126']]),
+  })
+  const opts = { ...o }
+  if (Array.isArray(opts.knownOutbounds)) opts.knownOutbounds = new Set(opts.knownOutbounds)
+  const conf = rm.normalizeRouting(r)
+  cases.push({ fn: 'preMatchBypassRules', args: [r, o], want: rt(routeMod.preMatchBypassRules(conf, opts)) })
+}
 writeFileSync(out, JSON.stringify({ generatedBy: 'gen-route-golden.mjs', cases }) + '\n')
-const cnt = (f) => cases.filter((c) => f(c.want.route, c.want.rulesetTags)).length
+const cnt = (f) => cases.filter((c) => c.fn === 'buildRoute' && f(c.want.route, c.want.rulesetTags)).length
 const hasRule = (d, f) => d.rules.some(f)
 console.log('写入', cases.length, '条 →', out)
 console.log(' dnsmasq 回送规则:', cnt((d) => hasRule(d, (r) => r.override_address)))
 console.log(' hijack / inbound-hijack:', cnt((d) => hasRule(d, (r) => r.protocol === 'dns')), cnt((d) => hasRule(d, (r) => r.inbound)))
 console.log(' tun 防回环:', cnt((d) => hasRule(d, (r) => r.action === 'reject' && r.ip_cidr)))
-console.log(' 前置自定义(含 port):', cnt((d) => hasRule(d, (r) => r.port && !r.override_address)))
+console.log(' 无域名前提(IP 只管 IP):', cnt((d) => hasRule(d, (r) => JSON.stringify(r).includes('domain_regex'))))
+console.log(' 热切换开关:', cnt((d) => hasRule(d, (r) => JSON.stringify(r).includes('obflip-'))))
+console.log(' QUIC 拒绝:', cnt((d) => hasRule(d, (r) => JSON.stringify(r).includes('"port":443'))))
+console.log(' 首包预判 bypass:', cnt((d) => hasRule(d, (r) => r.action === 'bypass')))
+console.log(' 前置自定义端口行:', cnt((d) => hasRule(d, (r) => r.port && !r.override_address && !r.network)))
 console.log(' 直连站点:', cnt((d) => hasRule(d, (r) => r.outbound && r.domain && r.outbound === (r.outbound) && !r.rule_set && !r.ip_is_private)))
 console.log(' 终端分流:', cnt((d) => hasRule(d, (r) => r.source_ip_cidr)))
 console.log(' v6 拒绝:', cnt((d) => hasRule(d, (r) => r.ip_version === 6)))
