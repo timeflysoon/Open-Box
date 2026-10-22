@@ -492,6 +492,14 @@ prepare_core_for_fetch() {
       sleep 1
       _pc_wait=$((_pc_wait + 1))
     done
+    # 状态先变 running、混合入站要再过一会儿才开始监听;这时用代理下载会直接
+    # 连接被拒(0.1.345→347 现场:三个镜像全失败)。等端口真正常监听再用。
+    _pc_wait=0
+    while ! netstat -lnt 2>/dev/null | grep -q '127\.0\.0\.1:7891'; do
+      [ "$_pc_wait" -lt 20 ] || break
+      sleep 1
+      _pc_wait=$((_pc_wait + 1))
+    done
   fi
   if "$_scs" status 2>/dev/null | grep -q running; then
     # 和面板测速共用的固定 mixed 入站。CONNECT 将域名交给内核，避免本机 / 上游
@@ -701,8 +709,22 @@ probe_mirror_prefix() {
   fi
   probe_url=$(build_url "$SHA_URL")
   if ! fetch_to_file_probe "$probe_url" "$probe_file" 2>/dev/null; then
-    rm -f "$probe_file"
-    return 1
+    # 本地内核的混合入站可能还没起来(刚恢复内核的几秒内):退回系统网络再试一次,
+    # 成功就继续用系统网络下载,不再和死掉的代理端口耗时间。
+    if [ -n "$OPENBOX_FETCH_PROXY" ]; then
+      OPENBOX_FETCH_PROXY=""
+      export OPENBOX_FETCH_PROXY
+      flush_system_dns_cache >/dev/null 2>&1 || true
+      if fetch_to_file_probe "$probe_url" "$probe_file" 2>/dev/null; then
+        :
+      else
+        rm -f "$probe_file"
+        return 1
+      fi
+    else
+      rm -f "$probe_file"
+      return 1
+    fi
   fi
   hash=$(awk 'NR==1{print $1}' "$probe_file" 2>/dev/null)
   name=$(awk 'NR==1{print $2}' "$probe_file" 2>/dev/null)
