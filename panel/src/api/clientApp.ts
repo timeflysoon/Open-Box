@@ -1,11 +1,11 @@
 // Open-Box 客户端(手机 / 电脑 App)和「激活」相关接口的前端封装。
-// 对照后端 server/api/{client-app,client-config,activation}.mjs(上游 v0.1.304)。只涉及登录后的 /api/openbox/*
+// 对照后端 server/api/{client-app,client-config,activation}.mjs(上游 v0.1.351)。只涉及登录后的 /api/openbox/*
 // 接口;App 自己用的 /client/v1/* 公开接口不在面板里调。
 //
 // 和 openbox.ts 一样走 fetchServerApi,这样 401/403 的处理和面板其余部分一致。
 // requestJson 在 openbox.ts 里没有导出,这里照它的行为写了一份(错误体 {error} 优先于 {message}),
 // 不去改 openbox.ts,避免和以后从上游同步的内容冲突。
-import { saveProfile } from '@/api/openbox'
+import { saveProfile, type OpenboxServer } from '@/api/openbox'
 import { fetchServerApi } from '@/store/auth'
 
 // ---- 通用 ----
@@ -163,31 +163,27 @@ export const saveServerInfo = (serverInfo: OpenboxServerInfo) => saveProfile({ s
 
 // ---- 本地分流(客户端配置,server/api/client-config.mjs)----
 
-// 后端的 publicDevice():不带 token 和密钥。lastSyncAt / lastSyncFrom 是后端每次被 App 同步时写的,其余字段不展开。
-export interface OpenboxClientDevice {
-  id?: string
-  lastSyncAt?: number
-  lastSyncFrom?: string
-  [key: string]: unknown
-}
-
-// 出「码」要的全部材料。界面拿去拼二维码 / 复制链接 / 导出文件里的 importCode(三者是同一个码)
+// 出「码」要的材料(v0.1.351 起不再带 token / 密钥:码里只有 nonce,配置要用「配对码」解开)
 export interface OpenboxClientConfigIssue {
-  device: OpenboxClientDevice
   // 同步开关(电源图标)。关着时 App 用的公开接口一律回 403 { error: 'disabled' }
   enabled: boolean
-  token: string
-  // 32 字节密钥:配置用它 AES-256-GCM 加密。属于凭据,不要写日志、不要进导出
-  key: string
+  // 配对码:App 导入码时要输入,服务端用它派生密钥。属于凭据,不要写日志
+  pairCode: string
+  nonce: string
+  // 最后一次被 App 同步的时刻(毫秒),从没同步过是 0
+  lastSyncAt: number
   routerId: string
   routerName: string
   lanAddresses: string[]
   panelPort: number
 }
 
-// 注意:没有码时这个 GET 会让后端现场生成一套(并存库),不是纯读取。
 export const fetchClientConfig = () =>
   requestJson<OpenboxClientConfigIssue>('/api/openbox/client-config')
+
+// 更换配对码:之前导入的设备和导出的文件都会失效。返回换完的整份
+export const rotateClientConfig = () =>
+  requestJson<OpenboxClientConfigIssue>('/api/openbox/client-config/rotate', { method: 'POST' })
 
 export const setClientConfigEnabled = (enabled: boolean) =>
   requestJson<{ enabled: boolean }>('/api/openbox/client-config/enabled', {
@@ -195,12 +191,47 @@ export const setClientConfigEnabled = (enabled: boolean) =>
     body: JSON.stringify({ enabled }),
   })
 
-// 导出文件:配置 + 路由器编出来的规则集(base64)。geosite / geoip 随 App 安装包带,文件里只有摘要。
-// 导出文件里要再放一个 importCode(见后端头注释),让手机导入等于扫了码——码的格式由界面按 App 的约定拼,这里不管。
+// 导出文件:服务端用配对码封好的整份配置(含 importCode),面板原样存成 .json。
+// lan / publicBase 是码里的那两项,服务端照着写进文件里的 importCode
 export type OpenboxClientBundle = Record<string, unknown>
 
-export const fetchClientConfigFile = () =>
-  requestJson<OpenboxClientBundle>('/api/openbox/client-config/file')
+export const fetchClientConfigFile = (lan: string, publicBase: string) =>
+  requestJson<OpenboxClientBundle>('/api/openbox/client-config/file', {
+    method: 'POST',
+    body: JSON.stringify({ lan, publicBase }),
+  })
+
+// ---- 共享网络服务器的 App 码(server/api/client-app.mjs)----
+
+// 每台服务器一份:pairCode 是这台服务器的配对码,gen 是代数(更换一次加一),sealed 是封好的节点分享链接
+export interface OpenboxShareCodeSeal {
+  pairCode: string
+  gen: number | string
+  sealed: string
+}
+
+// links:服务器 id → 它的节点分享链接。没传的服务器、链接为空或超过 4096 字符的,回包里没有
+export const fetchShareCodeSeals = (links: Record<string, string>) =>
+  requestJson<Record<string, OpenboxShareCodeSeal>>('/api/openbox/client-app/share-codes', {
+    method: 'POST',
+    body: JSON.stringify({ links }),
+  })
+
+export interface OpenboxShareCodeRotated {
+  pairCode: string
+  gen: number | string
+  // 换过密码的服务器(整条,面板拿它替换列表里的那条)
+  server: OpenboxServer
+  // saved = 只存了;restarted = 存了并重启内核让新密码生效;failed = 存了但没生效(message 是原因)
+  applied: 'saved' | 'restarted' | 'failed'
+  message?: string
+}
+
+// 更换一台服务器的配对码:这台服务器的密码一起换,并立即应用。服务器不存在回 404
+export const rotateShareCode = (id: string) =>
+  requestJson<OpenboxShareCodeRotated>(`/api/openbox/client-app/share-codes/${encodeURIComponent(id)}/rotate`, {
+    method: 'POST',
+  })
 
 // ---- 内容过滤(规则集和脚本快照存在路由器上,同步到 iOS 后在手机执行)----
 // 接口形态取自 v0.1.334 面板的调用。新增 / 启停 / 删除都返回整份最新列表。

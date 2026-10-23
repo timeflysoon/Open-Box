@@ -30,6 +30,11 @@
             {{ lastSync ? $t('clientConfigLastSync', { time: lastSync }) : $t('clientConfigNeverSynced') }}
           </span>
         </div>
+        <span
+          v-if="issue.pairCode"
+          v-tip.contain="$t('pairCodeTip')"
+          class="badge badge-sm badge-ghost font-mono tracking-widest"
+        >{{ issue.pairCode }}</span>
         <button
           type="button"
           class="btn btn-ghost btn-square btn-xs"
@@ -103,6 +108,30 @@
           alt="QR"
         />
         <p class="text-base-content/60 text-center text-xs">{{ $t('clientConfigScanHint') }}</p>
+        <div
+          v-if="issue?.pairCode"
+          class="flex items-center justify-center gap-2 text-sm"
+        >
+          {{ $t('pairCodeLabel') }}
+          <span class="font-mono text-lg font-semibold tracking-widest">{{ issue.pairCode }}</span>
+          <button
+            type="button"
+            class="btn btn-ghost btn-square btn-xs"
+            :disabled="rotating"
+            :aria-label="$t('pairCodeRotate')"
+            v-tip.contain="$t('pairCodeRotate')"
+            @click="showRotateConfirm = true"
+          >
+            <span
+              v-if="rotating"
+              class="loading loading-spinner loading-xs"
+            />
+            <ArrowPathIcon
+              v-else
+              class="h-4 w-4"
+            />
+          </button>
+        </div>
         <div class="join w-full">
           <input
             :value="code"
@@ -126,7 +155,7 @@
           {{ $t('clientConfigSyncOffHint') }}
         </p>
         <p
-          v-if="issue && !issue.lanAddresses.length"
+          v-if="issue && !lan && !publicBase"
           class="text-warning text-xs"
         >
           {{ $t('clientConfigNoLan') }}
@@ -142,6 +171,12 @@
         </div>
       </div>
     </DialogWrapper>
+
+    <PairCodeRotateConfirm
+      v-model="showRotateConfirm"
+      :message="$t('pairCodeRotateLocalConfirm')"
+      @confirm="rotate"
+    />
   </div>
 </template>
 
@@ -150,21 +185,25 @@ import { getConfigsAPI, patchConfigsAPI } from '@/api'
 import {
   fetchClientConfig,
   fetchClientConfigFile,
+  rotateClientConfig,
   setClientConfigEnabled,
   type OpenboxClientAppInfo,
   type OpenboxClientConfigIssue,
 } from '@/api/clientApp'
 import DialogWrapper from '@/components/common/DialogWrapper.vue'
+import PairCodeRotateConfirm from '@/components/clientapp/PairCodeRotateConfirm.vue'
 import StatusBadge from '@/components/common/StatusBadge.vue'
 import { copyText } from '@/helper/clipboard'
 import {
   buildClientImportCode,
   clientConfigExportFileName,
-  withImportCode,
+  panelPublicBase,
+  pickLanAddress,
 } from '@/helper/clientAppCode'
 import { showNotification } from '@/helper/notification'
 import {
   ArrowDownTrayIcon,
+  ArrowPathIcon,
   ClipboardDocumentIcon,
   DevicePhoneMobileIcon,
   PowerIcon,
@@ -218,23 +257,43 @@ const name = computed(
   () => props.info.serverInfo.name || props.info.serverInfoDefaults.name || issue.value?.routerName || props.info.routerName,
 )
 
+// 码里的 lan / pub 跟着浏览器当前打开面板的地址走(见 helper/clientAppCode.ts)
+const lan = computed(() => (issue.value ? pickLanAddress(issue.value.lanAddresses, issue.value.panelPort) : ''))
+const publicBase = computed(() => panelPublicBase())
+
 const code = computed(() => {
   const i = issue.value
   if (!i) return ''
   return buildClientImportCode({
     routerId: i.routerId,
     routerName: i.routerName,
-    lan: i.lanAddresses[0] || '',
+    lan: lan.value,
     panelPort: i.panelPort,
-    token: i.token,
-    key: i.key,
+    publicBase: publicBase.value,
+    nonce: i.nonce,
   })
 })
 
 const lastSync = computed(() => {
-  const at = issue.value?.device?.lastSyncAt
+  const at = issue.value?.lastSyncAt
   return at ? new Date(at).toLocaleString() : ''
 })
+
+// 更换配对码:之前导入的设备和导出的文件都会失效,所以先确认一次
+const showRotateConfirm = ref(false)
+const rotating = ref(false)
+const rotate = async () => {
+  if (rotating.value) return
+  rotating.value = true
+  try {
+    issue.value = await rotateClientConfig()
+    showNotification({ content: 'pairCodeRotated', params: { code: issue.value.pairCode }, type: 'alert-success' })
+  } catch (error) {
+    showNotification({ content: 'pairCodeRotateFailed', params: { message: errorMessage(error) }, type: 'alert-error' })
+  } finally {
+    rotating.value = false
+  }
+}
 
 const errorMessage = (error: unknown) => (error instanceof Error ? error.message : String(error))
 
@@ -303,10 +362,10 @@ const toggleEnabled = async () => {
 
 const exportFile = async () => {
   const current = issue.value
-  if (!current || !code.value || exporting.value) return
+  if (!current || exporting.value) return
   exporting.value = true
   try {
-    const bundle = withImportCode(await fetchClientConfigFile(), code.value)
+    const bundle = await fetchClientConfigFile(lan.value, publicBase.value)
     const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: 'application/json' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
