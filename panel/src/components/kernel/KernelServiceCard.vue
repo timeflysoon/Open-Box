@@ -26,11 +26,6 @@
           <ArrowTopRightOnSquareIcon class="text-base-content/50 h-4 w-4" />
         </a>
         <div class="ml-auto flex items-center gap-2">
-          <ExclamationTriangleIcon
-            v-if="warnTip"
-            class="text-warning h-5 w-5 shrink-0"
-            v-tip="warnTip"
-          />
           <FactoryResetButton />
         </div>
       </div>
@@ -80,7 +75,7 @@
 
       <div
         v-if="conflicts.length > 0"
-        class="alert alert-warning flex-col items-start gap-1"
+        class="alert alert-warning flex flex-col items-start gap-1"
       >
         <div class="flex items-center gap-2 font-medium">
           <ExclamationTriangleIcon class="h-4 w-4 shrink-0" />
@@ -349,13 +344,6 @@ const kernelText = computed(() => {
 // 冲突的代理工具读共享状态,不用页面传进来的那份快照:
 // 快照只在进页面和点动作后更新,进页面时拿到 null,横幅就一直不出现
 const conflicts = computed(() => serviceStatus.value?.conflicts ?? props.status?.conflicts ?? [])
-
-// 需要用户注意的事:有冲突的代理工具、或有改动还没重启生效
-const warnTip = computed(() => {
-  if (conflicts.value.length) return t('kernelConflictTitle')
-  if (serviceStatus.value?.pendingRestart?.pending) return t('restartPendingToastPlain')
-  return ''
-})
 
 // 本机系统:发行版名 + 版本 + 架构。osRelease 的形状随服务端版本不同,按几种常见写法读
 const osName = computed(() => {
