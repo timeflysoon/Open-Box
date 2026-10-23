@@ -69,7 +69,7 @@
       </div>
 
       <div
-        v-if="status && status.conflicts.length > 0"
+        v-if="conflicts.length > 0"
         class="alert alert-warning flex-col items-start gap-1"
       >
         <div class="flex items-center gap-2 font-medium">
@@ -78,7 +78,7 @@
         </div>
         <ul class="list-disc pl-6 text-xs">
           <li
-            v-for="c in status.conflicts"
+            v-for="c in conflicts"
             :key="c.id"
           >
             {{ $t('kernelConflictItem', { name: c.label }) }}
@@ -332,9 +332,13 @@ const kernelText = computed(() => {
   return /^sing-box/i.test(raw) ? raw : `sing-box version ${raw}`
 })
 
+// 冲突的代理工具读共享状态,不用页面传进来的那份快照:
+// 快照只在进页面和点动作后更新,进页面时拿到 null,横幅就一直不出现
+const conflicts = computed(() => serviceStatus.value?.conflicts ?? props.status?.conflicts ?? [])
+
 // 需要用户注意的事:有冲突的代理工具、或有改动还没重启生效
 const warnTip = computed(() => {
-  if (props.status?.conflicts.length) return t('kernelConflictTitle')
+  if (conflicts.value.length) return t('kernelConflictTitle')
   if (serviceStatus.value?.pendingRestart?.pending) return t('restartPendingToastPlain')
   return ''
 })
