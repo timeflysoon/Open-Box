@@ -1923,7 +1923,7 @@ const en = {
   shareCodeButton: 'QR code',
   shareCodeTitle: 'Scan to connect "{name}"',
   shareCodeAppHint:
-    'Scan with the Open-Box app: it routes by the region routing below. Enter the pairing code when importing.',
+    'Scan with the updated Open-Box app to use region routing. The router panel must be reachable when importing; enter the pairing code to fetch the configuration.',
   shareCodeLinkHint: 'Plain node link for other apps.',
   shareCodeLocalAddress:
     'The connect address {address} only works at home; use a public IP or domain.',

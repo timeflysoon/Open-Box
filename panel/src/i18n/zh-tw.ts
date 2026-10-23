@@ -1808,7 +1808,7 @@ const zhTW: LANG_MESSAGE = {
   serverPortCheckFailed: '連接埠檢測失敗:{message}',
   shareCodeButton: '掃碼',
   shareCodeTitle: '掃碼連線「{name}」',
-  shareCodeAppHint: '用 Open-Box App 掃:依本頁「地區分流」分流,匯入時輸入配對碼。',
+  shareCodeAppHint: '用新版 Open-Box App 掃:依本頁「地區分流」分流。匯入時需能存取路由器面板,輸入配對碼取得設定。',
   shareCodeLinkHint: '一般節點連結,給其他客戶端用。',
   shareCodeLocalAddress: '連線位址 {address} 只在家裡能用,在外面連不上;要填公網 IP 或網域。',
   shareCodeNoLan:

@@ -1807,7 +1807,7 @@ const zh: LANG_MESSAGE = {
   serverPortCheckFailed: '端口检测失败:{message}',
   shareCodeButton: '扫码',
   shareCodeTitle: '扫码连接「{name}」',
-  shareCodeAppHint: '用 Open-Box App 扫:按本页「地区分流」分流,导入时输入配对码。',
+  shareCodeAppHint: '用新版 Open-Box App 扫:按本页「地区分流」分流。导入时需能访问路由器面板,输入配对码获取配置。',
   shareCodeLinkHint: '普通节点链接,给其他客户端用。',
   shareCodeLocalAddress: '连接地址 {address} 只在家里能用,在外面连不上;要填公网 IP 或域名。',
   shareCodeNoLan:
