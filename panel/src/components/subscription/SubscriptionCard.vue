@@ -48,7 +48,7 @@
               class="btn btn-ghost btn-square btn-sm z-30"
               v-tip="$t('proxiesSubscriptionLatencyTest')"
               :aria-label="$t('proxiesSubscriptionLatencyTest')"
-              :disabled="!allProxies.length"
+              :disabled="!allProxies.length && !subscription.nodeCount"
               @click.stop="handleLatencyTest"
             >
               <span
@@ -170,7 +170,7 @@ import ProxyNodeGrid from '@/components/proxies/ProxyNodeGrid.vue'
 import ProxyPreview from '@/components/proxies/ProxyPreview.vue'
 import { useRenderProxies } from '@/composables/renderProxies'
 import { prettyBytesHelper } from '@/helper/utils'
-import { nodeProviders } from '@/store/openboxSiteSets'
+import { loadOpenboxNodeGroups, nodeProviders } from '@/store/openboxSiteSets'
 import { proxiesFilter, proxyMap, proxyNodesLatencyTest } from '@/store/proxies'
 import { hideUnavailableProxies } from '@/store/settings'
 import { ArrowPathIcon, Bars3Icon, BoltIcon, PencilSquareIcon, PowerIcon, TrashIcon } from '@heroicons/vue/24/outline'
@@ -273,10 +273,17 @@ const usageInfo = computed(() => {
 
 const isLatencyTesting = ref(false)
 const handleLatencyTest = async () => {
-  if (isLatencyTesting.value || !renderProxies.value.length) return
+  if (isLatencyTesting.value) return
   isLatencyTesting.value = true
   try {
-    await proxyNodesLatencyTest(props.subscription.name, renderProxies.value, {
+    // 先刷新「节点 → 订阅」归属:内核没起、代理列表还是空的时候,也能按订阅自己记的节点测速(与 v0.1.351 一致)
+    await loadOpenboxNodeGroups()
+    const owned = [...nodeProviders.value.entries()]
+      .filter(([, provider]) => provider === props.subscription.name)
+      .map(([tag]) => tag)
+    const nodes = owned.length ? owned : renderProxies.value
+    if (!nodes.length) return
+    await proxyNodesLatencyTest(props.subscription.name, nodes, {
       displayName: props.subscription.name,
       keyName: `subscription:${props.subscription.id}`,
     })
