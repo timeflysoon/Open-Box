@@ -187,48 +187,21 @@ export const failoverProbeOverload = computed(() => {
 
 // 故障转移组的「测速」就是重新检测(与上游 v0.1.338 一致):通知服务端马上把这个组的节点全部重测一遍,
 // 然后每秒看一次状态,直到服务端做完(最多等 2 分钟)。同一个组正在检测时再点不重复发
-const rechecking = new Set<string>()
+// 点「重新检测」:让服务端马上把这个组的节点全部重测一遍,只发一次请求;检测进度由状态轮询显示
 export const recheckFailoverGroup = async (groupName: string) => {
-  if (rechecking.has(groupName)) return
-  rechecking.add(groupName)
-  let started = false
-  const controller = new AbortController()
-  const { signal } = controller
-  const deadline = Date.now() + 120_000
-  const timer = setTimeout(() => controller.abort(new Error(i18n.global.t('latencyTimeout'))), 120_000)
+  const group = failoverGroupByTag.value.get(groupName)
+  if (!group) return
   try {
-    let id =
-      failoverGroupByTag.value.get(groupName)?.id ??
-      managedOutbounds.value.find((g) => g.name === groupName && g.type === 'failover')?.id
-    if (!id) {
-      failoverStatus.value = await fetchFailoverStatus(signal)
-      signal.throwIfAborted()
-      id = failoverGroupByTag.value.get(groupName)?.id
-    }
-    if (!id) throw new Error(groupName)
-    await recheckFailover(id, signal)
-    started = true
+    await recheckFailover(group.id)
     showNotification({ content: 'failoverRecheckStarted', params: { name: groupName }, type: 'alert-success' })
-    do {
-      const status = await fetchFailoverStatus(signal)
-      failoverStatus.value = status
-      const group = status.groups.find((g) => g.id === id)
-      if (!group || status.paused || group.paused) break
-      const pending = group.recheckPending ?? group.status === 'failing'
-      if ((!group.manualRecheck && !group.inFlight && !pending) || Date.now() >= deadline) break
-      await new Promise((resolve) => setTimeout(resolve, 1000))
-    } while (Date.now() < deadline)
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
-    showNotification(
-      started
-        ? { content: 'testRequestFailedTip', params: { message }, type: 'alert-error' }
-        : { content: 'failoverRecheckFailed', params: { error: message }, type: 'alert-error' },
-    )
-  } finally {
-    clearTimeout(timer)
-    rechecking.delete(groupName)
+    showNotification({
+      content: 'failoverRecheckFailed',
+      params: { error: error instanceof Error ? error.message : String(error) },
+      type: 'alert-error',
+    })
   }
+  await loadFailoverStatus()
 }
 
 // 这个内部子组是不是某个手动选择页签的 selector(是的话它的成员卡片可以点选)

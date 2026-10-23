@@ -28,6 +28,7 @@
 <script setup lang="ts">
 import { NOT_CONNECTED } from '@/constant'
 import { getColorForLatency } from '@/helper'
+import { latencyReasonText } from '@/helper/latencyReason'
 import { useTooltip } from '@/helper/tooltip'
 import { isSingBox } from '@/api'
 import { MAX_LATENCY_HISTORY, getRecentLatencyHistory, type LatencySample } from '@/store/latencyHistory'
@@ -38,10 +39,8 @@ import { CountUp } from 'countup.js'
 import dayjs from 'dayjs'
 import { twMerge } from 'tailwind-merge'
 import { computed, createVNode, getCurrentInstance, nextTick, onMounted, onUnmounted, ref, render, watch } from 'vue'
-import { useI18n } from 'vue-i18n'
 import NodeLatencyTip from './NodeLatencyTip.vue'
 
-const { t } = useI18n()
 const { showTip } = useTooltip()
 // 浮层是手动挂到 tippy 里的 DOM,不在这个组件的渲染树下:把应用上下文带过去,里面的组件才拿得到 i18n
 const appContext = getCurrentInstance()?.appContext ?? null
@@ -130,7 +129,7 @@ const handlerHistoryTip = (e: Event) => {
 
     const latency = document.createElement('div')
     latency.className = `flex items-center text-xs tabular-nums ${getColorForLatency(item.delay)}`
-    latency.textContent = item.delay === NOT_CONNECTED ? t('latencyTimeout') : `${item.delay}ms`
+    latency.textContent = item.delay === NOT_CONNECTED ? latencyReasonText(item.reason) : `${item.delay}ms`
 
     historyList.append(time, cell, latency)
   })

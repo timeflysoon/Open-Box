@@ -4,7 +4,14 @@
     <div class="card-body gap-3 p-4 text-sm">
       <!-- 标题行:Open-Box 标识 + 版本号;右边是需要注意的提示和「恢复出厂设置」 -->
       <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
-        <div class="inline-flex items-center gap-2 py-1">
+        <a
+          href="https://github.com/timeflysoon/Open-Box"
+          target="_blank"
+          rel="noopener noreferrer"
+          class="hover:bg-base-200 inline-flex cursor-pointer items-center gap-2 rounded-lg py-1"
+          aria-label="Open-Box GitHub"
+          v-tip="$t('openboxGithubHint')"
+        >
           <img
             :src="logoUrl"
             class="app-logo h-6 w-auto"
@@ -14,7 +21,10 @@
             v-if="openboxVersion"
             class="font-mono text-base"
           >{{ openboxVersion }}</span>
-        </div>
+          <GithubIcon class="h-5 w-5" />
+          <span class="text-base">GitHub</span>
+          <ArrowTopRightOnSquareIcon class="text-base-content/50 h-4 w-4" />
+        </a>
         <div class="ml-auto flex items-center gap-2">
           <ExclamationTriangleIcon
             v-if="warnTip"
