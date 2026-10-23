@@ -907,6 +907,13 @@ const errorText = (raw: string) => {
 
 // ---------- 左列:规则路由 ----------
 const ruleOutbound = computed(() => rule.value?.finalOutbound || '')
+// 这次查询最终是不是走直连出口(链路最后一跳的类型是 direct);推算失败或被规则拒绝算否
+const exitsDirect = computed(() => {
+  const r = rule.value
+  if (!r || r.matchError || r.matched?.action === 'reject') return false
+  const leaf = r.chain?.length ? r.chain[r.chain.length - 1] : r.finalOutbound || ''
+  return Boolean(leaf) && proxyMap.value[leaf]?.type?.toLowerCase() === 'direct'
+})
 // 命中规则的归属:站点集在代理页里有同名组就显示成组名,没有就当文字;前置自定义分流直接显示名字;
 // 内置规则按 name 取文案;服务端没给 owner 的老版本,退回 ownerName / 最终出站
 const BUILTIN_OWNER_KEYS: Record<string, string> = {
@@ -1064,6 +1071,18 @@ const ruleEntry = computed(() => {
   // 没用默认放行时,服务端说明了原因,跟在各条详情后面
   const whyBlacklist = f.entryMode?.reason ? t('routeEntryWhyBlacklist', { reason: f.entryMode.reason }) : ''
   if (!f.nativeBypass?.enabled) {
+    // 按 IP 查、最终走直连、而且有直连 IP 规则:入口旁路没开,这个地址会先进内核再放行
+    if (targetKind.value !== 'domain' && exitsDirect.value && Number(f.directIpBypassCount) > 0) {
+      return { state: 'pending' as RouteStageState, value: t('routeEntryDirectIp'), sub: '', detail: [t('routeEntryDirectIpDetail'), whyBlacklist].filter(Boolean) }
+    }
+    // 按域名查、最终不走直连:域名在内核里就分流了,和旁路无关
+    if (targetKind.value === 'domain' && !exitsDirect.value) {
+      return { state: 'ok' as RouteStageState, value: t('routeEntryKernel'), sub: '', detail: [whyBlacklist].filter(Boolean) }
+    }
+    // 按域名查、最终走直连、内核直接回真实地址(直连应答):是否放行要看应答,这里说不准
+    if (targetKind.value === 'domain' && f.entryMode?.directAnswer) {
+      return { state: 'pending' as RouteStageState, value: t('routeEntryDirectAnswer'), sub: t('routeEntryNoBypass'), detail: [t('routeEntryDirectAnswerDetail'), whyBlacklist].filter(Boolean) }
+    }
     return { state: 'ok' as RouteStageState, value: t('routeEntryKernel'), sub: t('routeEntryNoBypass'), detail: [t('ruleLookupFirstLayerBypassOff', { reason: f.nativeBypass?.reason || '' }), whyBlacklist].filter(Boolean) }
   }
   const sets = f.nativeBypass.sets
