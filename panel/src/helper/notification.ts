@@ -87,6 +87,12 @@ const closeAlert = (alert: HTMLElement, alertKey?: string) => {
   alert.remove()
 }
 
+// 按 key 关掉一条还在显示的通知(没有就什么都不做)
+export const dismissNotification = (alertKey: string) => {
+  const alertData = alertMap.get(alertKey)
+  if (alertData) closeAlert(alertData.alert, alertKey)
+}
+
 const setAlert = (
   alert: HTMLElement,
   content: string,

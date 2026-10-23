@@ -282,6 +282,7 @@ import {
   isStopDisabled,
   pendingAction,
   serviceStatus,
+  useConflictBannerPresence,
   useKernelActions,
 } from '@/composables/kernelService'
 import { refreshUpdateInfo, updateInfo } from '@/composables/openboxUpdate'
@@ -301,6 +302,9 @@ import { computed, onMounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 
 const { t } = useI18n()
+
+// 本卡片自带冲突横幅:在屏幕上时不再弹右上角的冲突提示
+useConflictBannerPresence()
 
 // Geo 数据、安装通道都来自更新状态(同卡的更新区也会拉;这里没有就自己拉一次)
 onMounted(() => {

@@ -6,7 +6,7 @@ import {
   type OpenboxServiceAction,
   type OpenboxServiceStatus,
 } from '@/api/openbox'
-import { showNotification } from '@/helper/notification'
+import { dismissNotification, showNotification } from '@/helper/notification'
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 
@@ -123,10 +123,26 @@ const conflictSignature = computed(() => {
   const conflicts = serviceStatus.value?.conflicts || []
   return conflicts.length ? `${conflictState.value}:${conflicts.map((c) => c.id).sort().join(',')}` : ''
 })
+// 「后端设置」的内核卡片自己就画着一条黄色冲突横幅:它在屏幕上时,右上角再弹一条是重复提示,
+// 不弹,并把已经弹出来的关掉。卡片挂载时 +1、卸载时 -1,计数 > 0 即横幅可见。
+const conflictBannerCount = ref(0)
+export const useConflictBannerPresence = () => {
+  onMounted(() => {
+    conflictBannerCount.value += 1
+  })
+  onBeforeUnmount(() => {
+    conflictBannerCount.value -= 1
+  })
+}
+
 export const useKernelConflictToast = () => {
   const { t } = useI18n()
   useServiceStatusPolling()
-  watch(conflictSignature, (next, prev) => {
+  watch([conflictSignature, conflictBannerCount], ([next, banners], [prev]) => {
+    if (banners > 0) {
+      dismissNotification('proxy-conflict')
+      return
+    }
     if (!next || next === prev) return
     const names = (serviceStatus.value?.conflicts || []).map((c) => c.label).join(t('listSeparator'))
     showNotification({
