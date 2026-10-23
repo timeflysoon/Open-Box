@@ -1,7 +1,7 @@
-// 文案对齐上游 v0.1.337(中 / 繁 / 英),并入原先拆在 dns-filter / dns-page / client-app-page 等文件里的补充文案。
+// 文案对齐上游 v0.1.351(中 / 繁 / 英),并入原先拆在 dns-filter / dns-page / client-app-page 等文件里的补充文案。
 // 键名与键值和上游 panel/dist 逐键一致,不另设 main 自有键。
 const en = {
-  // ===== 上游 v0.1.337 文案(取自上游 panel/dist,逐键与上游一致)=====
+  // ===== 上游 v0.1.351 文案(取自上游 panel/dist,逐键与上游一致)=====
   cfTitle: 'Content filtering',
   cfDescription:
     'Manage rule and script snapshots here. iOS runs the synced copy offline. HTTPS filtering requires a trusted certificate on the phone.',
@@ -267,7 +267,7 @@ const en = {
     'Use the phone or computer network DNS by default. Turn off to sync the router’s direct DNS upstreams; they must remain reachable outside your LAN.',
   clientConfigTitle: 'Local routing (app)',
   clientConfigDescription:
-    "The Open-Box app uses this router's nodes and routing rules to go online by itself, not through the router. Codes and files carry every node's credentials: only give them to your own devices.",
+    "The Open-Box app uses this router's nodes and routing rules to go online by itself, not through the router. Importing needs the pairing code, so a leaked code or file is useless to others.",
   clientConfigLastSync: 'Last sync {time}',
   clientConfigNeverSynced: 'Never synced',
   clientConfigPowerOff: 'Turn off sync (so a leaked code is useless)',
@@ -278,13 +278,27 @@ const en = {
     'Sync is off: turn it on with the power icon before the app imports or syncs.',
   clientConfigPowerFailed: 'Could not switch local routing sync: {message}',
   clientConfigScanHint:
-    'Scan with the Open-Box app, or copy the link to the phone and import it. Every phone uses the same code, and it never changes.',
+    'Scan with the Open-Box app, or copy the link to the phone and import it. Enter the pairing code below when importing.',
   clientConfigNoLan:
     "Could not read the router's LAN address: open the panel by its public address (domain) and scan again, or the app cannot reach the panel.",
   clientConfigExportFile: 'Export config file',
-  clientConfigExported: 'Exported {file}',
+  clientConfigExported: 'Exported {file}; enter pairing code {code} when importing',
   clientConfigExportFailed: 'Export failed: {message}',
   clientConfigLoadFailed: 'Could not load the local routing code: {message}',
+  pairCodeLabel: 'Pairing code',
+  pairCodeTip: 'Pairing code: the app asks for it when importing this code',
+  pairCodeRotate: 'Change pairing code',
+  pairCodeRotated: 'Pairing code changed to {code}',
+  pairCodeRotateFailed: 'Could not change the pairing code: {message}',
+  pairCodeRotateTitle: 'Change the pairing code?',
+  pairCodeRotateLocalConfirm:
+    'Devices that imported before and previously exported files will stop working. Import again with the new pairing code.',
+  pairCodeRotateShareConfirm:
+    'This server’s password changes too and takes effect at once (the kernel restarts briefly). Devices that imported before and clients using the plain link stop working; import again with the new QR code and pairing code.',
+  pairCodeRotatedApplied: 'Pairing code changed to {code}; the new password is in effect',
+  pairCodeApplyFailed:
+    'Pairing code changed to {code}, but the new password could not be applied: {message}',
+  pairCodeLoadFailed: 'Could not load the pairing codes: {message}',
   trafficRetentionDescription:
     'How long daily traffic records stay on the router; expired ones are cleaned daily. Hourly detail is kept for 7 days only. Days older than 30 days keep only the 300 destinations with the most traffic that day; the rest are merged into one "Other" row (totals, clients and nodes are unaffected).',
   trafficOtherMerged: 'Other (older data merged)',
@@ -1594,6 +1608,12 @@ const en = {
   routeDnsV6NotQueried: 'IPv6 not queried (IPv6 is off in the profile)',
   routeDnsV6Failed: 'IPv6 lookup failed: {message}',
   routeEntryKernel: 'Enters the Open-Box kernel',
+  routeEntryDirectIp: 'Direct-IP entry bypass is on',
+  routeEntryDirectIpDetail:
+    'Direct IP ranges are in the entry interval set, so matching connections bypass the kernel. Whether this target matches is confirmed by the live test on the right.',
+  routeEntryDirectAnswer: 'Direct-answer bypass',
+  routeEntryDirectAnswerDetail:
+    'Addresses from direct DNS answers are written into the entry pass set, so the connection bypasses the kernel. Traffic still enters the kernel when the terminal uses encrypted DNS or the query does not pass through the kernel.',
   routeEntryNoBypass: 'Direct sets are not bypassed natively at the entry',
   routeEntryBypassHit: 'Matches {set}, bypassed at the entry',
   routeEntryBypassUndetermined: 'Whether this target is bypassed is undetermined',
@@ -1902,7 +1922,8 @@ const en = {
   serverPortCheckFailed: 'Port check failed: {message}',
   shareCodeButton: 'QR code',
   shareCodeTitle: 'Scan to connect "{name}"',
-  shareCodeAppHint: 'Scan with the Open-Box app: it routes by the region routing below.',
+  shareCodeAppHint:
+    'Scan with the Open-Box app: it routes by the region routing below. Enter the pairing code when importing.',
   shareCodeLinkHint: 'Plain node link for other apps.',
   shareCodeLocalAddress:
     'The connect address {address} only works at home; use a public IP or domain.',
@@ -1912,7 +1933,7 @@ const en = {
   shareCodeInfoFailed: 'Failed to read router info: {message}',
   shareAppCodesTitle: 'Node routing (app)',
   shareAppCodesDescription:
-    'One code per share-network server: scan it with the Open-Box app to go online through this router.',
+    'One code and one pairing code per share-network server: scan it with the Open-Box app and enter the pairing code to go online through this router.',
   shareAppCodesEmpty: 'No share-network servers yet. Add one on the Share network tab first.',
   serverInfoTitle: 'Router identity',
   serverInfoDescription:
@@ -2027,7 +2048,7 @@ const en = {
   clientRouteOutboundBuiltin: 'Built-in',
   clientRouteOutboundGroups: 'Node groups',
   clientRouteHint:
-    'All traffic from these clients goes to the chosen outbound, ahead of site-set rules. LAN destinations still go direct.',
+    'All traffic from these clients goes to the chosen outbound, ahead of site-set rules. LAN destinations still go direct. When an IPv4 host can be linked to a MAC address, its IPv6 sources follow the same outbound and the global IPv6 settings. Subnets match their address family.',
   clientRouteErrName: 'Name is required',
   clientRouteErrSources: 'Invalid IP / CIDR: {value}',
   clientRouteErrNoSources: 'At least one client is required',

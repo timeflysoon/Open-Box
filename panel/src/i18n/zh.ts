@@ -1,9 +1,9 @@
-// 文案对齐上游 v0.1.337(中 / 繁 / 英),并入原先拆在 dns-filter / dns-page / client-app-page 等文件里的补充文案。
+// 文案对齐上游 v0.1.351(中 / 繁 / 英),并入原先拆在 dns-filter / dns-page / client-app-page 等文件里的补充文案。
 // 键名与键值和上游 panel/dist 逐键一致,不另设 main 自有键。
 import type { LANG_MESSAGE } from './en'
 
 const zh: LANG_MESSAGE = {
-  // ===== 上游 v0.1.337 文案(取自上游 panel/dist,逐键与上游一致)=====
+  // ===== 上游 v0.1.351 文案(取自上游 panel/dist,逐键与上游一致)=====
   cfTitle: '内容过滤',
   cfDescription:
     '在路由器管理规则和脚本快照，同步到 iOS 后在手机执行。手机离线仍可使用，开启 HTTPS 过滤需在手机安装并信任证书。',
@@ -255,8 +255,7 @@ const zh: LANG_MESSAGE = {
   clientSystemDnsHint:
     '默认使用手机或电脑当前网络的 DNS；关闭后同步路由器配置的直连 DNS 上游，请确保离开局域网后仍可访问。',
   clientConfigTitle: '本地分流（客户端）',
-  clientConfigDescription:
-    'Open-Box App 用这台路由器的节点和分流规则自己上网,不经过路由器。码和文件里有全部节点的账号密码,只给自己的设备。',
+  clientConfigDescription: 'Open-Box App 用这台路由器的节点和分流规则自己上网,不经过路由器。导入要输入配对码,码和文件泄露了别人也用不了。',
   clientConfigLastSync: '最后同步 {time}',
   clientConfigNeverSynced: '还没同步过',
   clientConfigPowerOff: '关闭同步(防止码泄露)',
@@ -265,14 +264,24 @@ const zh: LANG_MESSAGE = {
   clientConfigSyncDisabled: '本地分流同步已关闭,要同步时再打开',
   clientConfigSyncOffHint: '同步已关闭:App 扫码导入、同步前,先点电源图标打开。',
   clientConfigPowerFailed: '开关本地分流同步失败:{message}',
-  clientConfigScanHint:
-    '用 Open-Box App 扫码导入,或把链接复制到手机上导入。所有手机用同一个码,码固定不变。',
+  clientConfigScanHint: '用 Open-Box App 扫码导入,或把链接复制到手机上导入;导入时输入下面的配对码。',
   clientConfigNoLan:
     '没读到路由器的局域网地址:请用公网地址(域名)打开面板再扫码,不然 App 连不上面板。',
   clientConfigExportFile: '导出配置文件',
-  clientConfigExported: '已导出 {file}',
+  clientConfigExported: '已导出 {file},导入时输入配对码 {code}',
   clientConfigExportFailed: '导出失败:{message}',
   clientConfigLoadFailed: '没读到本地分流的码:{message}',
+  pairCodeLabel: '配对码',
+  pairCodeTip: '配对码:App 导入这个码时要输入',
+  pairCodeRotate: '更换配对码',
+  pairCodeRotated: '配对码已更换为 {code}',
+  pairCodeRotateFailed: '更换配对码失败:{message}',
+  pairCodeRotateTitle: '更换配对码？',
+  pairCodeRotateLocalConfirm: '更换后,之前导入的设备和导出的文件都会失效,要用新的配对码重新导入。',
+  pairCodeRotateShareConfirm: '这台服务器的密码会一起更换并立即生效(内核重启一下):之前导入的设备和用普通链接的客户端都会失效,要用新的二维码和配对码重新导入。',
+  pairCodeRotatedApplied: '配对码已更换为 {code},新密码已生效',
+  pairCodeApplyFailed: '配对码已更换为 {code},但新密码没能生效:{message}',
+  pairCodeLoadFailed: '没读到配对码:{message}',
   trafficRetentionDescription:
     '每日流量记录在路由器上存多久,超期每天清理一次;按小时的明细只留最近 7 天。超过 30 天的日子只保留当天流量最大的 300 个访问目标,其余合并成一行「其他」(总量、终端、节点不受影响)。',
   trafficOtherMerged: '其他(较早的数据已合并)',
@@ -1508,6 +1517,10 @@ const zh: LANG_MESSAGE = {
   routeDnsV6NotQueried: 'IPv6 未查询（档案未开启 IPv6）',
   routeDnsV6Failed: 'IPv6 解析失败:{message}',
   routeEntryKernel: '进入 Open-Box 内核',
+  routeEntryDirectIp: '直连 IP 入口旁路已启用',
+  routeEntryDirectIpDetail: '直连 IP 段已写进入口 interval 集合，命中的连接不进内核；本目标是否命中集合以右栏实测为准。',
+  routeEntryDirectAnswer: '直连应答放行',
+  routeEntryDirectAnswerDetail: '直连域名解析出的地址会写进入口放行集合，连接在入口直接放走；终端自带加密 DNS 或查询不经过内核时仍会进内核。',
   routeEntryNoBypass: '直连集合未在入口原生旁路',
   routeEntryBypassHit: '本目标命中 {set},在入口旁路',
   routeEntryBypassUndetermined: '本目标是否旁路未判定',
@@ -1794,7 +1807,7 @@ const zh: LANG_MESSAGE = {
   serverPortCheckFailed: '端口检测失败:{message}',
   shareCodeButton: '扫码',
   shareCodeTitle: '扫码连接「{name}」',
-  shareCodeAppHint: '用 Open-Box App 扫:按本页「地区分流」分流。',
+  shareCodeAppHint: '用 Open-Box App 扫:按本页「地区分流」分流,导入时输入配对码。',
   shareCodeLinkHint: '普通节点链接,给其他客户端用。',
   shareCodeLocalAddress: '连接地址 {address} 只在家里能用,在外面连不上;要填公网 IP 或域名。',
   shareCodeNoLan:
@@ -1802,7 +1815,7 @@ const zh: LANG_MESSAGE = {
   shareCodeDisabled: '这台服务器已停用,扫了也连不上。',
   shareCodeInfoFailed: '读取路由器信息失败:{message}',
   shareAppCodesTitle: '节点分流（客户端）',
-  shareAppCodesDescription: '共享网络的每台服务器一个码,Open-Box App 扫了经这台路由器上网。',
+  shareAppCodesDescription: '共享网络的每台服务器一个码和一个配对码,Open-Box App 扫码、输入配对码后经这台路由器上网。',
   shareAppCodesEmpty: '还没有共享网络服务器,先到「共享网络」页签添加。',
   serverInfoTitle: '路由器标识',
   serverInfoDescription:
@@ -1909,7 +1922,8 @@ const zh: LANG_MESSAGE = {
   clientRouteOutboundLabel: '出站',
   clientRouteOutboundBuiltin: '内置',
   clientRouteOutboundGroups: '节点组',
-  clientRouteHint: '这些终端的全部流量都走这里选的出站,优先级高于站点集;局域网目标仍直连。',
+  clientRouteHint:
+    '这些终端的全部流量都走这里选的出站,优先级高于站点集;局域网目标仍直连。单机 IPv4 地址能识别到 MAC 时,同时匹配该设备的 IPv6,统一遵守全局 IPv6 设置;网段按所填地址族匹配。',
   clientRouteErrName: '名称不能为空',
   clientRouteErrSources: '无效的 IP / 网段:{value}',
   clientRouteErrNoSources: '至少填一个终端',

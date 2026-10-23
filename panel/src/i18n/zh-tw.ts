@@ -1,9 +1,9 @@
-// 文案对齐上游 v0.1.337(中 / 繁 / 英),并入原先拆在 dns-filter / dns-page / client-app-page 等文件里的补充文案。
+// 文案对齐上游 v0.1.351(中 / 繁 / 英),并入原先拆在 dns-filter / dns-page / client-app-page 等文件里的补充文案。
 // 键名与键值和上游 panel/dist 逐键一致,不另设 main 自有键。
 import type { LANG_MESSAGE } from './en'
 
 const zhTW: LANG_MESSAGE = {
-  // ===== 上游 v0.1.337 文案(取自上游 panel/dist,逐键与上游一致)=====
+  // ===== 上游 v0.1.351 文案(取自上游 panel/dist,逐键与上游一致)=====
   cfTitle: '內容過濾',
   cfDescription:
     '在路由器管理規則與腳本快照，同步到 iOS 後在手機執行。離線仍可使用；HTTPS 過濾需在手機安裝並信任憑證。',
@@ -255,8 +255,7 @@ const zhTW: LANG_MESSAGE = {
   clientSystemDnsHint:
     '預設使用手機或電腦目前網路的 DNS；關閉後同步路由器設定的直連 DNS 上游，請確保離開區域網路後仍可存取。',
   clientConfigTitle: '本地分流（用戶端）',
-  clientConfigDescription:
-    'Open-Box App 用這台路由器的節點和分流規則自己上網,不經過路由器。碼和檔案裡有全部節點的帳號密碼,只給自己的裝置。',
+  clientConfigDescription: 'Open-Box App 用這台路由器的節點和分流規則自己上網,不經過路由器。匯入要輸入配對碼,碼和檔案外洩了別人也用不了。',
   clientConfigLastSync: '最後同步 {time}',
   clientConfigNeverSynced: '還沒同步過',
   clientConfigPowerOff: '關閉同步(防止碼外洩)',
@@ -265,14 +264,25 @@ const zhTW: LANG_MESSAGE = {
   clientConfigSyncDisabled: '本地分流同步已關閉,要同步時再開啟',
   clientConfigSyncOffHint: '同步已關閉:App 掃碼匯入、同步前,先點電源圖示開啟。',
   clientConfigPowerFailed: '開關本地分流同步失敗:{message}',
-  clientConfigScanHint:
-    '用 Open-Box App 掃碼匯入,或把連結複製到手機上匯入。所有手機用同一個碼,碼固定不變。',
+  clientConfigScanHint: '用 Open-Box App 掃碼匯入,或把連結複製到手機上匯入;匯入時輸入下面的配對碼。',
   clientConfigNoLan:
     '沒讀到路由器的區域網路位址:請用公網位址(網域)開啟面板再掃碼,不然 App 連不上面板。',
   clientConfigExportFile: '匯出設定檔',
-  clientConfigExported: '已匯出 {file}',
+  clientConfigExported: '已匯出 {file},匯入時輸入配對碼 {code}',
   clientConfigExportFailed: '匯出失敗:{message}',
   clientConfigLoadFailed: '沒讀到本地分流的碼:{message}',
+  pairCodeLabel: '配對碼',
+  pairCodeTip: '配對碼:App 匯入這個碼時要輸入',
+  pairCodeRotate: '更換配對碼',
+  pairCodeRotated: '配對碼已更換為 {code}',
+  pairCodeRotateFailed: '更換配對碼失敗:{message}',
+  pairCodeRotateTitle: '更換配對碼？',
+  pairCodeRotateLocalConfirm: '更換後,之前匯入的裝置和匯出的檔案都會失效,要用新的配對碼重新匯入。',
+  pairCodeRotateShareConfirm:
+    '這台伺服器的密碼會一起更換並立即生效(核心重啟一下):之前匯入的裝置和用一般連結的用戶端都會失效,要用新的 QR code 和配對碼重新匯入。',
+  pairCodeRotatedApplied: '配對碼已更換為 {code},新密碼已生效',
+  pairCodeApplyFailed: '配對碼已更換為 {code},但新密碼沒能生效:{message}',
+  pairCodeLoadFailed: '沒讀到配對碼:{message}',
   trafficRetentionDescription:
     '每日流量記錄在路由器上存多久,超期每天清理一次;按小時的明細只留最近 7 天。超過 30 天的日子只保留當天流量最大的 300 個存取目標,其餘合併成一行「其他」(總量、終端、節點不受影響)。',
   trafficOtherMerged: '其他(較早的資料已合併)',
@@ -1508,6 +1518,10 @@ const zhTW: LANG_MESSAGE = {
   routeDnsV6NotQueried: 'IPv6 未查詢（設定檔未開啟 IPv6）',
   routeDnsV6Failed: 'IPv6 解析失敗:{message}',
   routeEntryKernel: '進入 Open-Box 核心',
+  routeEntryDirectIp: '直連 IP 入口旁路已啟用',
+  routeEntryDirectIpDetail: '直連 IP 段已寫進入口 interval 集合，命中的連線不進核心；本目標是否命中集合以右欄實測為準。',
+  routeEntryDirectAnswer: '直連應答放行',
+  routeEntryDirectAnswerDetail: '直連網域解析出的位址會寫進入口放行集合，連線在入口直接放走；終端自帶加密 DNS 或查詢不經過核心時仍會進核心。',
   routeEntryNoBypass: '直連集合未在入口原生旁路',
   routeEntryBypassHit: '本目標命中 {set},在入口旁路',
   routeEntryBypassUndetermined: '本目標是否旁路未判定',
@@ -1794,7 +1808,7 @@ const zhTW: LANG_MESSAGE = {
   serverPortCheckFailed: '連接埠檢測失敗:{message}',
   shareCodeButton: '掃碼',
   shareCodeTitle: '掃碼連線「{name}」',
-  shareCodeAppHint: '用 Open-Box App 掃:依本頁「地區分流」分流。',
+  shareCodeAppHint: '用 Open-Box App 掃:依本頁「地區分流」分流,匯入時輸入配對碼。',
   shareCodeLinkHint: '一般節點連結,給其他客戶端用。',
   shareCodeLocalAddress: '連線位址 {address} 只在家裡能用,在外面連不上;要填公網 IP 或網域。',
   shareCodeNoLan:
@@ -1802,7 +1816,7 @@ const zhTW: LANG_MESSAGE = {
   shareCodeDisabled: '這台伺服器已停用,掃了也連不上。',
   shareCodeInfoFailed: '讀取路由器資訊失敗:{message}',
   shareAppCodesTitle: '節點分流（用戶端）',
-  shareAppCodesDescription: '共享網路的每台伺服器一個碼,Open-Box App 掃了經這台路由器上網。',
+  shareAppCodesDescription: '共享網路的每台伺服器一個碼和一個配對碼,Open-Box App 掃碼、輸入配對碼後經這台路由器上網。',
   shareAppCodesEmpty: '還沒有共享網路伺服器,先到「共享網路」頁籤新增。',
   serverInfoTitle: '路由器標識',
   serverInfoDescription:
@@ -1909,7 +1923,8 @@ const zhTW: LANG_MESSAGE = {
   clientRouteOutboundLabel: '出站',
   clientRouteOutboundBuiltin: '內建',
   clientRouteOutboundGroups: '節點組',
-  clientRouteHint: '這些終端的全部流量都走這裡選的出站,優先級高於站點集;區域網路目標仍直連。',
+  clientRouteHint:
+    '這些終端的全部流量都走這裡選的出站,優先級高於站點集;區域網路目標仍直連。單機 IPv4 位址能識別到 MAC 時,同時比對該裝置的 IPv6,統一遵守全域 IPv6 設定;網段依所填位址族比對。',
   clientRouteErrName: '名稱不能為空',
   clientRouteErrSources: '無效的 IP / 網段:{value}',
   clientRouteErrNoSources: '至少填一個終端',
