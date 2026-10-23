@@ -181,7 +181,7 @@ const escapeHtml = (text: string) =>
   text.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c] as string)
 const delayText = (delay: number) => (delay === NOT_CONNECTED ? t('siteLatencyUnreachable') : `${delay} ms`)
 // 悬停小柱:上一行是当时走的线路(没记录就用这个站点最近一次有记录的),下一行是时间 · 延迟
-const barTip = (sample: { time: number; delay: number; node?: string }, fallbackNode: string) => {
+const barTip = (sample: { time: string | number; delay: number; node?: string }, fallbackNode: string) => {
   const node = sample.node || fallbackNode
   const lines: string[] = []
   if (node) lines.push(`<span class="text-xs opacity-70">${escapeHtml(node)}</span>`)

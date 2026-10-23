@@ -286,7 +286,7 @@
       :model-value="!!pendingDelete"
       :title="$t('cfDelete')"
       box-class="content-filter-dialog"
-      @update:model-value="(open: boolean) => !open && (pendingDelete = null)"
+      @update:model-value="(open?: boolean) => !open && (pendingDelete = null)"
     >
       <p>{{ $t('cfDeleteConfirm', { name: pendingDelete?.name }) }}</p>
       <template #footer>

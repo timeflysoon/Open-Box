@@ -216,7 +216,7 @@ const qrTile = ref<{ name: string; href: string } | null>(null)
 const qrDataUrl = ref('')
 
 // 可下载的平台:拦下默认的跳转,改成弹二维码窗(窗里的按钮才是真正的下载链接)
-const onTileClick = (event: Event, tile: { available: boolean; name: string; attrs: Record<string, string> }) => {
+const onTileClick = (event: Event, tile: { available: boolean; name: string; attrs: { href?: string } }) => {
   const href = tile.attrs.href
   if (!tile.available || !href) return
   event.preventDefault()

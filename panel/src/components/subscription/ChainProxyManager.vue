@@ -688,7 +688,7 @@ const rowInfos = computed(() => {
   for (const [id, result] of Object.entries(rowTests.value)) {
     const exit = result.ip?.ok ? parseExitIp(result.ip) : null
     infos[id] = {
-      ok: result.ok,
+      ok: !!result.ok,
       ms: result.ms ?? 0,
       error: result.error ?? '',
       ipText: exit ? [exit.ip, exit.place].filter(Boolean).join(' · ') : '',
