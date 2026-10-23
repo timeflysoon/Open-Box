@@ -765,16 +765,53 @@ detect_downloader
 # 下载带版本号的资产:每个版本 URL 唯一,加速镜像缓存了上一版同名的稳定资产也串不过来
 # (update.sh 里有同样的处理和真机踩坑记录)。直连探不到、走的是镜像通道时再经镜像问一次(选好镜像之后,
 # 见下方;和 update.sh 一样,审查第六项),还拿不到才退回稳定资产名。
+# ---- openbox-router-release:start ----
+# GitHub Latest 可能是仅发布客户端的版本。只接受带独立升级脚本校验文件的
+# 路由器正式版；Latest 不符合时，从公开 Release feed 中按版本倒序查找。
+# 使用 github.com 页面及资产，镜像无需支持 api.github.com，也不依赖 JSON 工具。
 resolve_latest_tag_from() {
   case "$DOWNLOADER" in
-    curl) curl -sI --connect-timeout 8 --max-time 12 "$1" 2>/dev/null ;;
-    # OpenWrt 自带的 wget 是 uclient-fetch,没有 -S / --max-redirect(错误会被吞掉,
-    # 静默退回稳定资产名,镜像缓存旧包的问题就回来了):改为跟着 302 把 releases/latest
-    # 的页面拉下来,从里面的 /releases/tag/<tag> 链接取版本号
-    # 页面里还有 /releases/tag/*name 这种模板链接,只认 v 开头的版本号
-    wget) wget -q -O - --timeout=12 "$1" 2>/dev/null | sed -n 's|.*/releases/tag/\(v[0-9][0-9A-Za-z._-]*\).*|\1|p' | head -n 1 ;;
+    curl) env http_proxy="${OPENBOX_FETCH_PROXY:-${http_proxy:-}}" https_proxy="${OPENBOX_FETCH_PROXY:-${https_proxy:-}}" no_proxy="${OPENBOX_FETCH_NO_PROXY:-${no_proxy:-}}" curl -sI --connect-timeout 8 --max-time 12 "$1" 2>/dev/null ;;
+    wget) env http_proxy="${OPENBOX_FETCH_PROXY:-${http_proxy:-}}" https_proxy="${OPENBOX_FETCH_PROXY:-${https_proxy:-}}" no_proxy="${OPENBOX_FETCH_NO_PROXY:-${no_proxy:-}}" wget -q -O - --timeout=12 "$1" 2>/dev/null | sed -n 's|.*/releases/tag/\(v[0-9][0-9A-Za-z._-]*\).*|\1|p' | head -n 1 ;;
   esac | sed -n 's/^[Ll]ocation: .*\/releases\/tag\/\(v[0-9][0-9A-Za-z._-]*\).*/\1/p; /^v[0-9][0-9A-Za-z._-]*$/p' | head -n 1
 }
+router_release_text() {
+  case "$DOWNLOADER" in
+    curl) env http_proxy="${OPENBOX_FETCH_PROXY:-${http_proxy:-}}" https_proxy="${OPENBOX_FETCH_PROXY:-${https_proxy:-}}" no_proxy="${OPENBOX_FETCH_NO_PROXY:-${no_proxy:-}}" curl -fsSL --connect-timeout 8 --max-time 20 "$1" ;;
+    wget) env http_proxy="${OPENBOX_FETCH_PROXY:-${http_proxy:-}}" https_proxy="${OPENBOX_FETCH_PROXY:-${https_proxy:-}}" no_proxy="${OPENBOX_FETCH_NO_PROXY:-${no_proxy:-}}" wget -q -O - --timeout=20 "$1" ;;
+  esac
+}
+router_release_available() {
+  printf '%s\n' "$2" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' || return 1
+  _rr_sha=$(router_release_text "$1/releases/download/$2/update.sh.sha256" 2>/dev/null) || return 1
+  printf '%s\n' "$_rr_sha" | awk '
+    NR == 1 { name = $2; sub(/^\*/, "", name); ok = NF == 2 && length($1) == 64 && $1 !~ /[^0-9a-fA-F]/ && name == "update.sh" }
+    NR > 1 && NF { ok = 0 }
+    END { exit !ok }'
+}
+resolve_router_release_tag() {
+  _rr_base=${1%/releases/latest}
+  _rr_latest=$(resolve_latest_tag_from "$1")
+  if router_release_available "$_rr_base" "$_rr_latest"; then
+    printf '%s\n' "$_rr_latest"
+    return 0
+  fi
+  _rr_feed=$(router_release_text "$_rr_base/releases.atom" 2>/dev/null) || return 1
+  _rr_tags=$(printf '%s\n' "$_rr_feed" | tr '"' '\n' \
+    | sed -n 's|.*/releases/tag/\(v[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)$|\1|p' \
+    | awk '!seen[$0]++' \
+    | awk -F. '{ printf "%010d.%010d.%010d %s\n", substr($1, 2), $2, $3, $0 }' \
+    | sort -r | awk '{ print $2 }')
+  for _rr_tag in $_rr_tags; do
+    [ "$_rr_tag" != "$_rr_latest" ] || continue
+    if router_release_available "$_rr_base" "$_rr_tag"; then
+      printf '%s\n' "$_rr_tag"
+      return 0
+    fi
+  done
+  return 1
+}
+# ---- openbox-router-release:end ----
 LATEST_URL="https://github.com/$REPO/releases/latest"
 # 先直连探;探不到说明直连 GitHub 不通(后面的校验文件也就不先试直连),镜像通道时再经镜像问
 resolve_latest_tag_now() {
@@ -790,11 +827,11 @@ resolve_latest_tag_now() {
     LATEST_TAG="$OPENBOX_INSTALL_VERSION"
     return 0
   fi
-  LATEST_TAG=$(resolve_latest_tag_from "$LATEST_URL")
+  LATEST_TAG=$(resolve_router_release_tag "$LATEST_URL") || LATEST_TAG=""
   if [ -z "$LATEST_TAG" ]; then
     TRUSTED_DIRECT_BROKEN=1
     if [ "$CHANNEL" = "mirror" ] && [ -n "$MIRROR_PREFIX" ]; then
-      LATEST_TAG=$(resolve_latest_tag_from "$(build_url "$LATEST_URL")")
+      LATEST_TAG=$(resolve_router_release_tag "$(build_url "$LATEST_URL")") || LATEST_TAG=""
     fi
   fi
   case "$LATEST_TAG" in
@@ -866,9 +903,23 @@ probe_mirror_prefix() {
   candidate="$1"
   probe_file="$TMP_DL/.mirror-probe"
   rm -f "$probe_file"
-  MIRROR_PREFIX="$candidate"
-  probe_url=$(build_url "$SHA_URL")
+  if [ "$candidate" = "direct" ]; then
+    CHANNEL="direct"
+    MIRROR_PREFIX=""
+  else
+    CHANNEL="mirror"
+    MIRROR_PREFIX="$candidate"
+  fi
+  _pm_sha_url="$SHA_URL"
+  case "$_pm_sha_url" in
+    */releases/latest/download/*)
+      _pm_tag=$(resolve_router_release_tag "$(build_url "https://github.com/$REPO/releases/latest")") || return 1
+      _pm_sha_url="https://github.com/$REPO/releases/download/$_pm_tag/$ASSET.sha256"
+      ;;
+  esac
+  probe_url=$(build_url "$_pm_sha_url")
   if ! fetch_to_file_probe "$probe_url" "$probe_file" 2>/dev/null; then
+    # 失败只说明这个来源不可用；不能丢弃当前内核代理或改动正在使用的 DNS。
     rm -f "$probe_file"
     return 1
   fi
