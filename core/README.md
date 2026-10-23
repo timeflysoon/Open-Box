@@ -13,16 +13,16 @@
 ## 方法(共 15 个 + hello)
 | 包 | 方法 | 状态 |
 |---|---|---|
-| routing | normalizePolicy normalizeRouting routingFingerprint migrateStoredRouting classes forwardPlan bypassPlan | 已实现(对照旧 Node 的金标准测试) |
-| routing | entryPlan | 已实现 blacklist 模式(旧代码里没有对照;whitelist 暂不做) |
-| groups | normalizeGroups builtinTags emitGroups | 已实现(对照旧 Node 的金标准测试,含逐字节键序) |
-| config | configDetailed | 占位(正在分阶段拆解,见下) |
+| routing | normalizePolicy normalizeRouting routingFingerprint migrateStoredRouting classes forwardPlan bypassPlan | 已实现(对照基线的金标准测试) |
+| routing | entryPlan | 已实现(含 whitelist,按基线 entryModePlan 对齐) |
+| groups | normalizeGroups builtinTags emitGroups | 已实现(对照基线的金标准测试,含逐字节键序) |
+| config | configDetailed | 已实现(对照基线 engine/config.mjs 的 buildConfigDetailed 的金标准测试 + 官方 sing-box check,见下) |
 | authz | checkActivationCode activationState authorizationState | 已实现(一律解锁) |
 
 ## 目录
 - `cmd/openbox-core/` 入口与方法注册
 - `internal/protocol/` 协议、hello、大小限制
-- `internal/{routing,groups,config,authz}/` 各类方法
+- `internal/{routing,groups,config,authz}/` 各类方法;`internal/config/` 是 configDetailed 的装配(`build.go`)和链式代理核对(`chain.go`),以及 node-dns / tun-options / 常量
 - `internal/emit/` 节点 → sing-box 出站 / endpoint
 - `internal/ipx/` Node 同款 isIPv4/isIPv6 正则 + CIDR 运算(解析、重叠、包含、挖洞)
 - `internal/clientroutes/` 终端分流;`internal/servers/` 共享网络服务端入站;`internal/directhosts/` 订阅和节点站点直连;
@@ -56,6 +56,21 @@ HTTPS / SVCB 空应答、dnsmasq 模式本地主机名、FakeIP(198.19.0.0/16)�
 **urlx.Parse**(`internal/urlx/parse.go`):除主机外还给出用户名 / 密码 / 端口(缺省端口省掉)/ 路径(点段、百分号编码)/ 查询 / 片段,供 node-dns 的 DoH 地址解析用。金标准 `testdata/urlx_parts_golden.json`(3000 条,`gen-urlx-parts-golden.mjs` 生成),对 Node 另做过 10 万条随机差分 0 条不一致;变异测试 29 个抓到 25 个,存活 4 个都是等价变异或不支持项(空变异、前导零端口(digits 已去零)、路径编码集里的 `?`(切路径前已按查询分隔)、file 协议的权威部分(file 只填 Scheme / Hostname,DoH 只收 https))。非特殊协议下点段吃光路径时序列化成空串(Node 实测),特殊协议补 `/`。
 **urlx / idna 的已知缺口**:没有 UTS46 字符映射表和双向规则。把这类字符(ﬁ、ǆ、ẞ、²、软连字符、零宽字符、希伯来字母混拉丁字母)放进随机语料(`gen-urlx-golden.mjs --wide`)约 3.7% 的条数与 Node 不一致,
 表现是:Node 会映射或拒绝的写法 Go 放行并按原字符编码。实际影响只是订阅链接 / 上游地址里出现这种主机名时「站点直连」多收或漏收一个域名;补齐需要引入 Unicode 表(见 idna 包注释),目前没做。
+**configDetailed**(`internal/config/build.go`,对应基线 `engine/config.mjs` 的 buildConfigDetailed,按原文件顺序逐段移植):
+订阅和节点站点直连、链式节点并表、节点组 / 站点集 selector、节点出站与 endpoint、出站重名检查、终端分流、出口类别(v6 / QUIC 拒绝)、域名过滤、dns、route、
+tun 入站(排除表挖洞、MAC 过滤、dns_mode)、入口原生旁路与热切换动态集、入站(dns-in / 名单外终端 dns-in-direct / 共享网络)、guardTerminalRules、experimental(clash_api / cache_file / FakeIP 缓存)。
+返回 `{config, dnsRuleOwners, directHosts, failover}`。入参是新版 Node 发的那一份:基线的解构参数,加 `chainNodes`、`filterExpectedKey`、`platform`、`clientBindings`,`profile.clashApiSecret`。
+- **链式代理**:基线的 `chain-proxy.mjs` 自己解析分享链接;新版 Node 在调用前就把候选节点算好当 `chainNodes` 传进来(index.mjs 的 `chainNodes: ze(profile)`),所以核心只移植了「进内核前的核对」(重名 / 上游不存在或是内置直连拒绝 / 成环,`config/chain.go`),没有移植 parseSubscription / parseHttpProxyLink。
+- 金标准 `testdata/config_golden.json`(500 条,`gen-config-golden.mjs` 生成):语料随机造节点(8 种协议含 wireguard)、节点组(含故障转移、内置直连拒绝)、站点集、前置自定义分流(含 ipCidr 送节点的挖洞)、终端分流(ip / mac / bypass / admit)、共享网络、订阅(含节点 DNS)、域名过滤、链式代理(含成环)、热切换、FakeIP,并覆盖 hijack / dnsmasq / off 三种 DNS 模式,有 / 无 auto_redirect。
+  480 条正常输出逐条相同,20 条报错(出站重名 / 域名过滤名单没准备好)报错文案逐字相同。
+- 变异测试 40 个抓到 38 个:漏网的是空变异(预期)和「自定义规则与排除段有无交集」的判断(等价变异:落在排除表之外的洞不影响挖洞结果)。
+- **阶段 D**:`testdata/tools/sbcheck.py` 用官方 sing-box 1.13.14 对金标准里的配置跑 `sing-box check`,300 条全过。检查前要剥掉官方版不认的字段(1.14 才有的 `dns_mode` / `dns_address` / `*_mac_address` / `source_mac_address`,以及上游补丁字段 `expected_status`),并把语料里的假 uuid / 密钥 / 证书换成合法值 —— 这是语料和版本差异,不是装配错误。
+- **已知缺口**(基线里没有、只能从 Node 消费处推断,没有明文可对照):
+  1. `clientBindings`:新版 Node 调 `normalizeClientRoutes(..., {ipv6Bindings})`(IPv6 开着且模式不是 bypass 时带上),核心现在收下但不用,终端分流不按 IPv6 绑定扩展来源。
+  2. `platform`(openwrt / systemd / container):基线没有对应逻辑,核心收下不用。
+  3. `ignoreProxyClients`(bypassPlan 选项,v0.1.318 之后才有)仍按旧实现保留。
+  4. 上游 sing-box 补丁字段(如 urltest 的 `expected_status`)按基线 / groups 对齐的输出写,是否要在官方内核上降级由发布流程决定。
+  5. v0.1.318 到当前上游之间 engine 的其余行为变化,仍需用 index.mjs 做一轮增量核对(第四节 4.4 的做法)。
 **有明文基线的**之外还有一个已知缺口:`ignoreProxyClients`(bypassPlan 的选项)是 v0.1.318 之后才有的,按旧实现保留,没有明文可对照。
 快照 v0.1.318 到上游当前 v0.1.342 之间,engine/ 可能还有行为变化,整体对齐完之后要用 index.mjs 里压缩的版本再做一轮增量核对。
 

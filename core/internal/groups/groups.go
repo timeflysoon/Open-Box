@@ -57,3 +57,6 @@ func hEmitGroups(_ *protocol.Context, args []json.RawMessage) (any, error) {
 	}
 	return EmitUserGroups(groups, nodes, options)
 }
+
+// BuiltinTags 供 config 包使用:原始分组列表 → 内置直连 / 拒绝的当前名字(对应 builtinTags(list))。
+func BuiltinTags(list any) Builtin { return builtinTags(NormalizeGroups(list)) }
