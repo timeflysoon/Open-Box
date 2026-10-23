@@ -1562,15 +1562,6 @@ export interface OpenboxFactoryResetResult {
 }
 export const factoryReset = () => requestJson<OpenboxFactoryResetResult>('/api/openbox/factory-reset', { method: 'POST' })
 
-// 紧急回滚:撤销对系统的接管、恢复直连,并关掉内核开机自启。
-// 任何一步没成 ok 就是 false,failures 里是失败的步骤;整个请求出错时后端回 500 + message,requestJson 会抛
-export interface OpenboxRollbackResult {
-  ok: boolean
-  actions?: unknown
-  failures: Array<{ step: string; message: string }>
-}
-export const rollbackToDirect = () => requestJson<OpenboxRollbackResult>('/api/openbox/rollback', { method: 'POST' })
-
 // ---- 系统类接口(续,对照 server/api/{updates,rulesets,timezone}.mjs 和 server/system/{updater,timezone}.mjs)
 
 // 更新日志:/update/check 探到新版之后,取那一版 Release 的说明(弹窗用)。
