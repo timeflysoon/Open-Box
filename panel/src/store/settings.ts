@@ -249,7 +249,7 @@ export const connectionTableColumns = useStorage<CONNECTIONS_TABLE_ACCESSOR_KEY[
   ],
 )
 export const connectionCardLines = useStorage<CONNECTIONS_TABLE_ACCESSOR_KEY[][]>(
-  'config/connection-card-lines',
+  'config/connection-card-layout',
   DETAILED_CARD_STYLE,
 )
 
