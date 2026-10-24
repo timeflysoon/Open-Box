@@ -25,11 +25,6 @@ env:
   UPSTREAM_REPO: liandu2024/Open-Box
   OWN_REPO: timeflysoon/Open-Box
   BASE_BRANCH: ${{ vars.SYNC_BASE_BRANCH || 'catch-up-upstream' }}
-  # 自己维护的开源核心目录(空格分隔);同步不能碰这些路径,碰到就中止、不提交
-  PROTECT_PATHS: core
-  # go(默认):发布时用自研开源核心换掉原生核心,同步不再碰 panel/server/native,也不再取上游 arm64 的原生核心;
-  # upstream:沿用上游的原生核心(同步照旧覆盖 native、取 arm64 核心)。与 release.yml 用同一个仓库变量。
-  OPENBOX_CORE_SOURCE: ${{ vars.OPENBOX_CORE_SOURCE || 'go' }}
 
 jobs:
   sync:
@@ -58,12 +53,8 @@ jobs:
           last=$(cat .upstream-synced 2>/dev/null || true)
           # arm64 原生内核(scripts/native-arm64)缺了也要补:这个目录是后来才加进同步流程的,
           # 只比版本号的话,早就同步到最新版的分支永远补不上它,发布 arm64 包时才发现
-          native_ok=true
-          if [ "$OPENBOX_CORE_SOURCE" != go ] \
-            && { [ ! -f scripts/native-arm64/openbox-core ] || [ ! -f scripts/native-arm64/core-build.json ]; }; then
-            native_ok=false
-          fi
-          if [ "$last" = "$tag" ] && [ "$FORCE" != true ] && [ "$native_ok" = true ]; then
+          if [ "$last" = "$tag" ] && [ "$FORCE" != true ] \
+            && [ -f scripts/native-arm64/openbox-core ] && [ -f scripts/native-arm64/core-build.json ]; then
             echo "已同步到 $tag,无需处理"
             exit 0
           fi
@@ -80,9 +71,6 @@ jobs:
           # 2b. arm64 的原生内核:仓库里的 panel/server/native 来自上面 x64 的应用包(amd64),
           #     arm64 的发布包必须换成上游 arm64 应用包里的那一份(scripts/build-release.sh 打 arm64 包时替换)。
           #     只留 native 两个文件;上游 arm64 包里的 native 不是 linux/arm64 就直接失败,不带错的内核进仓库。
-          if [ "$OPENBOX_CORE_SOURCE" = go ]; then
-          echo "OPENBOX_CORE_SOURCE=go:发布时用自研核心,不取上游 arm64 的原生核心"
-          else
           curl -fsSL --retry 3 -o components-arm64.json "$base/open-box-$tag-linux-arm64-components.json"
           set -- $(python3 -c 'import json,sys;a=json.load(open(sys.argv[1]))["components"]["app"];print(a["asset"],a["sha256"])' components-arm64.json)
           asset_arm64=$1; sha_arm64=$2
@@ -100,17 +88,13 @@ jobs:
           print('arm64 原生内核:', c.get('buildID'))
           PY
           rm -rf app-arm64 app-arm64.tar.gz components-arm64.json
-          fi
 
           # 3. 覆盖(不删除你自己新增的文件)
           rsync -a app/openwrt/ openwrt/
           rsync -a app/debian/ debian/
           # panel/: 整个面板(明文后端 + 编译后的前端)整体覆盖;不动依赖清单,不带 node_modules
           [ -d app/panel/server ] || { echo "上游包里没有 panel/server,目录结构变了" >&2; exit 1; }
-          # OPENBOX_CORE_SOURCE=go 时不覆盖 panel/server/native(上游闭源的原生核心,发布时会被自研核心换掉)
-          native_ex="--exclude=/server/native"
-          [ "$OPENBOX_CORE_SOURCE" = go ] || native_ex=""
-          rsync -a $native_ex --exclude='node_modules' --exclude='/package.json' --exclude='/pnpm-lock.yaml' app/panel/ panel/
+          rsync -a --exclude='node_modules' --exclude='/package.json' --exclude='/pnpm-lock.yaml' app/panel/ panel/
           cp app/update.sh scripts/update.sh
           cp app/uninstall.sh scripts/uninstall.sh
           # install.sh 不在 release 包里,取上游该版本的源码
@@ -157,9 +141,6 @@ jobs:
               files = json.loads(text).get('files', {})
               changed = []
               for name, want in files.items():
-                  if not (server / name).exists():
-                      print('清单里的文件不在仓库里,跳过:', name)
-                      continue
                   got = hashlib.sha256((server / name).read_bytes()).hexdigest()
                   if got != want:
                       text = text.replace(want, got)
@@ -205,14 +186,6 @@ jobs:
           git add -A
           # 前端 dist 可能被 .gitignore 忽略,强制加入 panel 下的文件
           git add -f panel
-          # 保护自己的核心源码:同步只该动上游的东西,暂存区里出现受保护路径就中止
-          for p in $PROTECT_PATHS; do
-            if git diff --cached --name-only -- "$p" | grep -q .; then
-              echo "同步改动了受保护路径 $p/,已中止、未提交(检查 rsync 范围,或 SYNC_BASE_BRANCH 是不是指到了 main)" >&2
-              git diff --cached --name-only -- "$p" | head -20 >&2
-              exit 1
-            fi
-          done
           if git diff --cached --quiet; then echo "没有变化"; exit 0; fi
           git commit -m "sync: 上游 $tag(openwrt、debian、panel、install/update/uninstall.sh),仓库地址保持 $OWN_REPO"
           git push origin "HEAD:$BASE_BRANCH"
