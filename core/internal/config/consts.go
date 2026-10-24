@@ -30,6 +30,8 @@ const (
 	DNSInboundPort = 7853
 	// 「只让这些终端进内核」名单外终端的查询由入口转到这里,一律直连解析
 	DNSDirectInboundTag  = "dns-in-direct"
+	DNSLanInboundTag     = "dns-in-lan"
+	DNSLanInboundPort    = 53
 	DNSDirectInboundPort = 7855
 	// dnsmasq 分流模式专用的回送出站;init 脚本用这个 tag 判断「这份配置需要接管 dnsmasq」
 	DNSMasqOutboundTag = "dnsmasq"

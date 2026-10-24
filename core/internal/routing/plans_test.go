@@ -61,8 +61,23 @@ func TestBypassPlanIgnoreProxyClients(t *testing.T) {
 	if p := bypassPlan(routing, opts("")); p.Enabled {
 		t.Fatalf("有终端走代理时应关闭: %+v", p)
 	}
-	if p := bypassPlan(routing, opts(`,"ignoreProxyClients":true`)); !p.Enabled || len(p.Sets) != 1 || p.Sets[0] != "geoip-cn" {
+	p := bypassPlan(routing, opts(`,"ignoreProxyClients":true`))
+	if !p.Enabled || len(p.Sets) != 1 || p.Sets[0] != "geoip-cn" {
 		t.Fatalf("ignoreProxyClients 应跳过终端分流这一项: %+v", p)
+	}
+	// 官方 v0.1.353:不关旁路,在 reason 末尾补一句
+	const note = "有终端被指定走代理:这些集合只用于入口按来源旁路,代理终端本身由入口 guard 拦下"
+	if p.Reason != note {
+		t.Fatalf("reason 应是补充说明: %q", p.Reason)
+	}
+	// 在 FakeIP / DNS 提示之后追加
+	fk := bypassPlan(routing, mustJSON(t, `{"members":["direct","美国"],"fakeIp":true,"clientRoutes":[{"ip":"192.168.1.5","outbound":"美国"}],"ignoreProxyClients":true}`))
+	if !strings.HasSuffix(fk.Reason, ";"+note) || !strings.HasPrefix(fk.Reason, "FakeIP 试验开着") {
+		t.Fatalf("补充说明应排在 FakeIP 提示之后: %q", fk.Reason)
+	}
+	// 没有终端走代理时不补
+	if p := bypassPlan(routing, mustJSON(t, `{"members":["direct"],"ignoreProxyClients":true}`)); strings.Contains(p.Reason, note) {
+		t.Fatalf("没有终端走代理不该补说明: %q", p.Reason)
 	}
 }
 

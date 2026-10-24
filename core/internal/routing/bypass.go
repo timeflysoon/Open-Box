@@ -46,8 +46,8 @@ type planOpts struct {
 	fakeIP       bool
 	dnsMode      any
 	enabled      bool
-	// v0.1.318 快照之后才有的选项(v0.1.342 的 Node 在算「其余部分」时会传):不因为「有终端被指定走代理」关掉旁路。
-	// 没有明文实现可对照,按旧实现的理解保留,只用在 bypassPlan 上。
+	// v0.1.318 快照之后才有的选项(v0.1.342 的 Node 在算「其余部分」时会传):不因为「有终端被指定走代理」关掉旁路,
+	// 改为在 reason 末尾补一句说明。已对官方 v0.1.353 的 openbox-core 差分核对,只用在 bypassPlan 上。
 	ignoreProxyClients bool
 }
 
@@ -163,8 +163,12 @@ func bypassPlan(routing any, opts any) BypassPlan {
 			earlier = append(earlier, e)
 		}
 	}
-	if o.proxyClient() && !o.ignoreProxyClients {
-		return off("有终端被指定走代理,该终端的全部流量都要进内核")
+	if o.proxyClient() {
+		if !o.ignoreProxyClients {
+			return off("有终端被指定走代理,该终端的全部流量都要进内核")
+		}
+		// 带 ignoreProxyClients:不关旁路,只在说明末尾补一句(位置在 FakeIP / DNS 提示之后)
+		notes = append(notes, "有终端被指定走代理:这些集合只用于入口按来源旁路,代理终端本身由入口 guard 拦下")
 	}
 	if !domainSafe {
 		goes := func(name, def string) bool { return policyGoesDirect(name, def, o.members, o.builtin, o.selections) }

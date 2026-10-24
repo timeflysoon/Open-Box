@@ -1,6 +1,8 @@
 package routing
 
 import (
+	"strings"
+
 	"github.com/timeflysoon/Open-Box/core/internal/clientroutes"
 )
 
@@ -273,6 +275,7 @@ func copyMap(m map[string]any) map[string]any {
 
 // BuildRoute 相当于 buildRoute(routing, rulesetDir, options),返回 route 段和用到的规则集标签(按首次出现的顺序)。
 func BuildRoute(routing any, rulesetDir string, o RouteOptions) (map[string]any, []string) {
+	rulesetDir = strings.TrimRight(rulesetDir, "/")
 	conf := normalizeRouting(routing)
 	tags := &tagSet{}
 	dnsMode := o.DNSMode

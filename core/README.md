@@ -67,11 +67,14 @@ tun 入站(排除表挖洞、MAC 过滤、dns_mode)、入口原生旁路与热�
 - **阶段 D**:`testdata/tools/sbcheck.py` 用官方 sing-box 1.13.14 对金标准里的配置跑 `sing-box check`,300 条全过。检查前要剥掉官方版不认的字段(1.14 才有的 `dns_mode` / `dns_address` / `*_mac_address` / `source_mac_address`,以及上游补丁字段 `expected_status`),并把语料里的假 uuid / 密钥 / 证书换成合法值 —— 这是语料和版本差异,不是装配错误。
 - **已知缺口**(基线里没有、只能从 Node 消费处推断,没有明文可对照):
   1. `clientBindings`:新版 Node 调 `normalizeClientRoutes(..., {ipv6Bindings})`(IPv6 开着且模式不是 bypass 时带上),核心现在收下但不用,终端分流不按 IPv6 绑定扩展来源。
-  2. `platform`(openwrt / systemd / container):基线没有对应逻辑,核心收下不用。
-  3. `ignoreProxyClients`(bypassPlan 选项,v0.1.318 之后才有)仍按旧实现保留。
+  2. `platform`:只有 `container` 有行为(2026-10 已对官方 v0.1.353 的 openbox-core 差分核对):`dns-in` 后面多一个监听 `0.0.0.0:53` 的 `dns-in-lan` 入站,`route.rules[0]` 是 `{"action":"hijack-dns","inbound":["dns-in-lan"]}`(在 guardTerminalRules 之后插入);`openwrt` / `systemd` 和不传一样。
+  3. `ignoreProxyClients`(bypassPlan 选项)已对官方包核对:有终端走代理时不再关旁路,reason 末尾补一句「有终端被指定走代理:这些集合只用于入口按来源旁路,代理终端本身由入口 guard 拦下」(排在 FakeIP / DNS 提示之后)。
   4. 上游 sing-box 补丁字段(如 urltest 的 `expected_status`)按基线 / groups 对齐的输出写,是否要在官方内核上降级由发布流程决定。
   5. v0.1.318 到当前上游之间 engine 的其余行为变化,仍需用 index.mjs 做一轮增量核对(第四节 4.4 的做法)。
-**有明文基线的**之外还有一个已知缺口:`ignoreProxyClients`(bypassPlan 的选项)是 v0.1.318 之后才有的,按旧实现保留,没有明文可对照。
+**对官方包的差分**(`testdata/tools/diff-upstream.py`,官方 openbox-core 取自上游 Release 的 `open-box-v*-linux-x64-app.tar.gz`,只放本地不进仓库):entryPlan 900 条、bypassPlan 900 条(再加 `ignoreProxyClients:true` 的变体 900 条)、configDetailed 500 条(再把 platform 换成 container 500 条),除 configDetailed 里 102 条脏数据语料外全部一致。
+这 102 条都是有意保留的差异:非 ASCII 主机(`ruleUrls` / 节点域名)上游丢弃、自研转 punycode 保留。其余已知差异:BOM 和 `__proto__` 键(上游是 Go,不去 BOM、不按 JS 原型处理)、改版前 regions 旧数据的 `fallback.default`(上游 direct,自研 proxy)。
+`testdata/tools/upgrade-golden.py` 把基线生成的金标准(config / plans)升级到官方 v0.1.353 的行为:gen-*.mjs 重新生成之后要再跑一次。
+rulesetDir:路由里 `.srs` 的路径先去掉末尾所有的 `/`、null 当空字符串(`/data/rs//x.srs`、字面 `null` 都不会再出现);节点直连规则集(`obnode-direct*.json`)的路径不去斜杠,和官方一致。
 快照 v0.1.318 到上游当前 v0.1.342 之间,engine/ 可能还有行为变化,整体对齐完之后要用 index.mjs 里压缩的版本再做一轮增量核对。
 
 ## 构建
@@ -100,6 +103,6 @@ chainNodes / dnsRuleOwners,这几项没有旧代码可对照)。
     金标准 `testdata/configparts_golden.json`(`gen-configparts-golden.mjs` 生成,4602 条,直接 import 基线的 tun-options / node-dns / config;基线的 config.mjs 经 chain-proxy → subscription → clash 引了 npm 包 yaml 2.8.2,生成时要在 panel/server 下 npm install),
     变异测试 38 个抓到 35 个,存活 3 个是等价变异(空变异、MTU 为 0 时不特判结果相同、tun 是数组时当空对象结果相同)
   - `internal/clientroutes/sources.go`(client-routes.mjs:BypassSources / AdmitSources / AdmitDNSDirect / GuardTerminalRules / NotShareInbound):金标准并入 `leaf_golden.json`(新增 1188 条,旧用例 3676 条原样不变),变异测试 27 个抓到 26 个(存活的是空变异)
-  - 还没做:chain-proxy(依赖 subscription.mjs / sharelink.mjs)、终端 IPv6 绑定(新版才有)、platform / clientBindings(基线没有)
+  - 还没做:chain-proxy(依赖 subscription.mjs / sharelink.mjs)、终端 IPv6 绑定(新版才有)、clientBindings(还没拿官方包探测它在 configDetailed 里有没有用)
 - 阶段 C:buildConfig 装配(阶段 B 的零件基本已齐,见上),以及新增字段和 dnsRuleOwners
 - 阶段 D:旧 JS 金标准 + 真实 sing-box 1.13.14 `check` + 对照 templates/reference-1.13.14.json

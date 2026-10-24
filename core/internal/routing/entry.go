@@ -26,9 +26,6 @@ func directAnswerAllowed(conf Routing, o planOpts) bool {
 	if !o.enabled || !o.fakeIP || o.dnsOff() {
 		return false
 	}
-	if o.proxyClient() {
-		return false
-	}
 	if customPolicyActive(conf.Custom) {
 		for _, rule := range conf.Custom.Rules {
 			if rule.Type == "port" && customOutboundTag(rule, o.builtin) != o.builtin.direct {

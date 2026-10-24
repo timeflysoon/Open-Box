@@ -17,7 +17,7 @@ import (
 
 // 对应基线 engine/config.mjs 的 buildConfigDetailed(逐段对照,注释里写了对应的基线段落)。
 // 入参是新版 Node 发给核心的那一份:除基线的解构参数外,多了 platform、chainNodes(链式代理候选,Node 解析好的)、
-// filterExpectedKey,profile 里多了 clashApiSecret。clientBindings、platform 基线里没有对应逻辑,目前只收下不用(见 README)。
+// filterExpectedKey,profile 里多了 clashApiSecret。clientBindings 基线里没有对应逻辑,目前只收下不用;platform 只有 container 有行为(dns-in-lan,见 README)。
 
 const defaultCachePath = "/opt/open-box/data/cache.db"
 
@@ -85,7 +85,12 @@ func BuildDetailed(args any) (map[string]any, error) {
 	}
 	rulesetDir := DefaultRulesetDir
 	if v := get("rulesetDir"); !jsx.IsUndefined(v) {
-		rulesetDir = jsx.ToString(v)
+		// null 当空字符串(上游拼路径时是 rulesetDir ?? "")
+		if v == nil {
+			rulesetDir = ""
+		} else {
+			rulesetDir = jsx.ToString(v)
+		}
 	}
 	var tlsCert any = map[string]any{"certPath": "/opt/open-box/etc/certs/server.crt", "keyPath": "/opt/open-box/etc/certs/server.key"}
 	if v := get("tlsCert"); !jsx.IsUndefined(v) {
@@ -466,6 +471,10 @@ func BuildDetailed(args any) (map[string]any, error) {
 		listen = "::"
 	}
 	inbounds = append(inbounds, map[string]any{"type": "direct", "tag": "dns-in", "listen": listen, "listen_port": DNSInboundPort})
+	if jsx.Get(args, "platform") == "container" {
+		// 容器部署:额外监听 0.0.0.0:53 的 dns-in-lan,和 dns-in 一样当 DNS 劫持(对官方 v0.1.353 差分核对)
+		inbounds = append(inbounds, map[string]any{"type": "direct", "tag": DNSLanInboundTag, "listen": "0.0.0.0", "listen_port": DNSLanInboundPort})
+	}
 	if admitDirect {
 		inbounds = append(inbounds, map[string]any{"type": "direct", "tag": DNSDirectInboundTag, "listen": listen, "listen_port": DNSDirectInboundPort})
 	}
@@ -476,6 +485,9 @@ func BuildDetailed(args any) (map[string]any, error) {
 		shareTags = append(shareTags, jsx.Get(i, "tag"))
 	}
 	route["rules"] = clientroutes.GuardTerminalRules(route["rules"], shareTags)
+	if jsx.Get(args, "platform") == "container" {
+		route["rules"] = append([]any{map[string]any{"action": "hijack-dns", "inbound": []any{DNSLanInboundTag}}}, asList(route["rules"])...)
+	}
 	if jsx.Truthy(dns["rules"]) {
 		dns["rules"] = clientroutes.GuardTerminalRules(dns["rules"], shareTags)
 	}

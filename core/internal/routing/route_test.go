@@ -144,3 +144,26 @@ func TestRouteGoldenAgainstUpstream(t *testing.T) {
 	}
 	t.Logf("通过 %d 条 %v", len(g.Cases), counts)
 }
+
+// 官方 v0.1.353:拼 .srs 路径前先去掉 rulesetDir 末尾所有的 "/",空串不补前缀。
+func TestBuildRouteTrimsRulesetDir(t *testing.T) {
+	routing := mustJSON(t, `{"policies":[{"name":"国内","default":"direct","rulesets":["geoip-cn"]}],"fallbackDefault":"direct"}`)
+	for dir, want := range map[string]string{
+		"/data/rs":   "/data/rs/geoip-cn.srs",
+		"/data/rs/":  "/data/rs/geoip-cn.srs",
+		"/data/rs//": "/data/rs/geoip-cn.srs",
+		"":           "/geoip-cn.srs",
+		"/":          "/geoip-cn.srs",
+	} {
+		route, _ := BuildRoute(routing, dir, RouteOptions{DNSMode: "dnsmasq", DirectTag: "direct", BlockTag: "block"})
+		found := ""
+		for _, e := range route["rule_set"].([]any) {
+			if rs, ok := e.(map[string]any); ok && rs["tag"] == "geoip-cn" {
+				found, _ = rs["path"].(string)
+			}
+		}
+		if found != want {
+			t.Errorf("rulesetDir=%q: 路径 %q,应为 %q", dir, found, want)
+		}
+	}
+}
