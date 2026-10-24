@@ -10,6 +10,7 @@
       first ? 'route-cell-first' : '',
       last ? 'route-cell-last' : '',
     ]"
+    :data-stage="index"
     :style="{ '--m-order': mobileOrder }"
   >
     <span
@@ -32,38 +33,36 @@
       >{{ badge }}</span>
     </div>
     <!-- 内容区:大字和紧跟的小字排在同一行(基线对齐),放不下自然换行;要独占一行的元素由调用方加 basis-full。
-         详情开关默认独占一行("标题 ∨"),detailsInline 时排在内容行末尾(",标题 ∨");展开后的正文另起一整行,箭头翻成 ∧ -->
+         详情开关独占一行(「查看详情 ∨」),展开后的正文在内容区下面另起一块,用高度动画展开 / 收起,箭头翻成 ∧ -->
     <div class="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-1 [&>*]:min-w-0">
       <slot />
       <button
         v-if="$slots.details"
         type="button"
-        class="text-base-content/60 hover:text-base-content inline-flex cursor-pointer items-center gap-0.5 text-xs select-none"
-        :class="detailsInline ? '' : 'basis-full'"
+        class="text-base-content/60 hover:text-base-content inline-flex basis-full cursor-pointer items-center gap-0.5 text-xs select-none"
         :aria-expanded="open"
         @click="open = !open"
       >
-        <span
-          v-if="detailsInline"
-          class="text-base-content/40"
-        >,</span>
-        {{ detailsTitle || $t('routeStageDetails') }}
+        {{ $t('routeStageDetails') }}
         <ChevronDownIcon
           class="h-3 w-3 transition-transform"
           :class="open ? 'rotate-180' : ''"
         />
       </button>
+    </div>
+    <ExpandTransition>
       <div
         v-if="$slots.details && open"
-        class="text-base-content/60 flex basis-full flex-col gap-1.5 text-xs break-all"
+        class="text-base-content/60 mt-1 flex min-w-0 flex-col gap-1.5 text-xs break-all"
       >
         <slot name="details" />
       </div>
-    </div>
+    </ExpandTransition>
   </div>
 </template>
 
 <script setup lang="ts">
+import ExpandTransition from '@/components/common/ExpandTransition.vue'
 import { ChevronDownIcon } from '@heroicons/vue/24/outline'
 import { computed, ref } from 'vue'
 
@@ -79,9 +78,6 @@ const props = defineProps<{
   state?: RouteStageState
   badge?: string
   badgeTone?: RouteStageTone
-  detailsTitle?: string
-  // 详情开关排在内容行末尾(",标题 ∨")而不是独占一行
-  detailsInline?: boolean
   // first:最底下那站(发起访问),画底边圆角;last:最顶上那站(最终出口),不画往上的主线
   first?: boolean
   last?: boolean
@@ -111,10 +107,17 @@ const badgeClass = computed(() => {
     order: 0;
   }
 }
+/* 每一站至少这么高,左右两列同一站展开 / 收起时行高不会来回抖;最上面那站右列还要多放结果文字 */
+.route-cell[data-stage] {
+  min-height: 5.25rem;
+}
+.route-cell-right.route-cell-last[data-stage] {
+  min-height: 6.5rem;
+}
 .route-cell-first {
   border-bottom-width: 1px;
-  border-bottom-left-radius: var(--app-radius-box, 1rem);
-  border-bottom-right-radius: var(--app-radius-box, 1rem);
+  border-bottom-left-radius: var(--app-radius-panel, 1.25rem);
+  border-bottom-right-radius: var(--app-radius-panel, 1.25rem);
 }
 /* 几何:圆圈中心和主线都在 --route-x 这条竖线上;圆圈垂直居中对齐第一行大字(格子上内边距 0.5rem +
    小标题行 1.125rem + 标题下边距 0.25rem + 大字行高 1.25rem 的一半 − 圆圈半径 0.875rem = 1.625rem) */
@@ -160,19 +163,34 @@ const badgeClass = computed(() => {
 .route-cell-first.route-cell-last .route-line {
   display: none;
 }
- /* 向上的箭头:固定宽度的小盒子,中心正好压在主线上,放在本站圆圈正上方 */
+/* 向上的箭头:固定宽度的小盒子,中心正好压在主线上,放在本站圆圈正上方;
+   箭头不再垫底色,主线在箭头那一段用遮罩挖空,让箭头直接叠在断口里 */
+.route-cell {
+  --route-rise-top: calc(var(--route-marker-top) - 1rem);
+  --route-rise-height: 0.8rem;
+}
 .route-rise {
   position: absolute;
   left: var(--route-x);
-  top: calc(var(--route-marker-top) - 1rem);
+  top: var(--route-rise-top);
   z-index: 1;
   width: 1rem;
   transform: translateX(-50%);
   text-align: center;
-  font-size: 0.8rem;
+  font-size: var(--route-rise-height);
   line-height: 1;
   color: color-mix(in srgb, var(--color-success) 70%, transparent);
-  background-color: var(--color-base-100);
+}
+.route-cell:not(.route-cell-last) .route-line {
+  --route-gap: linear-gradient(
+    to bottom,
+    #000 calc(var(--route-rise-top) - 1px),
+    transparent calc(var(--route-rise-top) - 1px),
+    transparent calc(var(--route-rise-top) + var(--route-rise-height) + 1px),
+    #000 calc(var(--route-rise-top) + var(--route-rise-height) + 1px)
+  );
+  -webkit-mask-image: var(--route-gap);
+  mask-image: var(--route-gap);
 }
 .route-pending .route-marker {
   border-color: var(--color-warning);

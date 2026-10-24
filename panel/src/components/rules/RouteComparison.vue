@@ -8,7 +8,12 @@
        整块是一个网格:桌面两列,每一行是同一站的左右两格,所以展开详情时另一列同一站跟着变高、始终对齐;
        窄屏改成单列,按 --m-order 先排完左列再排右列,各自还是从下往上。 -->
   <!-- text-sm:整块的基准字号,大字(font-medium)、ProxyName / ProxyGroupNow 的名字和 16px 图标都按它对齐 -->
-  <div class="route-grid grid grid-cols-1 gap-x-3 text-sm md:grid-cols-2">
+  <div
+    ref="gridRef"
+    v-ease-height="[rule, terminal, actual, hidden.left, hidden.right]"
+    class="route-grid grid grid-cols-1 gap-x-3 text-sm md:grid-cols-2"
+    :class="{ 'route-hide-left': hidden.left, 'route-hide-right': hidden.right }"
+  >
         <!-- 列头:左 = 规则路由 · 依据查询条件推算;右 = 真实路由 · 模拟终端 / 内核诊断 -->
         <!-- 列头:图标放在站号圆圈那一列、和圆圈同大;标题从各站文字的左边缘起(pl-12),上下对齐 -->
         <div
@@ -16,7 +21,7 @@
           :style="{ '--m-order': 0 }"
         >
           <MapIcon class="route-head-icon text-base-content/50" />
-          <div class="min-w-0">
+          <div class="flex min-w-0 flex-col gap-1">
             <!-- 标题后面紧跟状态徽章(推算 / 实测的总体结果) -->
             <div class="flex flex-wrap items-center gap-2">
               <span class="font-medium">{{ $t('ruleLookupTitle') }}</span>
@@ -35,11 +40,11 @@
           </div>
         </div>
         <div
-          class="route-cell route-head relative mt-2 flex items-start gap-2 border-x border-t pr-3 pl-12 pt-3 pb-2.5 md:mt-0"
+          class="route-cell route-head relative mt-2 flex flex-wrap items-start gap-2 border-x border-t pr-3 pl-12 pt-3 pb-2.5 md:mt-0"
           :style="{ '--m-order': 10 }"
         >
           <BoltIcon class="route-head-icon text-base-content/50" />
-          <div class="min-w-0">
+          <div class="flex min-w-0 flex-1 basis-32 flex-col gap-1">
             <div class="flex flex-wrap items-center gap-2">
               <span class="font-medium">{{ $t('routeTestTitle') }}</span>
               <span
@@ -56,7 +61,7 @@
             <div class="text-base-content/50 text-xs">{{ mode === 'terminal' ? $t('routeCmpTerminalSub') : $t('routeCmpActualSub') }}</div>
           </div>
           <!-- 测法切换 + 重新测试,靠右 -->
-          <div class="ml-auto flex shrink-0 items-center gap-1">
+          <div class="ml-auto flex flex-wrap items-center justify-end gap-2">
             <!-- 探测方式:GET 取内容 / HEAD 只看响应头 / TCP 只测连通 / TLS 连通加握手;换了立刻重测 -->
             <select
               v-model="probeMethod"
@@ -71,19 +76,25 @@
               <option value="TCP">TCP</option>
               <option value="TLS">TLS</option>
             </select>
-            <div class="join">
+            <div
+              role="tablist"
+              class="tabs-box tabs tabs-xs flex-nowrap"
+            >
               <button
+                v-if="!isContainer"
                 type="button"
-                class="btn btn-xs join-item"
-                :class="mode === 'terminal' ? 'btn-active' : 'btn-ghost'"
+                role="tab"
+                class="tab"
+                :class="mode === 'terminal' && 'tab-active'"
                 :disabled="actualLoading"
                 :title="$t('routeCmpTerminalSub')"
                 @click="switchMode('terminal')"
               >{{ $t('routeModeTerminal') }}</button>
               <button
                 type="button"
-                class="btn btn-xs join-item"
-                :class="mode === 'kernel' ? 'btn-active' : 'btn-ghost'"
+                role="tab"
+                class="tab"
+                :class="mode === 'kernel' && 'tab-active'"
                 :disabled="actualLoading"
                 :title="$t('routeModeKernelHint')"
                 @click="switchMode('kernel')"
@@ -91,7 +102,7 @@
             </div>
             <button
               type="button"
-              class="btn btn-ghost btn-xs"
+              class="btn btn-ghost btn-sm"
               :disabled="actualLoading"
               :title="$t('routeTestRerun')"
               @click="runActual"
@@ -111,7 +122,6 @@
           :state="ruleExit.state"
           :badge="ruleExit.badge"
           :badge-tone="ruleExit.tone"
-          :details-title="$t('routeStageDetails')"
           last
         >
           <template v-if="ruleError">
@@ -122,37 +132,30 @@
           </template>
           <template v-else-if="ruleExit.state === 'pending'">
             <span class="font-medium">{{ $t('routeExitPending') }}</span>
-            <span class="text-base-content/60 text-xs">{{ $t('routeExitPendingSub') }}</span>
           </template>
           <template v-else-if="ruleReject">
             <span class="text-error inline-flex items-center gap-1 font-medium"><NoSymbolIcon class="h-4 w-4" />{{ $t('routeExitBlocked') }}</span>
           </template>
-          <template v-else-if="ruleOutbound">
-            <div class="flex flex-wrap items-center gap-2">
-              <ProxyGroupNow
-                v-if="proxyMap[ruleOutbound]?.now"
-                :name="ruleOutbound"
-                include-self
+          <template v-else-if="ruleChain.length">
+            <div class="flex flex-wrap items-center gap-x-2 gap-y-1">
+              <RouteChainHops
+                :chain="ruleChain"
+                arrow-class="text-base-content/40 -ml-0.5 h-4 w-4 shrink-0"
               />
-              <ProxyName
-                v-else-if="proxyMap[ruleOutbound]"
-                :name="ruleOutbound"
-                class="font-medium"
-              />
-              <span
-                v-else
-                class="font-medium"
-              >{{ ruleOutbound }}</span>
             </div>
           </template>
           <template v-else>
             <span class="text-base-content/50 text-xs">{{ $t('routeEntryUnknown') }}</span>
           </template>
           <template
-            v-if="rule?.chainError"
+            v-if="rule && !ruleError && (rule.chainError || ruleExit.state === 'pending')"
             #details
           >
-            <p class="route-note">{{ $t('penetrationChainError', { message: rule.chainError }) }}</p>
+            <p v-if="ruleExit.state === 'pending'">{{ $t('routeExitPendingSub') }}</p>
+            <p
+              v-if="rule.chainError"
+              class="route-note"
+            >{{ $t('penetrationChainError', { message: rule.chainError }) }}</p>
           </template>
         </RouteStage>
         <RouteStage
@@ -163,7 +166,6 @@
           :state="actualExit.state"
           :badge="actualExit.badge"
           :badge-tone="actualExit.tone"
-          :details-title="$t('connectionDetails')"
           last
         >
           <template v-if="actualError">
@@ -177,7 +179,7 @@
             <div class="flex flex-wrap items-center gap-x-2 gap-y-1">
               <template v-if="exitView.forward">
                 <span class="font-medium">{{ $t('routeTermExitForward') }}</span>
-                <span class="text-base-content/60 text-xs">{{ $t('routeTermExitForwardVia', { device: exitView.forward.device, gateway: exitView.forward.gateway }) }}</span>
+                <span class="text-base-content/60 text-xs">{{ $t('routeTermExitForwardVia', { device: exitView.forward.device }) }}</span>
               </template>
               <template v-else-if="exitView.chains.length">
                 <RouteChainHops
@@ -195,13 +197,13 @@
                 :class="toneClass(statusTone(exitView.status))"
               >HTTP {{ exitView.status }}</span>
               <span
-                v-if="exitView.status !== undefined"
-                class="text-base-content/70 text-xs"
+                v-if="exitView.status !== undefined && !exitView.challenge"
+                class="text-base-content/70 basis-full text-xs"
               >{{ statusText(exitView.status) }}</span>
               <span
                 v-if="exitView.error"
-                class="text-error text-xs"
-              >{{ $t('routeTestRequestFailed', { message: errorText(exitView.error) }) }}</span>
+                class="text-error basis-full text-xs"
+              >{{ $t('routeExitStatusFailed') }}</span>
             </div>
           </template>
           <template
@@ -486,7 +488,6 @@
           :state="actualDns.state"
           :badge="actualDns.badge"
           :badge-tone="actualDns.tone"
-          details-inline
         >
           <template v-if="!hasResult || actualError">
             <span class="text-base-content/50 text-xs">{{ placeholderText }}</span>
@@ -510,12 +511,6 @@
               v-if="actualDns.rewrite"
               class="basis-full text-xs"
             >{{ actualDns.rewrite }}</span>
-            <!-- IPv4 / IPv6 分开说、排在第二行:v4 成功了不能因为 AAAA 为空写成"没有解析结果";
-                 档案没开 IPv6 的"未查询"不占这一行,放进解析记录里 -->
-            <span
-              class="basis-full"
-              aria-hidden="true"
-            />
             <span
               v-if="actualDns.v4"
               class="text-xs"
@@ -526,22 +521,15 @@
               class="text-xs"
               :class="actualDns.v6.tone === 'pending' ? 'text-base-content/80 font-medium' : actualDns.v6.tone === 'good' ? 'text-success' : 'text-base-content/60'"
             >· {{ actualDns.v6.text }}</span>
-            <!-- 模拟终端:LAN DNS 只是第一层,下一层(进内核后交给谁、经哪个节点问的)从内核日志截出来单独一行 -->
-            <span
-              v-if="actualDns.kernelLine"
-              class="basis-full"
-              aria-hidden="true"
-            />
-            <span
-              v-if="actualDns.kernelLine"
-              class="text-xs"
-              :class="actualDns.kernelWarn ? 'text-warning font-medium' : 'text-base-content/80'"
-            >{{ actualDns.kernelLine }}</span>
           </template>
           <template
             v-if="actualDns.kind === 'decision'"
             #details
           >
+            <p
+              v-if="actualDns.kernelLine"
+              :class="actualDns.kernelWarn ? 'route-note' : 'text-base-content/80'"
+            >{{ actualDns.kernelLine }}</p>
             <p
               v-if="actualDns.stale"
               class="route-note"
@@ -626,16 +614,9 @@
           badge-tone="muted"
           first
         >
-          <!-- 设备不具备模拟条件 / 虚拟终端没建起来:在这一站(测试来源)说清楚,并给出改用内核诊断的按钮,不自动退回 -->
+          <!-- 设备不具备模拟条件 / 虚拟终端没建起来:主行只留结论和改用内核诊断的按钮,原因放详情,不自动退回 -->
           <template v-if="termBlock">
             <span class="font-medium">{{ termBlock.kind === 'incapable' ? $t('routeTermNotCapable') : $t('routeTermSetupFailed') }}</span>
-            <span class="text-base-content/60 basis-full text-xs">{{ termBlock.kind === 'incapable' ? $t('routeTermNotCapableSub', { missing: missingText }) : termBlock.message }}</span>
-            <!-- 虚拟化平台(ESXi 等)要把端口组的「混杂模式」设为接受,否则虚拟网口收不到回包 -->
-            <span
-              v-if="termBlock.kind === 'setup'"
-              class="text-base-content/60 basis-full text-xs"
-            >{{ $t('routeTermSetupFailedHint') }}</span>
-            <span class="text-base-content/60 basis-full text-xs">{{ $t('routeTermNoFallbackNote') }}</span>
             <button
               type="button"
               class="btn btn-outline btn-xs"
@@ -645,7 +626,10 @@
           <template v-else-if="mode === 'terminal'">
             <span class="font-medium">{{ terminal?.source ? $t('routeStartVirtual', { name: terminal.source.name }) : $t('routeModeTerminal') }}</span>
             <span class="text-base-content/60 font-mono text-xs break-all">{{ terminal?.exit?.method || probeMethod }} {{ terminal?.exit?.url || `${target}${port ? `:${port}` : ''}` }}</span>
-            <span class="text-base-content/60 basis-full text-xs">{{ terminal?.source ? $t('routeStartVirtualSub', { ip: terminal.source.ip }) : $t('routeStartVirtualPending') }}</span>
+            <span
+              v-if="!terminal?.source"
+              class="text-base-content/60 basis-full text-xs"
+            >{{ $t('routeStartVirtualPending') }}</span>
           </template>
           <template v-else>
             <span class="font-medium">{{ $t('routeStartPanel') }}</span>
@@ -659,7 +643,14 @@
             >{{ target }}{{ port ? `:${port}` : '' }}</span>
           </template>
           <template #details>
-            <template v-if="mode === 'terminal'">
+            <template v-if="termBlock">
+              <p class="route-note">{{ termBlock.kind === 'incapable' ? $t('routeTermNotCapableSub', { missing: missingText }) : termBlock.message }}</p>
+              <!-- 虚拟化平台(ESXi 等)要把端口组的「混杂模式」设为接受,否则虚拟网口收不到回包 -->
+              <p v-if="termBlock.kind === 'setup'">{{ $t('routeTermSetupFailedHint') }}</p>
+              <p>{{ $t('routeTermNoFallbackNote') }}</p>
+            </template>
+            <template v-else-if="mode === 'terminal'">
+              <p v-if="terminal?.source">{{ $t('routeStartVirtualSub', { ip: terminal.source.ip }) }}</p>
               <p>{{ $t('routeStartVirtualDetail') }}</p>
               <p
                 v-if="terminal?.source"
@@ -693,15 +684,16 @@ let capabilityPromise: Promise<OpenboxTerminalCapability> | null = null
 <script setup lang="ts">
 import type { OpenboxDnsAssumption, OpenboxPenetrationResult, OpenboxRouteTest, OpenboxRuleAssumption, OpenboxTerminalEntry, OpenboxTerminalMissing, OpenboxTerminalTest } from '@/api/openbox'
 import { fetchTerminalCapability, queryPenetration, testRoute, testTerminal, type OpenboxProbeMethod } from '@/api/openbox'
-import ProxyGroupNow from '@/components/proxies/ProxyGroupNow.vue'
 import ProxyName from '@/components/proxies/ProxyName.vue'
 import RouteChainHops from '@/components/proxies/RouteChainHops.vue'
 import RouteStage from '@/components/rules/RouteStage.vue'
 import type { RouteStageState, RouteStageTone } from '@/components/rules/RouteStage.vue'
+import { serviceStatus } from '@/composables/kernelService'
+import { vEaseHeight } from '@/directives/easeHeight'
 import { ruleTypeLabelKey } from '@/helper/ruleType'
 import { proxyMap } from '@/store/proxies'
 import { ArrowPathIcon, ArrowRightCircleIcon, BoltIcon, MapIcon, NoSymbolIcon } from '@heroicons/vue/24/outline'
-import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 
 // target 是拿去查规则 / DNS 的主机名;port 只给真实访问用
@@ -745,7 +737,12 @@ watch(
 
 // ---------- 真实路由:模拟终端(默认)/ 内核诊断 ----------
 type ActualMode = 'terminal' | 'kernel'
-const mode = ref<ActualMode>('terminal')
+// Docker 旁路由(容器)里建不了虚拟 LAN 终端:默认内核诊断,并隐藏「模拟终端」
+const isContainer = computed(() => serviceStatus.value?.platform === 'container')
+const mode = ref<ActualMode>(serviceStatus.value?.platform === 'container' ? 'kernel' : 'terminal')
+watch(isContainer, (c) => {
+  if (c && mode.value === 'terminal') switchMode('kernel')
+})
 const probeMethod = ref<OpenboxProbeMethod>('GET')
 const capability = ref<OpenboxTerminalCapability | null>(null)
 const terminal = ref<OpenboxTerminalTest | null>(null)
@@ -906,7 +903,14 @@ const errorText = (raw: string) => {
 }
 
 // ---------- 左列:规则路由 ----------
-const ruleOutbound = computed(() => rule.value?.finalOutbound || '')
+// 链路:策略组站点集的名字已经在「规则匹配」那一站写过了,链路第一跳和它同名就去掉,只留后面的
+const ruleChain = computed(() => {
+  const r = rule.value
+  if (!r) return []
+  const base = r.chain?.length ? r.chain : r.finalOutbound ? [r.finalOutbound] : []
+  const rest = r.owner?.kind === 'policy' && base[0] === r.owner.name ? base.slice(1) : base
+  return rest.length ? rest : base
+})
 // 这次查询最终是不是走直连出口(链路最后一跳的类型是 direct);推算失败或被规则拒绝算否
 const exitsDirect = computed(() => {
   const r = rule.value
@@ -1393,6 +1397,7 @@ const exitDetails = computed<DetailLine[]>(() => {
     const tr = termResult.value
     const x = tr?.exit
     if (!tr || !x) return out
+    if (x.error) out.push({ text: t('routeTestRequestFailed', { message: errorText(x.error) }), warn: true })
     if (x.connectTo) out.push({ text: t('routeExitTarget', { ip: x.connectTo }), mono: true })
     if (tr.source && x.localPort) out.push({ text: t('routeTermExitLocalPort', { ip: tr.source.ip, port: x.localPort }), mono: true })
     if (x.forward) out.push({ text: t('routeTermExitForwardAddress', { device: x.forward.device, address: x.forward.address || '—' }), mono: true })
@@ -1403,11 +1408,121 @@ const exitDetails = computed<DetailLine[]>(() => {
   }
   const a = actual.value
   if (!a) return out
+  if (a.exit.error) out.push({ text: t('routeTestRequestFailed', { message: errorText(a.exit.error) }), warn: true })
   if (a.exit.challenge === 'cloudflare') out.push({ text: t('routeTestChallengeCloudflare'), warn: true })
   if (actualExitIp.value) out.push({ text: t('routeExitTarget', { ip: actualExitIp.value }), mono: true })
   if (a.exit6) out.push({ text: `IPv6 ${a.exit6.connectTo}: ${a.exit6.ok ? `HTTP ${a.exit6.status} · ${a.exit6.ms}ms` : t('routeTestRequestFailed', { message: errorText(a.exit6.error || '') })}`, warn: !a.exit6.ok })
   if (exitNodeNote.value) out.push({ text: exitNodeNote.value.text, warn: exitNodeNote.value.warn })
   return out
+})
+
+// ---------- 出场动画:两列各站从下往上一站接一站亮起 ----------
+// 查询 / 测试开始时该列先藏起来(只留站号圆圈和主线),结果回来后主线自下而上生长,圆圈、文字、箭头在主线经过时淡入;
+// 右列等左列放完再放
+const gridRef = ref<HTMLElement>()
+const hidden = reactive({ left: true, right: true })
+const REVEAL_MS = 700
+const FADE_MS = 240
+const EASE = 'cubic-bezier(0.23, 1, 0.32, 1)'
+const revealAnims: Record<'left' | 'right', Animation[]> = { left: [], right: [] }
+let rightQueued = false
+let leftDoneAt = 0
+const midY = (el: Element) => {
+  const r = el.getBoundingClientRect()
+  return (r.top + r.bottom) / 2
+}
+const resetReveal = (side: 'left' | 'right') => {
+  for (const a of revealAnims[side]) a.cancel()
+  revealAnims[side] = []
+  hidden[side] = true
+  if (side === 'right') rightQueued = false
+}
+const playReveal = (side: 'left' | 'right', grid: HTMLElement, list: Animation[]) => {
+  const cells = Array.from(grid.querySelectorAll<HTMLElement>(`.route-cell-${side}[data-stage]`)).sort(
+    (a, b) => Number(a.dataset.stage) - Number(b.dataset.stage),
+  )
+  const lines = cells.map((c) => c.querySelector<HTMLElement>(':scope > .route-line'))
+  const rects = lines.map((l) => l?.getBoundingClientRect())
+  const total = rects.reduce((n, r) => n + (r ? r.height : 0), 0)
+  if (!total) return
+  const perPx = REVEAL_MS / total
+  const base = side === 'right' ? Math.max(0, leftDoneAt - performance.now()) : 0
+  let done = 0
+  cells.forEach((cell, i) => {
+    const line = lines[i]
+    const rect = rects[i]
+    // 主线长到某个 y 的时刻
+    const reachAt = (y: number) => {
+      if (!rect) return base + done * perPx
+      const grown = Math.min(Math.max(rect.bottom - y, 0), rect.height)
+      return base + (done + grown) * perPx
+    }
+    if (line && rect) {
+      list.push(
+        line.animate([{ transform: 'scaleY(0)' }, { transform: 'scaleY(1)' }], {
+          duration: rect.height * perPx,
+          delay: base + done * perPx,
+          easing: 'linear',
+          fill: 'backwards',
+        }),
+      )
+      line.style.transformOrigin = 'bottom'
+    }
+    const marker = cell.querySelector<HTMLElement>(':scope > .route-marker')
+    const textDelay = reachAt(marker ? midY(marker) : rect ? rect.bottom : 0)
+    for (const child of Array.from(cell.children) as HTMLElement[]) {
+      if (child === line) continue
+      if (child.classList.contains('route-marker')) {
+        list.push(child.animate([{ opacity: 0, scale: 0.6 }, { opacity: 1, scale: 1 }], { duration: FADE_MS, delay: textDelay, easing: EASE, fill: 'backwards' }))
+      } else if (child.classList.contains('route-rise')) {
+        list.push(child.animate([{ opacity: 0 }, { opacity: 1 }], { duration: FADE_MS, delay: reachAt(midY(child)), easing: EASE, fill: 'backwards' }))
+      } else {
+        list.push(child.animate([{ opacity: 0, translate: '0 6px' }, { opacity: 1, translate: '0 0' }], { duration: FADE_MS, delay: textDelay, easing: EASE, fill: 'backwards' }))
+      }
+    }
+    done += rect ? rect.height : 0
+  })
+  if (side === 'left') {
+    leftDoneAt = performance.now() + REVEAL_MS + FADE_MS
+    if (rightQueued) {
+      rightQueued = false
+      startReveal('right')
+    }
+  }
+}
+const startReveal = (side: 'left' | 'right') => {
+  const grid = gridRef.value
+  if (!grid) return
+  if (side === 'right' && hidden.left) {
+    rightQueued = true
+    return
+  }
+  for (const a of revealAnims[side]) a.cancel()
+  const list: Animation[] = []
+  revealAnims[side] = list
+  hidden[side] = false
+  void nextTick(() => {
+    if (revealAnims[side] === list) playReveal(side, grid, list)
+  })
+}
+watch(
+  () => [props.target, props.port],
+  () => {
+    resetReveal('left')
+    resetReveal('right')
+  },
+)
+watch(actualLoading, (v) => {
+  if (v) resetReveal('right')
+})
+watch(ruleLoading, (v, old) => {
+  if (!v && old) startReveal('left')
+}, { flush: 'post' })
+watch(actualLoading, (v, old) => {
+  if (!v && old) startReveal('right')
+}, { flush: 'post' })
+onBeforeUnmount(() => {
+  for (const a of [...revealAnims.left, ...revealAnims.right]) a.cancel()
 })
 </script>
 
@@ -1429,19 +1544,28 @@ const exitDetails = computed<DetailLine[]>(() => {
 .route-head-icon {
   position: absolute;
   left: 0.9rem;
-  top: 1rem;
+  top: 1.125rem;
   width: 1.75rem;
   height: 1.75rem;
 }
 .route-head {
   background-color: var(--color-base-100);
-  border-top-left-radius: var(--app-radius-box, 1rem);
-  border-top-right-radius: var(--app-radius-box, 1rem);
+  border-top-left-radius: var(--app-radius-panel, 1.25rem);
+  border-top-right-radius: var(--app-radius-panel, 1.25rem);
   border-bottom: 1px solid color-mix(in srgb, var(--color-base-300) 60%, transparent);
 }
 @media (min-width: 768px) {
   .route-cell {
     order: 0;
   }
+}
+/* 出场前:该列各站只留圆圈和主线(透明),文字等动画放 */
+.route-hide-left :deep(.route-cell-left[data-stage] > *),
+.route-hide-right :deep(.route-cell-right[data-stage] > *) {
+  opacity: 0;
+}
+.route-hide-left :deep(.route-cell-left[data-stage] > :not(.route-line, .route-marker, .route-rise)),
+.route-hide-right :deep(.route-cell-right[data-stage] > :not(.route-line, .route-marker, .route-rise)) {
+  display: none;
 }
 </style>
