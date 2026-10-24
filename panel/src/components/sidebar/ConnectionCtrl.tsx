@@ -28,6 +28,7 @@ import { useI18n } from 'vue-i18n'
 import DialogWrapper from '../common/DialogWrapper.vue'
 import TextInput from '../common/TextInput.vue'
 import ConnectionCardSettings from '../settings/ConnectionCardSettings.vue'
+import SourceIPLabels from '../settings/SourceIPLabels.vue'
 import TableSettings from '../settings/TableSettings.vue'
 import ConnectionTabs from './ConnectionTabs.vue'
 import SourceIPFilter from './SourceIPFilter.vue'
@@ -106,10 +107,10 @@ export default defineComponent({
             v-model={settingsModel.value}
             title={t('connectionSettings')}
           >
-            {/* 这个弹窗管显示方式、是否隐藏 DNS 劫持连接和表格列。「隐藏连接」的开关在工具栏上(链条图标)就有,匹配用的
+            {/* 这个弹窗管显示方式、是否隐藏 DNS 劫持连接、表格列和终端名称。「隐藏连接」的开关在工具栏上(链条图标)就有,匹配用的
                 正则固定用默认那条;「完整显示代理链」恒开。跳去设置页的入口也去掉了——
                 这里能改的东西本来就都在眼前。 */}
-            <div class="flex flex-col gap-4 p-2 text-sm">
+            <div class="flex flex-col gap-4 text-sm">
               <div class="flex items-center justify-between gap-3">
                 <span>{t('connectionStyle')}</span>
                 <select
@@ -134,6 +135,9 @@ export default defineComponent({
                 </span>
               </label>
               {useConnectionCard.value ? <ConnectionCardSettings /> : <TableSettings />}
+              <div class="flex flex-col gap-2">
+                <SourceIPLabels />
+              </div>
             </div>
           </DialogWrapper>
         </>
