@@ -284,22 +284,38 @@ cp -R "$PANEL_DIR/dist" "$STAGE/panel/dist"
 log "打包面板后端 (pnpm deploy --prod)..."
 (cd "$PANEL_DIR" && corepack pnpm --filter=./server deploy --prod "$STAGE/panel/server")
 
-# arm64:仓库里的 panel/server/native 是上游 x64 应用包的(amd64)。arm64 包必须换成 arm64 的原生内核,
-# 并把 hardening-manifest.json 里的 core 和 native 两个文件的 sha256 同步改掉(Docker 构建和上游校验都按它核对)。
-# arm64 内核由 Sync upstream 从上游 arm64 应用包取来放在 scripts/native-arm64/。
-if [ "$ARCH" = arm64 ]; then
-  NATIVE_ARM64="$ROOT/scripts/native-arm64"
-  [ -f "$NATIVE_ARM64/openbox-core" ] && [ -f "$NATIVE_ARM64/core-build.json" ] \
-    || { echo "ERROR: $NATIVE_ARM64 里没有 arm64 原生内核,请先运行 Sync upstream" >&2; exit 1; }
-  log "换入 arm64 原生内核..."
-  python3 - "$STAGE/panel/server" "$NATIVE_ARM64" <<'PYARM'
+# 原生核心 panel/server/native/openbox-core 的来源(两种):
+#   1. 设了 OPENBOX_CORE_BUILD_DIR:release.yml 的 core 任务用 core/scripts/build.sh 编出来的自研 Go 核心
+#      (目录里要有 openbox-core 和 core-build.json),x64 / arm64 都换成这一份;
+#   2. 没设:仓库里的 panel/server/native 是上游 x64 应用包的(amd64),x64 不动;
+#      arm64 换成 scripts/native-arm64(由 Sync upstream 从上游 arm64 应用包取来)。
+# 换入后把 hardening-manifest.json 里的 core 和 native 两个文件的 sha256 同步改掉
+# (Docker 构建 scripts/build-docker.sh 和更新校验 system/component-update.mjs 都按它核对)。
+NATIVE_SRC=""
+if [ -n "${OPENBOX_CORE_BUILD_DIR:-}" ]; then
+  NATIVE_SRC="$OPENBOX_CORE_BUILD_DIR"
+elif [ "$ARCH" = arm64 ]; then
+  NATIVE_SRC="$ROOT/scripts/native-arm64"
+fi
+if [ -n "$NATIVE_SRC" ]; then
+  [ -f "$NATIVE_SRC/openbox-core" ] && [ -f "$NATIVE_SRC/core-build.json" ] \
+    || { echo "ERROR: $NATIVE_SRC 里没有原生核心(openbox-core + core-build.json);arm64 默认来源请先运行 Sync upstream,自研核心请先构建 core" >&2; exit 1; }
+  log "换入原生核心($NATIVE_SRC)..."
+  python3 - "$STAGE/panel/server" "$NATIVE_SRC" "$ARCH" <<'PYNATIVE'
 import hashlib, json, shutil, sys
 from pathlib import Path
-server = Path(sys.argv[1]); src = Path(sys.argv[2])
+server = Path(sys.argv[1]); src = Path(sys.argv[2]); arch = sys.argv[3]
 core = json.loads((src / 'core-build.json').read_text())
-if core.get('os') != 'linux' or core.get('arch') != 'arm64':
-    raise SystemExit('scripts/native-arm64 里的原生内核不是 linux/arm64: ' + json.dumps(core))
+want = 'amd64' if arch == 'x64' else 'arm64'
+if core.get('os') != 'linux' or core.get('arch') != want:
+    raise SystemExit('%s 里的原生核心不是 linux/%s: %s' % (src, want, json.dumps(core)))
+if core.get('protocol') != 1 or core.get('implementation') != 'go-native':
+    raise SystemExit('%s 里的原生核心协议或实现不对: %s' % (src, json.dumps(core)))
+data = (src / 'openbox-core').read_bytes()
+if hashlib.sha256(data).hexdigest() != core.get('sha256') or len(data) != core.get('size'):
+    raise SystemExit('%s 里的 openbox-core 和 core-build.json 对不上(sha256 / size)' % src)
 native = server / 'native'
+native.mkdir(parents=True, exist_ok=True)
 shutil.copyfile(src / 'openbox-core', native / 'openbox-core')
 (native / 'openbox-core').chmod(0o755)
 shutil.copyfile(src / 'core-build.json', native / 'core-build.json')
@@ -309,8 +325,8 @@ m['core'] = core
 for name in ('native/openbox-core', 'native/core-build.json'):
     m['files'][name] = hashlib.sha256((server / name).read_bytes()).hexdigest()
 mp.write_text(json.dumps(m, indent=2, ensure_ascii=False) + '\n')
-print('arm64 原生内核已换入,buildID', core.get('buildID'))
-PYARM
+print('原生核心已换入,buildID', core.get('buildID'), 'arch', core.get('arch'))
+PYNATIVE
 fi
 
 # 全量 Geo 快照在构建机准备，双架构 CI 使用同一份提交；设备不访问上游。
