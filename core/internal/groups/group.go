@@ -185,6 +185,10 @@ func normalizeIconScale(v any) int {
 
 // inRange:数字落在 [lo, hi] 内取整,否则回落。
 func inRange(v any, lo, hi float64, fallback int64) int64 {
+	// 官方 v0.1.354 不做 JS 的数组转数字(Number([5]) === 5、Number([]) === 0):数组一律当缺省。
+	if _, isArr := v.([]any); isArr {
+		return fallback
+	}
 	n := jsx.ToNumber(v)
 	if jsx.IsFinite(n) && n >= lo && n <= hi {
 		return int64(math.Floor(n))
@@ -274,8 +278,10 @@ func normalizeGroup(raw any, index int) *Group {
 		if g.Interval, ok = jsx.NonEmpty(jsx.Get(raw, "interval")); !ok {
 			g.Interval = DefaultInterval
 		}
-		tol := jsx.ToNumber(jsx.Get(raw, "tolerance"))
-		if jsx.IsFinite(tol) && tol >= 0 {
+		rawTol := jsx.Get(raw, "tolerance")
+		_, tolIsArr := rawTol.([]any) // 官方 v0.1.354:数组不转数字,一律当缺省
+		tol := jsx.ToNumber(rawTol)
+		if !tolIsArr && jsx.IsFinite(tol) && tol >= 0 {
 			g.Tolerance = math.Floor(tol)
 			if g.Tolerance == 0 {
 				g.Tolerance = 0 // 去掉负零
@@ -369,10 +375,11 @@ type Builtin struct {
 func builtinTags(groups []*Group) Builtin {
 	var d, b *Group
 	for _, g := range groups {
-		if g.Kind == "direct" && d == nil {
+		// 官方 v0.1.354 对重复的内置 id 取最后一个(基线 v0.1.318 取第一个)。
+		if g.Kind == "direct" {
 			d = g
 		}
-		if g.Kind == "block" && b == nil {
+		if g.Kind == "block" {
 			b = g
 		}
 	}

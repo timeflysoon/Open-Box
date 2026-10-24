@@ -2,6 +2,7 @@ package routing
 
 import (
 	"fmt"
+	"github.com/timeflysoon/Open-Box/core/internal/jsx"
 	"regexp"
 	"strconv"
 	"strings"
@@ -20,7 +21,7 @@ const (
 
 var (
 	cnRulesets       = []string{"geosite-cn", "geoip-cn"}
-	regionRuleTypes  = []string{"geosite", "geoip", "domain", "domainSuffix", "ipcidr"}
+	regionRuleTypes  = []string{"geosite", "geoip", "domain", "domainSuffix", "ipcidr", "ipCidr"}
 	regionRuleActs   = []string{"direct", "proxy"}
 	customRuleTypes  = []string{"domainSuffix", "domain", "domainKeyword", "ipCidr", "geosite", "geoip", "ruleUrl", "ruleset", "port"}
 	regionModeToID   = map[string]string{"CN": "cn", "HKMO": "hkmo", "OTHER": "other"}
@@ -208,7 +209,7 @@ func normalizeCustomPolicy(raw any) CustomPolicy {
 	if c.Icon, ok = nonEmpty(get(raw, "icon")); !ok {
 		c.Icon = CustomPolicyIcon
 	}
-	c.IconScale, _ = isInteger(get(raw, "iconScale"))
+	c.IconScale = customIconScale(get(raw, "iconScale"))
 	if rules, ok := asArray(get(raw, "rules")); ok {
 		for _, r := range rules {
 			if cr, ok := normalizeCustomRule(r); ok {
@@ -239,6 +240,7 @@ func normalizeCustomPolicy(raw any) CustomPolicy {
 type regionRule struct{ typ, value, action string }
 type region struct {
 	id, name string
+	matchID  string // 原始 id 有效时等于 id,缺失 / 非字符串 / 空为 ""(官方按它匹配 regionId)
 	rules    []regionRule
 	catchAll string
 }
@@ -303,6 +305,8 @@ func normalizeRegion(raw any, index int) region {
 	var ok bool
 	if r.id, ok = nonEmpty(get(raw, "id")); !ok {
 		r.id = idx("region-%d", index)
+	} else {
+		r.matchID = r.id
 	}
 	if r.name, ok = nonEmpty(get(raw, "name")); !ok {
 		r.name = idx("地区-%d", index+1)
@@ -317,12 +321,18 @@ func normalizeRegion(raw any, index int) region {
 	} else {
 		r.rules = migrateRegionRules(raw)
 	}
-	if c, ok := targetOf(get(raw, "catchAll")); ok {
-		r.catchAll = c
-	} else if c, ok := targetOf(get(raw, "fallback")); ok {
-		r.catchAll = c
-	} else {
-		r.catchAll = "proxy"
+	// 官方 v0.1.354:合法值照用;写了但不合法(JS 真值)按 direct;没写 / 假值才看下一个,都没有就 proxy。
+	r.catchAll = "proxy"
+	for _, key := range []string{"catchAll", "fallback"} {
+		v := get(raw, key)
+		if c, ok := targetOf(v); ok {
+			r.catchAll = c
+			break
+		}
+		if jsx.Truthy(v) {
+			r.catchAll = "direct"
+			break
+		}
 	}
 	return r
 }
@@ -340,10 +350,9 @@ func migrateLegacy(raw map[string]any) []Policy {
 			if t, ok := nonEmpty(get(cat, "target")); ok {
 				def = t
 			}
-			// id 里用的是未 trim 的原值(与旧实现一致)
-			orig, _ := get(cat, "ruleset").(string)
+			// 官方 v0.1.354 的 id 用 trim 过的值(基线 v0.1.318 用未 trim 的原值)
 			policies = append(policies, normalizePolicy(map[string]any{
-				"id": "legacy-" + orig, "name": rs, "default": def, "rulesets": []any{rs},
+				"id": "legacy-" + rs, "name": rs, "default": def, "rulesets": []any{rs},
 			}, len(policies)))
 		}
 	}
@@ -387,7 +396,7 @@ func migrateRegion(raw map[string]any) ([]Policy, string) {
 	}
 	chosen := regions[0]
 	for _, r := range regions {
-		if r.id == wanted {
+		if r.matchID == wanted {
 			chosen = r
 			break
 		}
@@ -412,7 +421,7 @@ func migrateRegion(raw map[string]any) ([]Policy, string) {
 				domain = append(domain, r.value)
 			case "domainSuffix":
 				suffix = append(suffix, r.value)
-			case "ipcidr":
+			case "ipcidr", "ipCidr":
 				cidr = append(cidr, r.value)
 			}
 		}

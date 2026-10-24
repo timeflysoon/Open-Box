@@ -2,6 +2,7 @@ package routing
 
 import (
 	"fmt"
+	"github.com/timeflysoon/Open-Box/core/internal/jsx"
 	"math"
 	"strings"
 )
@@ -110,3 +111,23 @@ func toAny(list []string) []any {
 }
 
 func idx(format string, n int) string { return fmt.Sprintf(format, n) }
+
+// customIconScale:官方 v0.1.354 的 custom.iconScale 解析:先按 Number() 转(true → 1、"2" → 2),
+// 数组 / 对象一律不转(当 0),要求是整数且落在 int64 范围内,否则 0(基线只收 Number.isInteger 的原始数字)。
+func customIconScale(v any) float64 {
+	switch v.(type) {
+	case []any, map[string]any:
+		return 0
+	}
+	n := jsx.ToNumber(v)
+	if math.IsNaN(n) || math.IsInf(n, 0) || n != math.Trunc(n) {
+		return 0
+	}
+	if n >= 9223372036854775808.0 || n < -9223372036854775808.0 {
+		return 0
+	}
+	if n == 0 {
+		return 0
+	}
+	return n
+}

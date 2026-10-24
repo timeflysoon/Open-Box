@@ -8,8 +8,9 @@ import (
 	"github.com/timeflysoon/Open-Box/core/internal/jsx"
 )
 
-// JS 里 \s 的范围(和 String.prototype.trim 一致),Go 的 \s 只有 ASCII。
-const jsSpace = `\t\n\v\f\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}`
+// 官方 v0.1.354 是 Go 写的:横线两侧只认 RE2 的 \s(\t \n \f \r 空格,没有 \v),
+// 首尾和各段两端用 strings.TrimSpace(Unicode 空白,含 U+0085,不含 U+FEFF)。基线 v0.1.318 用的是 JS 的 \s / trim。
+const jsSpace = `\t\n\f\r `
 
 var expectedPartRe = regexp.MustCompile(`^(\d{3})(?:[` + jsSpace + `]*-[` + jsSpace + `]*(\d{3}))?$`)
 
@@ -24,13 +25,13 @@ func NormalizeExpectedStatus(raw any) (string, bool) {
 	if !ok {
 		return "", false
 	}
-	text := jsx.Trim(s)
+	text := strings.TrimSpace(s)
 	if text == "" || text == "*" {
 		return "", true
 	}
 	parts := []string{}
 	for _, p := range strings.FieldsFunc(text, func(r rune) bool { return r == '/' || r == ',' }) {
-		if t := jsx.Trim(p); t != "" {
+		if t := strings.TrimSpace(p); t != "" {
 			parts = append(parts, t)
 		}
 	}
