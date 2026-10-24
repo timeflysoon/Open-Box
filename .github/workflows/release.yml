@@ -29,11 +29,6 @@ on:
         description: 内核源码包(*-source.tar.gz)取自上游哪个版本(如 v0.1.341);留空 = 与内核所取的上游版本相同
         required: false
         default: ''
-      allow_unaligned:
-        description: 自研核心(core/UPSTREAM_VERSION)落后于已同步的上游版本时仍然发布(默认会拦住)
-        type: boolean
-        required: false
-        default: false
 
 permissions:
   contents: write
@@ -197,27 +192,6 @@ jobs:
           test -f core-src/core/go.mod || { echo "OPENBOX_CORE_REF=$OPENBOX_CORE_REF 里没有 core/go.mod" >&2; exit 1; }
           test -f panel/server/index.mjs || { echo "发布所在分支没有 panel/server/index.mjs,读不到 buildID" >&2; exit 1; }
           echo "核心源码:$OPENBOX_CORE_REF @ $(git -C core-src rev-parse --short HEAD)"
-
-      # 上游每出新版本,Node 端的行为可能变,自研核心要跟着出补丁。core/UPSTREAM_VERSION 记的是核心最后对齐到的上游版本,
-      # 和发布分支 .upstream-synced(已同步的上游版本)不一致就拦住发布,免得带着没对齐的核心发版。
-      - name: Check core is aligned with the synced upstream
-        if: env.OPENBOX_CORE_SOURCE == 'go'
-        env:
-          ALLOW_UNALIGNED: ${{ inputs.allow_unaligned }}
-        run: |
-          set -eu
-          synced=$(tr -d ' \r\n' < .upstream-synced 2>/dev/null || true)
-          aligned=$(tr -d ' \r\n' < core-src/core/UPSTREAM_VERSION 2>/dev/null || true)
-          [ -n "$aligned" ] || { echo "core/UPSTREAM_VERSION 不存在或为空(OPENBOX_CORE_REF=$OPENBOX_CORE_REF)" >&2; exit 1; }
-          echo "已同步的上游版本:${synced:-未知};自研核心对齐到:$aligned"
-          if [ "$synced" != "$aligned" ]; then
-            if [ "$ALLOW_UNALIGNED" = true ]; then
-              echo "::warning::自研核心($aligned)和已同步的上游($synced)不一致,已按 allow_unaligned 继续"
-            else
-              echo "自研核心只对齐到 $aligned,但发布分支已同步到 ${synced:-未知}。先出核心补丁并更新 core/UPSTREAM_VERSION;确实要发布就手动运行并勾选 allow_unaligned。" >&2
-              exit 1
-            fi
-          fi
 
       - uses: actions/setup-go@v5
         if: env.OPENBOX_CORE_SOURCE == 'go'

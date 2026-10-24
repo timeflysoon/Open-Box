@@ -115,7 +115,7 @@ chainNodes / dnsRuleOwners,这几项没有旧代码可对照)。
 
 ## 发布(Release 流水线怎么用到这个核心)
 core/ 在 main,发布所在的 catch-up-upstream 有 panel/server 但没有 core/。`.github/workflows/release.yml` 的 `core` 任务(amd64、arm64 各一份)因此另取一份 `OPENBOX_CORE_REF`(仓库变量,默认 `main`)的 core/ 源码:
-1. 读 `core/UPSTREAM_VERSION`(核心最后对齐到的上游版本),和发布分支 `.upstream-synced`(已同步的上游版本)比,不一致就拦住发布;手动运行时可勾 `allow_unaligned` 放行。**以后每个「core 对齐官方 vX」的补丁,要同时把 `core/UPSTREAM_VERSION` 改成 vX。**
+1. 不再做对齐检查(原来的 `allow_unaligned` 复选框已去掉):catch-up-upstream 的发布本来就是上游备份,不该被自研核心卡住。`core/UPSTREAM_VERSION` 仍记录核心最后对齐到的上游版本,只作记录,每个「core 对齐官方 vX」的补丁顺手改成 vX。
 2. `go vet ./...`、`go test ./...`(金标准测试),任何一步失败都不发布。
 3. `core/scripts/build.sh <arch> core-build panel/server/index.mjs` 编出 `openbox-core` + `core-build.json`(buildID 从发布分支的 `panel/server/index.mjs` 读,和 Node 端写死的期望值一致)。
 4. `build` 任务把它设为 `OPENBOX_CORE_BUILD_DIR`,`scripts/build-release.sh` 把发布包 `panel/server/native/` 里的核心换成这一份(x64、arm64 都换),并重算 `hardening-manifest.json` 里的 `core` 和 `native/*` 两个文件的哈希。`core-build.json` 不写 `bindingSha256`,Node 端的 `component-update.mjs` 因此只做哈希 / 架构 / ELF 校验,不跑内部完整性自检(运行时 `hello` 仍会核对 buildID)。
