@@ -3,7 +3,7 @@
        (改它去后台目标分流页)。两列并排放着,是为了让人一眼看出这两个顺序是两回事。 -->
   <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
     <div class="flex flex-col gap-2">
-      <div class="flex items-center justify-between gap-2">
+      <div class="flex min-h-[1.5rem] items-center justify-between gap-2">
         <span class="text-xs font-medium">{{ $t('policyDisplayOrder') }}</span>
         <!-- 一键把显示顺序改回跟随右边的命中顺序(存空表 = 不再自定义,命中顺序以后变了也跟着变) -->
         <button
@@ -45,7 +45,8 @@
     </div>
 
     <div class="flex flex-col gap-2">
-      <div class="text-xs font-medium">{{ $t('policyMatchOrder') }}</div>
+      <!-- 和左边标题行同高(左边有 btn-xs 按钮,1.5rem),两列标题才对得齐 -->
+      <div class="flex min-h-[1.5rem] items-center text-xs font-medium">{{ $t('policyMatchOrder') }}</div>
       <div class="flex flex-col gap-1">
         <!-- 前置自定义分流固定排在所有站点集之前(见 server/engine/routing.mjs),所以钉在这一列
              最上面。它不是站点集、不占编号,用「前置」标记表示"在下面这些之前";没规则或停用时
