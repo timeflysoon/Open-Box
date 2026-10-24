@@ -12,9 +12,6 @@ name: Release
 #   OPENBOX_KERNEL_REPO    上游仓库,默认 liandu2024/Open-Box
 #   OPENBOX_SOURCE_TAG     内核源码包(*-source.tar.gz)固定取自上游某个版本;留空 = 与内核所取版本相同
 #                          (手动运行时填写的 source_tag 输入框优先于这个变量)
-#   OPENBOX_CORE_SOURCE    go(默认) | upstream。go = 用 OPENBOX_CORE_REF 分支的 core/ 自己编译开源核心,换掉 panel/server/native 里
-#                          上游闭源的 openbox-core(x64 / arm64 都换);upstream = 沿用上游的原生核心(x64 取仓库里的,arm64 取 scripts/native-arm64)
-#   OPENBOX_CORE_REF       自研核心源码(core/)取自哪个分支 / 标签 / 提交;默认 main
 
 on:
   push:
@@ -29,11 +26,6 @@ on:
         description: 内核源码包(*-source.tar.gz)取自上游哪个版本(如 v0.1.341);留空 = 与内核所取的上游版本相同
         required: false
         default: ''
-      allow_unaligned:
-        description: 自研核心(core/UPSTREAM_VERSION)落后于已同步的上游版本时仍然发布(默认会拦住)
-        type: boolean
-        required: false
-        default: false
 
 permissions:
   contents: write
@@ -43,8 +35,6 @@ env:
   OPENBOX_REPO: timeflysoon/Open-Box
   OPENBOX_KERNEL_SOURCE: ${{ vars.OPENBOX_KERNEL_SOURCE || 'upstream' }}
   OPENBOX_KERNEL_REPO: ${{ vars.OPENBOX_KERNEL_REPO || 'liandu2024/Open-Box' }}
-  OPENBOX_CORE_SOURCE: ${{ vars.OPENBOX_CORE_SOURCE || 'go' }}
-  OPENBOX_CORE_REF: ${{ vars.OPENBOX_CORE_REF || 'main' }}
 
 jobs:
   geodata:
@@ -164,92 +154,9 @@ jobs:
           path: kernel-source/
           if-no-files-found: error
 
-  # 自研开源核心(core/,在 main 分支)。发布所在的分支(catch-up-upstream)有 panel/server 但没有 core/,
-  # 所以这里单独再取一份 OPENBOX_CORE_REF 的 core/ 源码:
-  #   - buildID 从发布所在分支的 panel/server/index.mjs 里读(Node 端写死了期望值,hello 必须一致);
-  #   - 先跑 go vet 和 go test(金标准测试),任何一步失败都会拦住整个发布;
-  #   - 产出 core-<arch>:openbox-core + core-build.json,交给 build 任务换进发布包。
-  # OPENBOX_CORE_SOURCE=upstream 时整个任务的步骤都跳过(任务本身仍算成功)。
-  core:
-    name: Core (${{ matrix.arch }})
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        arch: [amd64, arm64]
-    steps:
-      - name: Checkout release branch (for panel/server/index.mjs)
-        if: env.OPENBOX_CORE_SOURCE == 'go'
-        uses: actions/checkout@v4
-
-      - name: Checkout core source
-        if: env.OPENBOX_CORE_SOURCE == 'go'
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ env.OPENBOX_CORE_REF }}
-          path: core-src
-          sparse-checkout: core
-
-      - name: Check core source
-        if: env.OPENBOX_CORE_SOURCE == 'go'
-        run: |
-          set -eu
-          test -f core-src/core/go.mod || { echo "OPENBOX_CORE_REF=$OPENBOX_CORE_REF 里没有 core/go.mod" >&2; exit 1; }
-          test -f panel/server/index.mjs || { echo "发布所在分支没有 panel/server/index.mjs,读不到 buildID" >&2; exit 1; }
-          echo "核心源码:$OPENBOX_CORE_REF @ $(git -C core-src rev-parse --short HEAD)"
-
-      # 上游每出新版本,Node 端的行为可能变,自研核心要跟着出补丁。core/UPSTREAM_VERSION 记的是核心最后对齐到的上游版本,
-      # 和发布分支 .upstream-synced(已同步的上游版本)不一致就拦住发布,免得带着没对齐的核心发版。
-      - name: Check core is aligned with the synced upstream
-        if: env.OPENBOX_CORE_SOURCE == 'go'
-        env:
-          ALLOW_UNALIGNED: ${{ inputs.allow_unaligned }}
-        run: |
-          set -eu
-          synced=$(tr -d ' \r\n' < .upstream-synced 2>/dev/null || true)
-          aligned=$(tr -d ' \r\n' < core-src/core/UPSTREAM_VERSION 2>/dev/null || true)
-          [ -n "$aligned" ] || { echo "core/UPSTREAM_VERSION 不存在或为空(OPENBOX_CORE_REF=$OPENBOX_CORE_REF)" >&2; exit 1; }
-          echo "已同步的上游版本:${synced:-未知};自研核心对齐到:$aligned"
-          if [ "$synced" != "$aligned" ]; then
-            if [ "$ALLOW_UNALIGNED" = true ]; then
-              echo "::warning::自研核心($aligned)和已同步的上游($synced)不一致,已按 allow_unaligned 继续"
-            else
-              echo "自研核心只对齐到 $aligned,但发布分支已同步到 ${synced:-未知}。先出核心补丁并更新 core/UPSTREAM_VERSION;确实要发布就手动运行并勾选 allow_unaligned。" >&2
-              exit 1
-            fi
-          fi
-
-      - uses: actions/setup-go@v5
-        if: env.OPENBOX_CORE_SOURCE == 'go'
-        with:
-          go-version-file: core-src/core/go.mod
-          cache: false
-
-      - name: Vet and test
-        if: env.OPENBOX_CORE_SOURCE == 'go'
-        working-directory: core-src/core
-        run: |
-          go vet ./...
-          go test ./...
-
-      - name: Build core
-        if: env.OPENBOX_CORE_SOURCE == 'go'
-        run: sh core-src/core/scripts/build.sh ${{ matrix.arch }} core-build panel/server/index.mjs
-
-      - name: Record core source commit
-        if: env.OPENBOX_CORE_SOURCE == 'go'
-        run: git -C core-src rev-parse HEAD > core-build/SOURCE_COMMIT
-
-      - uses: actions/upload-artifact@v4
-        if: env.OPENBOX_CORE_SOURCE == 'go'
-        with:
-          name: core-${{ matrix.arch }}
-          path: core-build/
-          if-no-files-found: error
-
   build:
     name: Build (${{ matrix.arch }})
-    needs: [kernel, geodata, core]
+    needs: [kernel, geodata]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -313,11 +220,6 @@ jobs:
         run: corepack pnpm run check:config
 
       - uses: actions/download-artifact@v4
-        if: env.OPENBOX_CORE_SOURCE == 'go'
-        with:
-          name: core-${{ matrix.kernel }}
-          path: core-build
-      - uses: actions/download-artifact@v4
         with:
           name: geodata
           path: geodata
@@ -331,7 +233,6 @@ jobs:
           OPENBOX_KERNEL_BUILD_DIR: ${{ github.workspace }}/kernel-build
           OPENBOX_KERNEL_SOURCE: ${{ env.OPENBOX_KERNEL_SOURCE }}
           OPENBOX_GEO_BUNDLE_DIR: ${{ github.workspace }}/geodata
-          OPENBOX_CORE_BUILD_DIR: ${{ env.OPENBOX_CORE_SOURCE == 'go' && format('{0}/core-build', github.workspace) || '' }}
         run: bash scripts/build-release.sh ${{ matrix.arch }} dist-release
 
       # build-release.sh 每个架构都产出两份内容完全一致的 tarball(+sha256):带版本号
@@ -398,9 +299,6 @@ jobs:
               echo "- sing-box 内核版本:\`$SINGBOX_VERSION\`(从本仓库源码补丁构建，精简功能集，纯 Go 静态链接)"
             fi
             echo "- Node 运行时版本:\`$NODE_VERSION\`(musl 构建,glibc 版本在 OpenWrt 上无法运行)"
-            if [ "$OPENBOX_CORE_SOURCE" = go ]; then
-              echo "- 原生核心:自研开源核心(go-native,源码 \`core/\` @ \`$OPENBOX_CORE_REF\`),无激活机制"
-            fi
             echo ""
             echo "- 完整安装包包含 sing-box 内核与全部 GeoSite / GeoIP 数据，首次启动无需另行下载 Geo 数据。"
             echo "- 升级先校验组件版本及文件，仅下载变化或损坏的组件；全部从本仓库 Release 获取。"
