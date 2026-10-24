@@ -112,3 +112,13 @@ chainNodes / dnsRuleOwners,这几项没有旧代码可对照)。
   - 还没做:chain-proxy(依赖 subscription.mjs / sharelink.mjs)、终端 IPv6 绑定(新版才有)、clientBindings(还没拿官方包探测它在 configDetailed 里有没有用)
 - 阶段 C:buildConfig 装配(阶段 B 的零件基本已齐,见上),以及新增字段和 dnsRuleOwners
 - 阶段 D:旧 JS 金标准 + 真实 sing-box 1.13.14 `check` + 对照 templates/reference-1.13.14.json
+
+## 发布(Release 流水线怎么用到这个核心)
+core/ 在 main,发布所在的 catch-up-upstream 有 panel/server 但没有 core/。`.github/workflows/release.yml` 的 `core` 任务(amd64、arm64 各一份)因此另取一份 `OPENBOX_CORE_REF`(仓库变量,默认 `main`)的 core/ 源码:
+1. 读 `core/UPSTREAM_VERSION`(核心最后对齐到的上游版本),和发布分支 `.upstream-synced`(已同步的上游版本)比,不一致就拦住发布;手动运行时可勾 `allow_unaligned` 放行。**以后每个「core 对齐官方 vX」的补丁,要同时把 `core/UPSTREAM_VERSION` 改成 vX。**
+2. `go vet ./...`、`go test ./...`(金标准测试),任何一步失败都不发布。
+3. `core/scripts/build.sh <arch> core-build panel/server/index.mjs` 编出 `openbox-core` + `core-build.json`(buildID 从发布分支的 `panel/server/index.mjs` 读,和 Node 端写死的期望值一致)。
+4. `build` 任务把它设为 `OPENBOX_CORE_BUILD_DIR`,`scripts/build-release.sh` 把发布包 `panel/server/native/` 里的核心换成这一份(x64、arm64 都换),并重算 `hardening-manifest.json` 里的 `core` 和 `native/*` 两个文件的哈希。`core-build.json` 不写 `bindingSha256`,Node 端的 `component-update.mjs` 因此只做哈希 / 架构 / ELF 校验,不跑内部完整性自检(运行时 `hello` 仍会核对 buildID)。
+- 仓库变量 `OPENBOX_CORE_SOURCE=upstream` 退回上游原生核心(x64 取仓库里的 `panel/server/native`,arm64 取 `scripts/native-arm64`);默认 `go`。
+- `sync-upstream.yml` 在 `go` 时不再覆盖 `panel/server/native`、不再取上游 arm64 的原生核心。仓库里已有的 `panel/server/native/*` 和 `scripts/native-arm64/*` 是旧的上游文件,发布时会被换掉,不影响结果,确认不再退回 `upstream` 后可以自己删。
+- 本地验证过的部分:`build.sh` 编 amd64 / arm64,按 `build-release.sh` 的换入逻辑处理一份 panel/server,再用 `component-update.mjs` 里 Node 自己的校验函数检查,x64 / arm64 都通过,篡改文件、架构放错会被拒。GitHub Actions 本身没在本地跑过,第一次发布要看一遍各任务的日志。
