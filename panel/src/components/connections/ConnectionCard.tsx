@@ -15,7 +15,7 @@ import {
   getProcessFromConnection,
 } from '@/helper'
 import { getIPLabelFromMap } from '@/helper/sourceip'
-import { fromNow, prettyBytesHelper } from '@/helper/utils'
+import { fromNow, isMiddleScreen, prettyBytesHelper } from '@/helper/utils'
 import { connectionTabShow } from '@/store/connections'
 import { connectionCardLines, proxyChainDirection } from '@/store/settings'
 import type { Connection } from '@/types'
@@ -28,7 +28,7 @@ import {
   NoSymbolIcon,
   XMarkIcon,
 } from '@heroicons/vue/24/outline'
-import { first, last } from 'lodash'
+import { first, last, uniq } from 'lodash'
 import { defineComponent } from 'vue'
 import type { JSX } from 'vue/jsx-runtime'
 import ProxyName from '../proxies/ProxyName.vue'
@@ -48,6 +48,10 @@ export default defineComponent<{
     return () => {
       const conn = props.conn
       const metadata = conn.metadata
+      // 桌面端显示完整代理链;窄屏(≤768px)只留首尾两端
+      const chains = isMiddleScreen.value
+        ? uniq([last(conn.chains)!, first(conn.chains)!])
+        : [...conn.chains].reverse()
       const componentMap: Record<CONNECTIONS_TABLE_ACCESSOR_KEY, JSX.Element> = {
         [CONNECTIONS_TABLE_ACCESSOR_KEY.Host]: (
           <span class="text-main w-80 grow truncate">{getHostFromConnection(conn)}</span>
@@ -59,7 +63,12 @@ export default defineComponent<{
           <span class="w-80 grow truncate break-all">{conn.metadata.remoteDestination || '-'}</span>
         ),
         [CONNECTIONS_TABLE_ACCESSOR_KEY.SourceIP]: (
-          <span class="w-40 grow truncate break-all">{getIPLabelFromMap(metadata.sourceIP)}</span>
+          <span
+            class="w-40 grow truncate break-all"
+            title={metadata.sourceIP || undefined}
+          >
+            {getIPLabelFromMap(metadata.sourceIP)}
+          </span>
         ),
         [CONNECTIONS_TABLE_ACCESSOR_KEY.SourcePort]: (
           <span class="w-20 grow truncate break-all">{metadata.sourcePort}</span>
@@ -87,13 +96,12 @@ export default defineComponent<{
                 'flex-row-reverse justify-end',
             ]}
           >
-            {<ProxyName name={last(conn.chains)!} />}
-            {last(conn.chains) !== first(conn.chains) && (
+            {chains.map((name, index) => (
               <>
-                <ArrowRightCircleIcon class="h-4 w-4 shrink-0"></ArrowRightCircleIcon>
-                {<ProxyName name={first(conn.chains)!} />}
+                {index > 0 && <ArrowRightCircleIcon class="h-4 w-4 shrink-0"></ArrowRightCircleIcon>}
+                <ProxyName name={name} />
               </>
-            )}
+            ))}
           </span>
         ),
         [CONNECTIONS_TABLE_ACCESSOR_KEY.Outbound]: (
@@ -169,10 +177,7 @@ export default defineComponent<{
       }
       return (
         <div
-          class={[
-            'card cursor-pointer gap-1',
-            connectionCardLines.value.length > 2 ? 'p-2' : 'p-1',
-          ]}
+          class="card app-card-inset cursor-pointer gap-1"
           onClick={() => handlerInfo(conn)}
         >
           {connectionCardLines.value.map((line) => (

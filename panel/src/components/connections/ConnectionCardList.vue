@@ -16,6 +16,7 @@
 
 <script setup lang="ts">
 import { usePaddingForViews } from '@/composables/paddingViews'
+import { isMiddleScreen } from '@/helper/utils'
 import { renderConnections } from '@/store/connections'
 import { connectionCardLines } from '@/store/settings'
 import type { Connection } from '@/types'
@@ -25,7 +26,7 @@ import ConnectionCtrl from '../sidebar/ConnectionCtrl.tsx'
 import ConnectionCard from './ConnectionCard'
 
 const { paddingTop } = usePaddingForViews({
-  offsetTop: 0,
+  offsetTop: -8,
   offsetBottom: 0,
 })
 const virtualScrollerStyle = computed(() => ({
@@ -33,6 +34,6 @@ const virtualScrollerStyle = computed(() => ({
 }))
 
 const size = computed(() => {
-  return connectionCardLines.value.length * 28 + 4
+  return connectionCardLines.value.length * 24 - 4 + (isMiddleScreen.value ? 24 : 32)
 })
 </script>
