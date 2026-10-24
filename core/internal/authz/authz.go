@@ -26,7 +26,7 @@ type activation struct {
 	Activated bool   `json:"activated"`
 	Left      string `json:"left"`
 	Right     string `json:"right"`
-	UpdatedAt int64  `json:"updatedAt"`
+	UpdatedAt int64  `json:"updatedAt,omitempty"`
 }
 
 // activationState 的参数是 Node 存的原始字符串(可能为 null);永远返回已激活,
@@ -48,13 +48,19 @@ func activationState(_ *protocol.Context, args []json.RawMessage) (any, error) {
 }
 
 type license struct {
-	Valid  bool   `json:"valid"`
-	Reason string `json:"reason"`
+	Features []string `json:"features"`
+	Reason   string   `json:"reason"`
+	Valid    bool     `json:"valid"`
 }
 
 // authorizationState 任何令牌(包括空)都视为有效。
 func authorizationState(*protocol.Context, []json.RawMessage) (any, error) {
+	// 字段与官方 v0.1.354 对齐:license.features 空数组,permissions 全部放行
 	return struct {
-		License license `json:"license"`
-	}{license{Valid: true}}, nil
+		License     license         `json:"license"`
+		Permissions map[string]bool `json:"permissions"`
+	}{license{Features: []string{}, Valid: true}, map[string]bool{
+		"license.status": true, "panel.activation": true, "router.config": true,
+		"router.groups": true, "router.routing": true,
+	}}, nil
 }

@@ -6,7 +6,7 @@
   没有官方包(路径不存在)时直接跳过,退出码 0。
 也可以用环境变量 OPENBOX_UPSTREAM_CORE 代替第一个参数。
 
-比较的方法: entryPlan / bypassPlan(再加 ignoreProxyClients:true 的变体)/ configDetailed(再把 platform 换成 container)。
+比较的方法: normalize*/migrate/fingerprint-less 的 routing、groups 金标准(无 geoTags 的用例)、classes / forwardPlan、entryPlan / bypassPlan(再加 ignoreProxyClients:true 的变体)/ configDetailed(再把 platform 换成 container)。
 已知、有意保留的差异(configDetailed 约 100 条,全在脏数据语料里):
   - 非 ASCII 主机(directHosts.domains / dns、route 规则里的 domain):上游丢弃,自研转 punycode 保留。
   - BOM、__proto__ 键、旧版 regions 数据的 fallback.default:见 core/README.md。
@@ -56,6 +56,12 @@ def main():
             a = copy.deepcopy(c["args"])
             a[1]["ignoreProxyClients"] = True
             check("bypassPlan+ignoreProxyClients", "bypassPlan", a)
+    for name in ("routing_golden.json", "groups_golden.json"):
+        for c in cases(name):
+            check(c["fn"], c["fn"], c["args"]) if not c.get("geoTags") else None
+    for c in cases("plans_golden.json"):
+        if c["fn"] in ("classes", "forwardPlan"):
+            check(c["fn"], c["fn"], c["args"])
     for c in cases("config_golden.json"):
         check("configDetailed", "configDetailed", [c["args"]])
         a = copy.deepcopy(c["args"])

@@ -15,10 +15,7 @@ var legacyRoutingKeys = []string{
 // migrateStoredRoutingObj 把存下来的 routing 迁到新模型(engine/routing-model.mjs 的 migrateStoredRouting)。
 // 返回迁完的对象和 changed;没有老字段时原样返回(非对象当成 {})。
 func migrateStoredRoutingObj(routing any) (any, bool, bool) {
-	// JS 里数组也是 object:原样返回,读它的任何键都是 undefined
-	if _, isArr := routing.([]any); isArr {
-		return routing, false, true
-	}
+	// 官方 v0.1.354:数组(以及其他非对象)按空对象处理,返回 {}
 	raw, ok := asObject(routing)
 	if !ok {
 		raw = map[string]any{}

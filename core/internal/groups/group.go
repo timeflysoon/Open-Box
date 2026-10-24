@@ -62,16 +62,17 @@ type FailoverSettings struct {
 
 // Group 是归一化后的节点组。JSON 输出的键顺序和旧实现一致(见 MarshalJSON)。
 type Group struct {
-	ID        string
-	Name      string
-	Type      string
-	Mode      string
-	Enabled   bool
-	Icon      string
-	IconScale int
-	Keywords  []string
-	Members   []string
-	Kind      string // direct / block / 空
+	ID          string
+	Name        string
+	Type        string
+	Mode        string
+	Enabled     bool
+	Icon        string
+	IconScale   int
+	KeywordMode string // or / and(官方 v0.1.354:只有恰好是 "and" 才是 and)
+	Keywords    []string
+	Members     []string
+	Kind        string // direct / block / 空
 
 	// 只有对应类型才有的字段;extras 记录它们来自哪种类型(内置出站会改写 Type,但这些字段原样保留)
 	extras  string // "" / urltest / failover
@@ -126,6 +127,7 @@ func (g *Group) MarshalJSON() ([]byte, error) {
 	put("enabled", g.Enabled)
 	put("icon", g.Icon)
 	put("iconScale", g.IconScale)
+	put("keywordMode", g.KeywordMode)
 	put("keywords", g.Keywords)
 	put("members", g.Members)
 	switch g.extras {
@@ -175,11 +177,15 @@ func normalizeIcon(raw any) string {
 }
 
 func normalizeIconScale(v any) int {
+	// 官方 v0.1.354:数组不转数字,当缺省;取整是 floor(x+0.5)(0.49999999999999994 得 1)
+	if _, isArr := v.([]any); isArr {
+		return 0
+	}
 	n := jsx.ToNumber(v)
 	if !jsx.IsFinite(n) {
 		return 0
 	}
-	r := jsx.Round(n)
+	r := math.Floor(n + 0.5)
 	return int(math.Max(-iconScaleLimit, math.Min(iconScaleLimit, r)))
 }
 
@@ -267,6 +273,10 @@ func normalizeGroup(raw any, index int) *Group {
 	g.Enabled = !(isBool && !en)
 	g.Icon = normalizeIcon(jsx.Get(raw, "icon"))
 	g.IconScale = normalizeIconScale(jsx.Get(raw, "iconScale"))
+	g.KeywordMode = "or"
+	if km, isStr := jsx.Get(raw, "keywordMode").(string); isStr && km == "and" {
+		g.KeywordMode = "and"
+	}
 	g.Keywords = strList(jsx.Get(raw, "keywords"))
 	g.Members = strList(jsx.Get(raw, "members"))
 

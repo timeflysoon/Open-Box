@@ -104,6 +104,23 @@ func resolveMembers(g *Group, dynamicTags []string, nodeTagSet, memberNames map[
 			if !ok {
 				text = normalizeForMatch(tag)
 			}
+			if g.KeywordMode == "and" {
+				// 官方 v0.1.354:and = 所有(非空)关键词都要命中
+				all := true
+				for _, kw := range g.Keywords {
+					if jsx.Trim(normalizeForMatch(kw)) == "" {
+						continue
+					}
+					if !keywordMatches(text, kw) {
+						all = false
+						break
+					}
+				}
+				if all {
+					out = append(out, tag)
+				}
+				continue
+			}
 			for _, kw := range g.Keywords {
 				if keywordMatches(text, kw) {
 					out = append(out, tag)

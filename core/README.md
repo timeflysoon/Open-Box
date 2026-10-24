@@ -70,14 +70,14 @@ tun 入站(排除表挖洞、MAC 过滤、dns_mode)、入口原生旁路与热�
   2. `platform`:只有 `container` 有行为(2026-10 已对官方 v0.1.353 的 openbox-core 差分核对):`dns-in` 后面多一个监听 `0.0.0.0:53` 的 `dns-in-lan` 入站,`route.rules[0]` 是 `{"action":"hijack-dns","inbound":["dns-in-lan"]}`(在 guardTerminalRules 之后插入);`openwrt` / `systemd` 和不传一样。
   3. `ignoreProxyClients`(bypassPlan 选项)已对官方包核对:有终端走代理时不再关旁路,reason 末尾补一句「有终端被指定走代理:这些集合只用于入口按来源旁路,代理终端本身由入口 guard 拦下」(排在 FakeIP / DNS 提示之后)。
   4. 上游 sing-box 补丁字段(如 urltest 的 `expected_status`)按基线 / groups 对齐的输出写,是否要在官方内核上降级由发布流程决定。
-  5. v0.1.318 到当前上游之间 engine 的其余行为变化,仍需用 index.mjs 做一轮增量核对(第四节 4.4 的做法)。
+  5. (已处理,2026-10)v0.1.318 到 v0.1.354 之间 engine 的行为变化:Node 354 调用的 15 个核心方法全部已注册,并对官方 354 做过差分(官方核心要放在未改动的 release panel/server/native/ 下才肯跑,它校验 index.mjs 哈希)。builtinTags 140、classes 400、forwardPlan 400 条一致;normalizeGroups / migrateStoredRouting / routingFingerprint 补齐了 keywordMode(or / and,and 要求所有关键词命中)、iconScale 取整(floor(x+0.5),数组当缺省)、migrateStoredRouting 非对象输入返回 {},剩下只有 BOM 与 `__proto__` 两类有意保留的差异;authorizationState 补 license.features 与 permissions。随机差分 4500 次 0 不一致。上游 v0.1.355 相对 354 只改了 README,UPSTREAM_VERSION 不动。
 **对官方包的差分**(`testdata/tools/diff-upstream.py`,官方 openbox-core 取自上游 Release 的 `open-box-v*-linux-x64-app.tar.gz`,只放本地不进仓库):entryPlan 900 条、bypassPlan 900 条(再加 `ignoreProxyClients:true` 的变体 900 条)、configDetailed 500 条(再把 platform 换成 container 500 条),除 configDetailed 里 102 条脏数据语料外全部一致。
 这 102 条都是有意保留的差异:非 ASCII 主机(`ruleUrls` / 节点域名)上游丢弃、自研转 punycode 保留。其余已知差异:BOM 和 `__proto__` 键(上游是 Go,不去 BOM、不按 JS 原型处理)、改版前 regions 旧数据的 `fallback.default`(上游 direct,自研 proxy)。
 **对官方 v0.1.354 的 normalize / emitGroups 差分**(2026-10):用金标准输入(带 geoTags)喂官方 354 和自研,normalizeRouting 469 条、normalizePolicy 250 条、emitGroups 435 条。
 对出来的真实行为差异已全部对齐:重复的内置直连 / 拒绝 id 取最后一个;数组不转数字(tolerance / recoveryHoldMs / failureThreshold 当缺省);custom.iconScale 先按 Number 转(true → 1、"2" → 2)、要整数且在 int64 内,否则 0;
 可接受状态码横线两侧只认 `\t \n \f \r 空格`、首尾按 Unicode 空白去掉(含 U+0085,不含 U+FEFF);旧 regions 数据:catchAll / fallback 写了非法值按 direct、规则类型也认 `ipCidr`、legacy 站点集 id 用 trim 后的值、没写 regionId 时选第一个 id 缺失 / 为空 / 非字符串的地区(没有才选第 0 个)。
 现在 emitGroups 435 条全部一致;normalizePolicy / normalizeRouting 只剩两类**有意保留**的差异:`notes` 里的 `__proto__` 键(官方保留,自研丢弃)和 BOM(官方 Go 不去 U+FEFF,自研沿用 JS 的 trim)。
-官方核心没有 migrateStoredRouting / routingFingerprint / normalizeGroups / builtinTags 这几个方法,没法直接对,只能经 normalizeRouting / emitGroups 间接覆盖;这几个方法的金标准是跟着自研输出改的(upgrade-golden.py 里记了条数)。
+这几个方法后来也直接对过官方(见已知缺口第 5 条),金标准已改为经官方核对。
 官方 hello 还列了 normalizeCustom / verifyLicense / featureAccess,v0.1.354 的 index.mjs 没有调用,自研没有实现。
 `testdata/tools/upgrade-golden.py` 把基线生成的金标准(config / plans)升级到官方 v0.1.353 的行为:gen-*.mjs 重新生成之后要再跑一次。
 rulesetDir:路由里 `.srs` 的路径先去掉末尾所有的 `/`、null 当空字符串(`/data/rs//x.srs`、字面 `null` 都不会再出现);节点直连规则集(`obnode-direct*.json`)的路径不去斜杠,和官方一致。

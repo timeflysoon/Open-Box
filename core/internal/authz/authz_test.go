@@ -45,7 +45,7 @@ func TestUnlocked(t *testing.T) {
 		t.Fatalf("应带回存下的标签: %+v", st)
 	}
 	b, _ := json.Marshal(call(t, "authorizationState", `""`))
-	if string(b) != `{"license":{"valid":true,"reason":""}}` {
+	if string(b) != `{"license":{"features":[],"reason":"","valid":true},"permissions":{"license.status":true,"panel.activation":true,"router.config":true,"router.groups":true,"router.routing":true}}` {
 		t.Fatalf("授权状态不对: %s", b)
 	}
 }

@@ -13,7 +13,10 @@
                        数组不转数字(tolerance / recoveryHoldMs / failureThreshold)、custom.iconScale 按 Number 转并限 int64、
                        旧 regions 的 catchAll / fallback 非法值按 direct、ipCidr 类型、legacy id 用 trim 后的值、没写 regionId 时按缺失 id 选地区。
                        只改自研输出和旧期望不同、且与官方只差 BOM / __proto__ 两类已知差异的用例;对不上官方的直接报错。
-                       normalizeGroups / builtinTags 官方没有这两个方法,无法直接对,只能跟着改(emitGroups 间接覆盖)。
+                       之后(MARK3)发现官方在完整 release 目录里其实也响应 normalizeGroups / builtinTags / migrateStoredRouting /
+                       routingFingerprint,这几个也改成直接对官方:分组多了 keywordMode(or / and)、iconScale 取整 floor(x+0.5)、
+                       migrateStoredRouting 的非对象输入返回 {}。官方核心要放在未改动的 release 的 panel/server/native/ 下才肯跑
+                       (它校验 index.mjs 哈希,fork 里换了仓库地址的 index.mjs 过不了)。
   plans_golden.json    entryPlan 的期望值改读官方包(directAnswer 不再因终端走代理而关掉);
                        另追加 bypassPlan + ignoreProxyClients:true 的用例(期望值读官方包)。
 """
@@ -23,6 +26,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.path.normpath(os.path.join(HERE, ".."))
 MARK = "+upstream-v0.1.353"
 MARK2 = "+upstream-v0.1.354-normalize"
+MARK3 = "+upstream-v0.1.354-direct"
 
 
 def load(name):
@@ -143,6 +147,27 @@ def upgrade_normalize(core, mine):
         print(f"{name} 已升级: 期望值改了 {changed} 条(其中官方无法直接对的 {unverified} 条)")
 
 
+def upgrade_direct(core, mine):
+    for name in ("routing_golden.json", "groups_golden.json"):
+        g = load(name)
+        if MARK3 in g["generatedBy"]:
+            print(name, "已升级(direct),跳过")
+            continue
+        changed = 0
+        for c in g["cases"]:
+            geo = c.get("geoTags")
+            got = call(mine, c["fn"], c["args"], geo)
+            up = call(core, c["fn"], c["args"], geo)
+            if json.dumps(_canon(up), sort_keys=True, ensure_ascii=False) != json.dumps(_canon(got), sort_keys=True, ensure_ascii=False):
+                raise RuntimeError(f"{name} {c['fn']} 与官方不一致: {json.dumps(c['args'], ensure_ascii=False)[:200]}")
+            if got != c["want"]:
+                c["want"] = got
+                changed += 1
+        g["generatedBy"] += MARK3
+        save(name, g)
+        print(f"{name} 已升级(direct): 期望值改了 {changed} 条")
+
+
 if __name__ == "__main__":
     core = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("OPENBOX_UPSTREAM_CORE", "")
     mine = sys.argv[2] if len(sys.argv) > 2 else os.environ.get("OPENBOX_MINE_CORE", "")
@@ -151,6 +176,7 @@ if __name__ == "__main__":
         upgrade_plans(core)
         if mine and os.path.isfile(mine):
             upgrade_normalize(core, mine)
+            upgrade_direct(core, mine)
         else:
             print("没有自研 openbox-core,跳过 routing / groups 金标准(传第二个参数或设 OPENBOX_MINE_CORE)")
     else:
