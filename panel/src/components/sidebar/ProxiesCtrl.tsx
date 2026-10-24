@@ -255,7 +255,7 @@ export default defineComponent({
             title={t('proxySettings')}
             boxClass="w-full max-w-2xl"
           >
-            <div class="flex flex-col gap-4 p-2 text-sm">
+            <div class="flex flex-col gap-4 text-sm">
               <div class="flex items-center gap-2">
                 {t('proxyNodeSortBy')}
                 {sort}

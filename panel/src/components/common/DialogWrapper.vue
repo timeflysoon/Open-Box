@@ -21,7 +21,7 @@
           class="modal-box bg-base-100 relative overflow-hidden p-0"
           :class="[
             blurIntensity < 5 && 'backdrop-blur-sm!',
-            slots.footer && !mobileFullscreen && 'flex max-h-[90dvh] flex-col max-md:max-h-[70dvh]',
+            !mobileFullscreen && 'flex max-h-[90dvh] flex-col max-md:max-h-[70dvh]',
             mobileFullscreen &&
               'max-md:h-dvh max-md:min-h-dvh max-md:w-screen max-md:max-w-none max-md:rounded-none max-md:m-0',
             boxClass,
@@ -31,7 +31,7 @@
           <div
             v-if="(title || slots['title-left']) && isOpen"
             id="dialog-title"
-            class="after:border-base-content/10 relative flex shrink-0 items-center gap-2 px-4 py-2 text-base font-bold after:pointer-events-none after:absolute after:inset-x-4 after:bottom-0 after:border-b"
+            class="after:border-base-content/10 relative flex shrink-0 items-center gap-2 px-4 py-2 text-base font-semibold after:pointer-events-none after:absolute after:inset-x-4 after:bottom-0 after:border-b"
             :class="headerClass"
           >
             <slot name="title-left" />
@@ -53,9 +53,7 @@
             :class="[
               mobileFullscreen
                 ? 'h-[calc(100dvh-3rem)] max-h-[calc(100dvh-3rem)] overflow-hidden'
-                : slots.footer
-                  ? 'min-h-0 flex-1 overflow-y-auto overscroll-contain'
-                  : 'max-h-[90dvh] overflow-y-auto max-md:max-h-[70dvh]',
+                : 'min-h-0 flex-1 overflow-y-auto overscroll-contain',
               noPadding ? 'p-0' : 'p-4',
               contentClass,
             ]"

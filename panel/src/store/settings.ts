@@ -163,9 +163,17 @@ export const proxyCardSize = useStorage<PROXY_CARD_SIZE>(
   'config/proxy-card-size',
   PROXY_CARD_SIZE.LARGE,
 )
+// 默认宽度从 145 改成 155 后换了新键:旧键里存的如果是旧默认值(145 / 130),说明用户没自己调过,
+// 直接按当前卡片大小取新默认;其余数值是用户手调的,原样沿用
+const LEGACY_MIN_CARD_WIDTHS = [145, 130]
+const legacyMinCardWidth = localStorage.getItem('config/min-proxy-card-width')
 export const minProxyCardWidth = useStorage<number>(
-  'config/min-proxy-card-width',
-  getMinCardWidth(proxyCardSize.value),
+  'config/node-card-min-width',
+  legacyMinCardWidth === null ||
+    !Number.isFinite(Number(legacyMinCardWidth)) ||
+    LEGACY_MIN_CARD_WIDTHS.includes(Number(legacyMinCardWidth))
+    ? getMinCardWidth(proxyCardSize.value)
+    : Number(legacyMinCardWidth),
 )
 export const manageHiddenGroup = useStorage('config/manage-hidden-group-mode', false)
 
