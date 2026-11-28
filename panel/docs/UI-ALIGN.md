@@ -97,6 +97,22 @@
 - **复核**:`cmp-upstream-refs.py` 中 `outboundNameInvalid` 与 `nodeScoreRefreshUnavailable` 不再是缺口。
 - **构建**:`vue-tsc --noEmit` 与 `npm run build` 通过。
 
+### 批次 4:DNS 页「指定域名 DNS」生效状态(已对齐)
+
+- **上游 v0.1.496** 把「指定域名 DNS」的生效状态从「开 / 关」两态改成按内核状态判断的四态:
+  ① 内核在跑且本项属于待重启变更 → `dnsDomainUpstreamBadgePendingRestart`(「待重启生效」,warning);
+  ② 开关开着但内核没在跑 → `dnsDomainUpstreamBadgeStopped`(「未运行」);
+  ③ 开着且一条规则都没有 → `dnsDomainUpstreamBadgeNoRules`(「已启用(无规则)」);
+  ④ 开着且有规则 → `dnsDomainUpstreamBadgeEnabled`(「已启用」,success);关着 → `dfDisabled`。
+- **待重启的判据与上游一致**:`pendingRestart.details` 有内容时看里面有没有 `dns_domain_upstreams`,
+  否则回落到 `reasons` 里有没有 `dns`(老服务端没有 `details`)。
+- **保存提示也跟着分叉**:内核在跑且本次改动属于待重启项时用
+  `dnsDomainUpstreamSavedRestart`(「已保存,重启内核后生效」,warning),否则仍是
+  `dnsDomainUpstreamSaved`(success)。上游同样这么分。
+- **改动文件**:`panel/src/components/dns/DnsDomainUpstreamCard.vue`(徽标计算 `enabledBadge` +
+  `persist` 的提示分叉 + 引入 `serviceStatus`)。
+- **构建**:`vue-tsc --noEmit` 与 `npm run build` 通过;5 个键引用数均从 0 变 1。
+
 ## 键集对齐(2026-11-26,v0.1.488)
 
 - **基准**:上游 `liandu2024/Open-Box` 已发 **v0.1.488**(2026-11-26T06:17Z)。把 release 包 `open-box-v0.1.488-linux-x64.tar.gz` 解出来当基准

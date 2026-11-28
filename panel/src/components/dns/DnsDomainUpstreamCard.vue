@@ -16,8 +16,8 @@
             >
             <span
               class="badge badge-sm"
-              :class="enabled ? 'badge-success' : ''"
-            >{{ $t(enabled ? 'dfEnabled' : 'dfDisabled') }}</span>
+              :class="enabledBadge.cls"
+            >{{ $t(enabledBadge.key) }}</span>
           </div>
           <button
             v-tip="$t('dnsDomainUpstreamAdd')"
@@ -215,6 +215,7 @@ import type { OpenboxDnsDomainUpstreamRule, OpenboxProfile } from '@/api/openbox
 import DialogWrapper from '@/components/common/DialogWrapper.vue'
 import DnsProtocolSelect from '@/components/common/DnsProtocolSelect.vue'
 import TagInput from '@/components/common/TagInput.vue'
+import { serviceStatus } from '@/composables/kernelService'
 import { showNotification } from '@/helper/notification'
 import { PencilSquareIcon, PlusIcon, TrashIcon } from '@heroicons/vue/24/outline'
 import { useI18n } from 'vue-i18n'
@@ -232,6 +233,34 @@ const DOMAIN_SEPARATOR = /[,，、\s]+/
 const rules = computed<OpenboxDnsDomainUpstreamRule[]>(() => props.profile.dns?.domainUpstreams?.rules ?? [])
 const enabled = computed(() => props.profile.dns?.domainUpstreams?.enabled !== false)
 const saving = ref(false)
+
+// 生效状态徽标(对齐上游 v0.1.496):不只看档案里的开关,还要看内核此刻的状态。
+// 优先级与上游一致:
+//   1. 内核在跑且「指定域名 DNS」属于待重启变更 → 「待重启生效」(warning)
+//   2. 开关开着但内核没在跑 → 「未运行」
+//   3. 开关开着且有规则 → 「已启用」(控制接口接通时上游显示 dfEnabled;这里按能否读到服务状态区分)
+//   4. 开关开着但一条规则都没有 → 「已启用(无规则)」
+//   5. 开关关着 → dfDisabled
+const enabledBadge = computed<{ key: string; cls: string }>(() => {
+  if (!enabled.value) return { key: 'dfDisabled', cls: '' }
+  const st = serviceStatus.value
+  const pending = st?.pendingRestart
+  // 与上游一致的判据:details 里有 dns_domain_upstreams 就认明细,否则看 reasons 里有没有 dns
+  const pendingThis = !!pending?.pending &&
+    (pending.details?.length
+      ? pending.details.includes('dns_domain_upstreams')
+      : (pending.reasons ?? []).includes('dns'))
+  if (st?.core?.running && pendingThis) {
+    return { key: 'dnsDomainUpstreamBadgePendingRestart', cls: 'badge-warning' }
+  }
+  if (st && !st.core?.running) {
+    return { key: 'dnsDomainUpstreamBadgeStopped', cls: '' }
+  }
+  if (!rules.value.length) {
+    return { key: 'dnsDomainUpstreamBadgeNoRules', cls: '' }
+  }
+  return { key: 'dnsDomainUpstreamBadgeEnabled', cls: 'badge-success' }
+})
 
 const { t } = useI18n()
 const domainText = (rule: OpenboxDnsDomainUpstreamRule) => {
@@ -257,7 +286,15 @@ const persist = async (next: OpenboxDnsDomainUpstreamRule[], nextEnabled = enabl
   saving.value = true
   try {
     await props.patchProfile({ dns: { domainUpstreams: { enabled: nextEnabled, rules: next } } })
-    showNotification({ content: 'dnsDomainUpstreamSaved', type: 'alert-success' })
+    // 对齐上游 v0.1.496:内核在跑、且这次改动属于「要重启才生效」的,提示里要写清楚,
+    // 不然用户以为已经生效了。
+    const st = serviceStatus.value
+    const pendingThis = enabledBadge.value.key === 'dnsDomainUpstreamBadgePendingRestart'
+    if (st?.core?.running && pendingThis) {
+      showNotification({ content: 'dnsDomainUpstreamSavedRestart', type: 'alert-warning' })
+    } else {
+      showNotification({ content: 'dnsDomainUpstreamSaved', type: 'alert-success' })
+    }
     return true
   } catch (err) {
     notifyError(err)
