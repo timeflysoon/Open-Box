@@ -638,6 +638,7 @@ import DialogWrapper from '@/components/common/DialogWrapper.vue'
 import GeoRuleValue from '@/components/routing/GeoRuleValue.vue'
 import RuleUrlValue from '@/components/routing/RuleUrlValue.vue'
 import { showNotification } from '@/helper/notification'
+import { isInvalidOutboundName } from '@/helper/outboundName'
 import StatusBadge from '@/components/common/StatusBadge.vue'
 import { Bars3Icon, PencilSquareIcon, PlusIcon, PowerIcon, TrashIcon } from '@heroicons/vue/24/outline'
 import { computed, ref, watch } from 'vue'
@@ -669,6 +670,11 @@ const saveFallback = async () => {
   const name = d.name.trim()
   if (!name) {
     showNotification({ content: 'routingPolicyNameRequired', type: 'alert-error' })
+    return
+  }
+  // 名字会当内核出站 tag 用:`.` / `..` / 含 `/` 一律拒绝(上游 outboundNameInvalid)
+  if (isInvalidOutboundName(name)) {
+    showNotification({ content: 'outboundNameInvalid', type: 'alert-error' })
     return
   }
   // 名字就是内核里的出站 tag,和普通站点集重名同样不行
@@ -1227,6 +1233,11 @@ const saveDraft = async () => {
   const name = draft.value.name.trim()
   if (!name) {
     showNotification({ content: 'routingPolicyNameRequired', type: 'alert-error' })
+    return
+  }
+  // 名字会当内核出站 tag 用:`.` / `..` / 含 `/` 一律拒绝(上游 outboundNameInvalid)
+  if (isInvalidOutboundName(name)) {
+    showNotification({ content: 'outboundNameInvalid', type: 'alert-error' })
     return
   }
   // 站点集的名字就是内核里的出站名,重名会生成两个同名出站。

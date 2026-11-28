@@ -83,6 +83,20 @@
 - **构建**:`vue-tsc --noEmit` 与 `npm run build` 均通过;后端本批涉及的 4 个包(`failover` / `subs` /
   `api/subscriptions` / `cmd`)测试通过,新增 2 个单测覆盖吞吐与积压采样。
 
+### 批次 3:出站名校验 + 评分刷新「未通过」提示(已对齐)
+
+- **`outboundNameInvalid`(上游 v0.1.495 起统一)**:分组名 / 前置分流名会直接当内核里的出站 tag 用,
+  `.`、`..`、含 `/` 三种一律拒绝。新增 `panel/src/helper/outboundName.ts`
+  (`isInvalidOutboundName`:空名返回 false,交给调用方按各自文案报「请填写名称」),
+  并在 `RoutingPoliciesCard.vue` 的「站点集取名」「前置分流取名」两处空名检查之后补判据。
+  上游同样用它在链式代理页与订阅分组弹窗上,那两处本轮未动(各自的页面批次处理)。
+- **`nodeScoreRefreshUnavailable`**:上一批删掉 3 分钟轮询后这个键失去引用,变成「上游引用、main 未引用」。
+  上游的第三种情形是「延迟测完了,但这批节点一个都没进评分表」——此时提示「已刷新节点评分」是假的。
+  在 `ProxiesCtrl.tsx` 用具名块补回该分支:任一节点能查到评分才走 Queued/Done,全查不到走 Unavailable(warning)。
+  用导出的 `nodeScore(name)` 判断(store 里 `scores` 是模块私有,未导出)。
+- **复核**:`cmp-upstream-refs.py` 中 `outboundNameInvalid` 与 `nodeScoreRefreshUnavailable` 不再是缺口。
+- **构建**:`vue-tsc --noEmit` 与 `npm run build` 通过。
+
 ## 键集对齐(2026-11-26,v0.1.488)
 
 - **基准**:上游 `liandu2024/Open-Box` 已发 **v0.1.488**(2026-11-26T06:17Z)。把 release 包 `open-box-v0.1.488-linux-x64.tar.gz` 解出来当基准

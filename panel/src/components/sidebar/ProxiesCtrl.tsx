@@ -3,7 +3,7 @@ import { useCtrlsBar } from '@/composables/useCtrlsBar'
 import { PROXY_SORT_TYPE, PROXY_TAB_TYPE } from '@/constant'
 import { getMinCardWidth, isMiddleScreen } from '@/helper/utils'
 import { showNotification } from '@/helper/notification'
-import { loadNodeScores } from '@/store/nodeScore'
+import { loadNodeScores, nodeScore } from '@/store/nodeScore'
 import { queueNodeBandwidth } from '@/api/openbox'
 import {
   openboxSubscriptions,
@@ -117,10 +117,21 @@ export default defineComponent({
         await loadNodeScores(true)
         // 上游 v0.1.500 的口径:排了带宽就提示「已排队、分数稍后更新」(info),没排就是「已刷新」(success)。
         // 只一次提示,不再额外轮询队列补第二条——上游没有这种二次提示。
-        if (queued > 0) {
-          showNotification({ content: 'nodeScoreRefreshQueued', params: { name: all }, type: 'alert-info' })
-        } else {
-          showNotification({ content: 'nodeScoreRefreshDone', params: { name: all }, type: 'alert-success' })
+        this_scope: {
+          // 上游还有第三种情形:延迟测完了,但这批节点一个都没进评分表(测速没通过 / 内核没给结果),
+          // 这时提示「已刷新节点评分」是假的,要用 nodeScoreRefreshUnavailable 说清「延迟检测未通过」。
+          if (names.length > 0) {
+            const anyScored = names.some((n) => nodeScore(n) !== null)
+            if (!anyScored) {
+              showNotification({ content: 'nodeScoreRefreshUnavailable', params: { name: all }, type: 'alert-warning', timeout: 8000 })
+              break this_scope
+            }
+          }
+          if (queued > 0) {
+            showNotification({ content: 'nodeScoreRefreshQueued', params: { name: all }, type: 'alert-info' })
+          } else {
+            showNotification({ content: 'nodeScoreRefreshDone', params: { name: all }, type: 'alert-success' })
+          }
         }
       } catch (err) {
         showNotification({
