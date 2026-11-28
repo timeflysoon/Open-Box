@@ -1049,6 +1049,13 @@ func newApp(cfg system.Config, log *slog.Logger) (*server.Server, func(ctx conte
 		KernelAddr: takeover.KernelAddress(),
 	}
 	terminaltestapi.Register(srv.Mux(), terminaltestapi.Deps{Capability: terminalProbe.Capability, Terminal: vterm, Prober: &nsprobe.Exec{}, Conntrack: &conntrack.Reader{}, DNSForward: dnsFwd.Describe,
+		// 内核是 mihomo 时日志里没有 sing-box 那种 DNS 追踪记录,fillKernelDNS 会改走 unsupported-log
+		KernelKind: func(ctx context.Context) string {
+			if k, err := kernelOf(); err == nil {
+				return k
+			}
+			return ""
+		},
 		FirstLayer: terminaltestapi.NewFirstLayer(func() (map[string]any, error) {
 			return routetest.ReadDeployedConfig(cfg.ConfigDir, kernelOf)
 		}, dnsFwd.Mode, dnsFwd.Describe),
@@ -1076,6 +1083,20 @@ func newApp(cfg system.Config, log *slog.Logger) (*server.Server, func(ctx conte
 			// 内核此刻的代理列表:把 kernelDns.chain 补成「站点集 → 节点组 → 节点」;读不到就只给 detour
 			if proxies, err := singbox.KernelProxies(ctx, filepath.Join(cfg.ConfigDir, "config.json")); err == nil {
 				c.Proxies = proxies
+			}
+			return c, nil
+		},
+		// mihomo 下日志截不出 DNS 追踪记录,改按档案里的「指定域名 DNS」推算走向;
+		// 同时判断本次探测是否拿到 FakeIP 占位地址(上游用这个决定是显示「实测返回 FakeIP」还是「按配置对应」)
+		MihomoKernelDNS: func(ctx context.Context, domain string, probeIP string) (*kerneldns.Config, error) {
+			p, err := profileSvc.Get(ctx)
+			if err != nil {
+				return nil, err
+			}
+			c := &kerneldns.Config{MihomoConfigured: kerneldns.MihomoConfigured(p, domain)}
+			if probeIP != "" {
+				fake := kerneldns.IsFakeIP(probeIP)
+				c.ProbeFakeIP = &fake
 			}
 			return c, nil
 		},

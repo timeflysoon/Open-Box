@@ -1672,6 +1672,18 @@ export interface OpenboxTerminalEntry {
 export type OpenboxTerminalKernelDnsResult = 'exchanged' | 'cached' | 'optimistic' | 'failed' | 'rejected' | 'action' | 'pending'
 export type OpenboxTerminalKernelDns =
   | { seen: false; reason: 'no-log' | 'not-seen'; error?: string }
+  // v0.1.496: 内核是 mihomo 时日志里没有 DNS 追踪记录。configured 是按已部署 mihomo 配置推算的走向,
+  // probeFakeIp 说明探测拿到的是 FakeIP 占位地址
+  | {
+    seen: false
+    reason: 'unsupported-log'
+    configured?: {
+      server?: { tag?: string; type?: string; server?: string; port?: number | null; detour?: string } | null
+      ruleKey?: string
+      fakeIp?: boolean
+    } | null
+    probeFakeIp?: boolean
+  }
   | {
     seen: true
     source: string

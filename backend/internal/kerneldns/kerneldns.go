@@ -36,6 +36,11 @@ type Config struct {
 	// Proxies 是内核此刻的代理列表(可选,由调用方从内核的 /proxies 取)。给了就把 chain 补全成
 	// 「detour → 站点集 → 节点组 → 节点」,没给就只给 detour(与以前一样)。
 	Proxies []singbox.KernelProxy
+	// MihomoConfigured 是按已部署 mihomo 配置推算出的 DNS 走向(内核是 mihomo、日志截不出追踪记录时用)。
+	// nil = 没有推算结果。
+	MihomoConfigured map[string]any
+	// ProbeFakeIP 是本次探测是否拿到了 FakeIP 占位地址;nil = 没判断。
+	ProbeFakeIP *bool
 }
 
 // maxChain 是跟着「当前选中」往下走的最大层数,防止内核里出现环。

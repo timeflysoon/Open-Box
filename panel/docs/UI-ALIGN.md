@@ -113,22 +113,32 @@
   `persist` 的提示分叉 + 引入 `serviceStatus`)。
 - **构建**:`vue-tsc --noEmit` 与 `npm run build` 通过;5 个键引用数均从 0 变 1。
 
-### 批次 5:mihomo 路由诊断的 5 个键(阻塞,未做)
+### 批次 5:mihomo 路由诊断 5 键(已完成,原判「阻塞」有误)
 
-- **涉及键**:`routeTermKdnsRuleMatched`、`routeTermKdnsMihomoConfiguredRule`、
-  `routeTermKdnsMihomoLegacyConfigured`、`routeTermKdnsMihomoLegacyFakeIp`、
-  `routeTermKdnsMihomoUnsupportedLog`(上游 v0.1.496 新增)。
-- **为什么没做**:这 5 个键全部依赖上游在模拟终端的 DNS 决策里新增的 `stage: "unsupported-log"` 分支,
-  该分支要读 `configured`(已部署 mihomo 的 DNS 规则命中项)、`ruleKey`、`probeFakeIp` 三个字段。
-  而 main 后端 `routetest.ReadDeployedConfig` 在内核是 mihomo 时**直接返回 `ErrKernelConfigUnsupported`**
-  (设计如此,见 `backend/internal/routetest/deployed.go` 第 20 行),**没有任何 mihomo 规则翻译层**,
-  因此这三个字段无从产生。`probeFakeIp` / `unsupported-log` 在 main 前后端均无出现。
-- **结论**:不是前端少接几个键,而是**整条「mihomo 规则 → 推算用形状」的翻译层没做**。仅在模板里
-  引用这些键会造出没有数据来源的界面,属于假的「已对齐」,故本轮不做。
-- **要做需要**:先补 `internal/routetest` 的 mihomo 规则翻译(把 mihomo 的
-  `DOMAIN-SUFFIX,xxx,直连` 字符串规则与 `rule-providers` 映射到 sing-box `route.rule_set` 登记),
-  再由后端在 DNS 决策里输出 `configured` / `ruleKey` / `probeFakeIp`,最后前端接这 5 个键。
-  这是一整条功能线,不是一批能完成的事。
+**更正**:此前把它标成阻塞,理由是「main 后端对 mihomo 直接返回 `ErrKernelConfigUnsupported`,
+没有数据来源」。这个判断**只看了一处就下结论**——`ErrKernelConfigUnsupported` 只出现在
+`routetest.ReadDeployedConfig`(路由 / 穿透推算),而 kernelDns 走的是 `terminaltest.fillKernelDNS`
+这条独立链路,完全可以支持。重新核查后已实现。
+
+- **后端**(新增 `backend/internal/kerneldns/mihomo.go`):
+  - `MihomoConfigured(profile, domain)`:按档案 `dns.domainUpstreams` 推算走向,返回
+    `{server:{tag,type,server,port,detour}, ruleKey, fakeIp}`,与上游 `kernelDns.configured` 同形。
+    **不解析 mihomo.yaml**——后端 `go.mod` 是零依赖(没有 yaml 库),而 mihomo.yaml 本来就由本模块
+    按档案生成,两者同源;档案才是这一项的输入。
+  - `IsFakeIP(addr)`:判断是否落在内核 FakeIP 占位段 `198.18.0.0/15`。
+- **`fillKernelDNS` 分支**:`Deps.KernelKind` 返回 `mihomo` 时回
+  `{seen:false, reason:"unsupported-log", configured?, probeFakeIp?}`,不再混进 `not-seen`
+  (后者会让人误以为 dnsmasq 缓存答了)。`Deps.MihomoKernelDNS` 给出推算与 FakeIP 判断。
+- **前端**:`openbox.ts` 的 `OpenboxTerminalKernelDns` 联合类型加 `unsupported-log` 分支;
+  `RouteComparison.vue` 按上游渲染——拿到 FakeIP 用 `routeTermKdnsMihomoLegacyFakeIp`,
+  否则用 `routeTermKdnsMihomoLegacyConfigured` 显示推算走向、有 `ruleKey` 时补
+  `routeTermKdnsMihomoConfiguredRule`,并统一追加 `routeTermKdnsMihomoUnsupportedLog` 说明原因。
+  另修 `routeTermKdnsRuleMatched`:规则序号为 null 但日志给了规则文本时用「内核 DNS 规则命中」,
+  而不是「未命中任何规则」(上游同口径)。
+- **测试**:`kerneldns` 新增 2 组(规则推算的完全匹配 / 后缀匹配 / 不误命中 / 三种返回 nil;FakeIP 判定),
+  `terminaltest` 新增 2 组(mihomo 带推算、mihomo 不带推算),全部通过。
+- **验证限制**:Windows 上 `capable=false`(缺 netns / veth),端到端打不到 `fillKernelDNS`,
+  分支行为由上述单测覆盖(既有 `tapDeps` 夹具可直接驱动)。
 
 ### 批次 6:探测压力告警的逐组明细(补齐数据源)
 
@@ -507,14 +517,12 @@
 
 **引用**:上游引用而 main 未引用的非例外项如下,均已在 UI-ALIGN 各批次条目中说明原因。
 
-- `routeTermKdnsRuleMatched` / `routeTermKdnsMihomoConfiguredRule` /
-  `routeTermKdnsMihomoLegacyConfigured` / `routeTermKdnsMihomoLegacyFakeIp` /
-  `routeTermKdnsMihomoUnsupportedLog`(5 个):依赖 mihomo 规则翻译层,main 后端对 mihomo 直接返回
-  `ErrKernelConfigUnsupported`,无数据来源。**这是本轮唯一的功能性缺口,见批次 5。**
+- 无。`routeTermKdnsRuleMatched` / `routeTermKdnsMihomo*` 5 个键已在批次 5 接上
+  (mihomo 下 kernelDns 回 `unsupported-log` 并带按档案推算的配置走向)。
 - 其余全部属于例外 A(`comingSoon`、`activation*` 14 个、`tutorial*` 4 个)。
 
 **本轮已完成的批次**:批次 1(订阅刷新提示 + 评分刷新四态)、批次 2(系统提示铃铛 + 真实吞吐统计 +
 `kernelStale`)、批次 3(出站名校验 + `nodeScoreRefreshUnavailable`)、批次 4(指定域名 DNS 四态徽标)、
-批次 6(探测压力逐组明细)。批次 5 阻塞。
+批次 5(mihomo 路由诊断 5 键)、批次 6(探测压力逐组明细)。**无阻塞项。**
 
 本次是基于 dist 反推与文档口径的**功能等价对齐**,不保证与闭源上游逐行一致。

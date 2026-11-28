@@ -142,3 +142,35 @@ func TestRunKernelDNSWorksWithoutConfig(t *testing.T) {
 		t.Fatalf("读不到配置时日志里认得出的照给,服务器信息留空:%v", k)
 	}
 }
+
+// 内核是 mihomo 时:日志里没有 sing-box 那种 DNS 追踪记录,应回 unsupported-log,
+// 并带上按已部署 mihomo 配置推算的走向与 FakeIP 判断(上游 v0.1.496)。
+func TestRunKernelDNSSupportedLogMihomo(t *testing.T) {
+	d, _, _ := tapDeps(t, logLines("example.com"), nil)
+	d.KernelKind = func(context.Context) string { return "mihomo" }
+	d.MihomoKernelDNS = func(_ context.Context, domain, probeIP string) (*kerneldns.Config, error) {
+		fake := kerneldns.IsFakeIP(probeIP)
+		return &kerneldns.Config{
+			MihomoConfigured: map[string]any{"ruleKey": "DOMAIN-SUFFIX,example.com", "fakeIp": false},
+			ProbeFakeIP:      &fake,
+		}, nil
+	}
+	k, _ := decode(t, serve(t, d, "POST", "/api/openbox/terminal-test", `{"target":"example.com"}`))["kernelDns"].(map[string]any)
+	if k["seen"] != false || k["reason"] != "unsupported-log" {
+		t.Fatalf("mihomo 应回 unsupported-log:%v", k)
+	}
+	cfg, _ := k["configured"].(map[string]any)
+	if cfg == nil || cfg["ruleKey"] != "DOMAIN-SUFFIX,example.com" {
+		t.Fatalf("configured 没带上:%v", k["configured"])
+	}
+}
+
+// 没有接 MihomoKernelDNS 时,mihomo 仍要给出 unsupported-log(只报原因,不带推算)。
+func TestRunKernelDNSMihomoWithoutProbe(t *testing.T) {
+	d, _, _ := tapDeps(t, logLines("example.com"), nil)
+	d.KernelKind = func(context.Context) string { return "mihomo" }
+	k, _ := decode(t, serve(t, d, "POST", "/api/openbox/terminal-test", `{"target":"example.com"}`))["kernelDns"].(map[string]any)
+	if k["reason"] != "unsupported-log" || k["configured"] != nil {
+		t.Fatalf("应只报原因:%v", k)
+	}
+}

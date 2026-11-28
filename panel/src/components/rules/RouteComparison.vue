@@ -1271,7 +1271,10 @@ const termDns = computed<DnsView>(() => {
     else if (k.rewrite) { label = t('routeDnsRewrite'); serverLine = server; kernelLine = t('routeTermKdnsFlowRewrite', { server }) }
     else if (k.viaProxy) { label = t('routeTestDnsProxy'); serverLine = server; kernelLine = k.outbound ? t('routeTermKdnsFlowProxy', { node: k.outbound, server }) : t('routeTermKdnsFlowProxyGroup', { detour: k.server?.detour || '', server }) }
     else { label = t('routeTestDnsDirect'); serverLine = server; kernelLine = t('routeTermKdnsFlowDirect', { lan: d.server, server }) }
-    notes.push({ text: k.ruleIndex === null ? t('routeTermKdnsFinal') : t('routeTermKdnsRule', { index: k.ruleIndex + 1, cond: k.ruleText }) })
+    // 上游 v0.1.496:规则序号为 null 但日志里给了规则文本时,用「内核 DNS 规则命中」而不是「没有命中任何规则」——
+    // 有些内核版本只给规则内容不给序号,当成「没命中」会误导。
+    if (k.ruleIndex === null && k.ruleText) notes.push({ text: t('routeTermKdnsRuleMatched', { cond: k.ruleText }) })
+    else notes.push({ text: k.ruleIndex === null ? t('routeTermKdnsFinal') : t('routeTermKdnsRule', { index: k.ruleIndex + 1, cond: k.ruleText }) })
     if (k.fakeIpLocal) notes.push({ text: t('routeTermKdnsFakeIpNote', { ip: k.answers[0] || '', node: exitNode || '?' }) })
     else if (k.fakeIp && k.viaProxy) notes.push({ text: `${k.outbound || chain[chain.length - 1] || ''}:${t('routeTestFakeIpAnswered')}`, warn: true })
     else if (k.result === 'exchanged') notes.push({ text: t('routeTermKdnsExchanged', { rcode: k.rcode, ttl: k.ttl ?? '?', ms: k.ms ?? '?' }) })
@@ -1287,7 +1290,25 @@ const termDns = computed<DnsView>(() => {
     }
   } else if (k) {
     if (k.reason === 'no-log') notes.push({ text: t('routeTermKdnsNoLog', { error: k.error || '' }), warn: true })
-    else if (f && f.forward === 'upstream') notes.push({ text: t('routeTermKdnsNotEntered') })
+    else if (k.reason === 'unsupported-log') {
+      // 内核是 mihomo:日志里没有 DNS 追踪记录。能按已部署配置推算就显示推算走向,
+      // 探测拿到 FakeIP 占位地址时单独说明(它不是真解析结果)。
+      const c = k.configured
+      if (k.probeFakeIp) {
+        kernelLine = t('routeTermKdnsMihomoLegacyFakeIp', { ip: answers[0] || '' })
+      } else if (c) {
+        const srv = c.server
+        const target = srv
+          ? [
+            srv.type === 'LOCAL' && !srv.server ? 'local' : `${(srv.type || '').toUpperCase()} ${srv.server || ''}${srv.port ? `:${srv.port}` : ''}`.trim() || srv.tag || '',
+          ].filter(Boolean).join(' ')
+          : ''
+        const head = t('routeTestDnsProxy')
+        kernelLine = t('routeTermKdnsMihomoLegacyConfigured', { target: [head, target].filter(Boolean).join(' ') })
+        if (c.ruleKey) notes.push({ text: t('routeTermKdnsMihomoConfiguredRule', { cond: c.ruleKey }) })
+      }
+      notes.push({ text: t('routeTermKdnsMihomoUnsupportedLog'), warn: true })
+    } else if (f && f.forward === 'upstream') notes.push({ text: t('routeTermKdnsNotEntered') })
     else notes.push({ text: t('routeTermKdnsNotSeen'), warn: true })
   }
   const failed = !answers.length && !answers6.length

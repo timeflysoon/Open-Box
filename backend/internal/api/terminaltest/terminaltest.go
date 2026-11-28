@@ -78,6 +78,13 @@ type Deps struct {
 	// KernelDNSConfig 取判断 kernelDns 要用的配置(DNS 服务器、出站类型,以及内核此刻的代理列表——用来补全 chain);
 	// 为空或出错时不补服务器信息,日志里能认出的照给。
 	KernelDNSConfig func(ctx context.Context) (*kerneldns.Config, error)
+	// KernelKind 返回当前内核("sing-box" / "mihomo")。为空或读不到按 sing-box 处理。
+	// 内核是 mihomo 时日志里的 DNS 追踪记录格式与 sing-box 不同,截不出内核 DNS 决策,
+	// 此时 kernelDns 回 reason=unsupported-log 并尽量附上按已部署 mihomo 配置推算的走向。
+	KernelKind func(ctx context.Context) string
+	// MihomoKernelDNS 在内核是 mihomo 时给出推算结果(MihomoConfigured / ProbeFakeIP)。
+	// 为空时 unsupported-log 只报原因、不带推算走向。
+	MihomoKernelDNS func(ctx context.Context, domain string, probeIP string) (*kerneldns.Config, error)
 	// DNSForward 返回此刻 dnsmasq 对查询的转发情况(*dnsforward.Service 的 Describe),拿不准返回 nil;为空 = 不填 dnsForward。
 	DNSForward func(ctx context.Context) *dnsforward.Result
 	// FirstLayer 返回「进内核之前」那一层的情况(NewFirstLayer 接出来的),拿不准返回 nil;为空 = 不填 firstLayer。
@@ -364,6 +371,25 @@ func (h *handlers) fillKernelDNS(ctx context.Context, out map[string]any, logs [
 		out["kernelDns"] = map[string]any{"seen": false, "reason": "no-log", "error": tapErr.Error()}
 		return
 	}
+	// 内核是 mihomo:日志里没有 sing-box 那种 DNS 追踪记录,截不出决策。
+	// 上游 v0.1.496 起把这种情况单独标成 unsupported-log,让界面能说清「不是没查,是这个内核不输出」,
+	// 而不是混在 not-seen 里让人以为 dnsmasq 缓存答了。
+	if h.d.KernelKind != nil && h.d.KernelKind(ctx) == "mihomo" {
+		m := map[string]any{"seen": false, "reason": "unsupported-log"}
+		if h.d.MihomoKernelDNS != nil {
+			if c, err := h.d.MihomoKernelDNS(ctx, domain, probeIPFrom(out)); err == nil && c != nil {
+				// 按已部署 mihomo 配置推算出来的走向(命中哪条 DNS 规则、交给谁),以及探测是否拿到 FakeIP 占位地址
+				if c.MihomoConfigured != nil {
+					m["configured"] = c.MihomoConfigured
+				}
+				if c.ProbeFakeIP != nil {
+					m["probeFakeIp"] = *c.ProbeFakeIP
+				}
+			}
+		}
+		out["kernelDns"] = m
+		return
+	}
 	var cfg *kerneldns.Config
 	if h.d.KernelDNSConfig != nil {
 		if c, err := h.d.KernelDNSConfig(ctx); err == nil {
@@ -467,4 +493,22 @@ func (h *handlers) idleTeardown() {
 		return
 	}
 	h.d.Log.Info("虚拟终端空闲,已拆除")
+}
+
+// probeIPFrom 从已经算好的 dns 结果里取第一个解析地址,给 mihomo 的 FakeIP 判断用。
+// 取不到(跳过 / 没有应答 / 失败)返回空串。
+func probeIPFrom(out map[string]any) string {
+	d, _ := out["dns"].(map[string]any)
+	if d == nil {
+		return ""
+	}
+	list, _ := d["answers"].([]string)
+	if len(list) == 0 {
+		if raw, ok := d["answers"].([]any); ok && len(raw) > 0 {
+			s, _ := raw[0].(string)
+			return s
+		}
+		return ""
+	}
+	return list[0]
 }
