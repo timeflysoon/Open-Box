@@ -396,7 +396,44 @@ func newApp(cfg system.Config, log *slog.Logger) (*server.Server, func(ctx conte
 		}
 		return false, nil
 	}
-	subsapi.Register(srv.Mux(), subsapi.Deps{Subs: subsSvc, Pending: pendingRestart})
+	// 列表接口要算「本订阅有多少节点还没进内核」:直接从**已部署的配置文件**解析出站 tag。
+	// 不用 KernelProxies(那个要问正在运行的内核的 Clash API,内核没在跑就读不到,而
+	// 「节点没同步进内核」恰恰就是内核没跟上配置的场景)。
+	deployedNodes := func(ctx context.Context) (map[string]struct{}, error) {
+		k, err := system.ReadRouterKernel(cfg.RouterKernelFile())
+		if err != nil {
+			return nil, err
+		}
+		file := filepath.Join(cfg.ConfigDir, "config.json")
+		if k == system.KernelMihomo {
+			file = cfg.MihomoConfigFile()
+		}
+		b, err := os.ReadFile(file)
+		if err != nil {
+			return nil, err
+		}
+		out := map[string]struct{}{}
+		// mihomo 是 YAML,结构不同;这里只处理 sing-box 的 JSON 形态,mihomo 下返回空集
+		// 让调用方按「算不出」处理(不误报),等 mihomo 的 tag 提取单独做。
+		if k == system.KernelMihomo {
+			return nil, errors.New("mihomo 配置暂不支持节点名提取")
+		}
+		var doc struct {
+			Outbounds []struct {
+				Tag string `json:"tag"`
+			} `json:"outbounds"`
+		}
+		if err := json.Unmarshal(b, &doc); err != nil {
+			return nil, err
+		}
+		for _, o := range doc.Outbounds {
+			if o.Tag != "" {
+				out[o.Tag] = struct{}{}
+			}
+		}
+		return out, nil
+	}
+	subsapi.Register(srv.Mux(), subsapi.Deps{Subs: subsSvc, Pending: pendingRestart, DeployedNodes: deployedNodes})
 
 	// 节点测速和 DNS 上游测试共用的临时目录:临时配置放在数据目录下的 tmp(0700),用完即删
 	probeDir := filepath.Join(cfg.DataDir, "tmp")

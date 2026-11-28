@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/timeflysoon/Open-Box/backend/internal/singbox"
 )
@@ -167,3 +168,70 @@ func TestStatusJSONShapeWithRuntime(t *testing.T) {
 		t.Errorf("吞吐没统计,应为 null")
 	}
 }
+
+// fakeSamplerRT 在 fakeRT 之上再实现 ProbeSampler,验证吞吐与积压会被填进 ProbeStats。
+type fakeSamplerRT struct{ fakeRT }
+
+func (fakeSamplerRT) ProbeThroughput() *float64 { v := 1.5; return &v }
+func (fakeSamplerRT) ProbeBacklog() *float64    { v := 4200.0; return &v }
+
+// 上游 v0.1.500 的「探测压力过高」判据读的是真实吞吐与积压;管理器能给出时状态里必须有,
+// 给不出时保持省略(null),前端按「未知」处理。
+func TestStatusProbesThroughputAndBacklog(t *testing.T) {
+	plan := Plan{{ID: "g1", Tag: "故障转移", Settings: Settings{Interval: "300s"},
+		Lanes: []Lane{{ID: "l1", Index: 0, Valid: []string{"A"}}}}}
+
+	got := BuildStatusWith(context.Background(), plan, kernelAt("A"), fakeSamplerRT{fakeRT{running: true}})
+	ps, ok := got.Probes.(ProbeStats)
+	if !ok {
+		t.Fatalf("Probes 类型不对: %T", got.Probes)
+	}
+	if ps.ThroughputPerS == nil || *ps.ThroughputPerS != 1.5 {
+		t.Fatalf("throughputPerSec 没填: %+v", ps.ThroughputPerS)
+	}
+	if ps.BacklogMs == nil || *ps.BacklogMs != 4200 {
+		t.Fatalf("backlogMs 没填: %+v", ps.BacklogMs)
+	}
+
+	// 不支持采样的管理器:两个字段都应为空(JSON 里省略),不能凭空给 0
+	plain := BuildStatusWith(context.Background(), plan, kernelAt("A"), fakeRT{running: true})
+	ps2 := plain.Probes.(ProbeStats)
+	if ps2.ThroughputPerS != nil || ps2.BacklogMs != nil {
+		t.Fatalf("不支持采样时不应有值: %+v %+v", ps2.ThroughputPerS, ps2.BacklogMs)
+	}
+}
+
+// 吞吐按最近窗口内的完成次数折算;没有样本时返回 nil 而不是 0。
+func TestManagerProbeSampling(t *testing.T) {
+	now := time.Date(2026, 11, 29, 10, 0, 0, 0, time.UTC)
+	m := NewManager(Options{Kernel: &noopKernel{}, Now: func() time.Time { return now }})
+	if m.ProbeThroughput() != nil || m.ProbeBacklog() != nil {
+		t.Fatal("没有样本时不该有值")
+	}
+	for i := 0; i < 10; i++ {
+		m.recordProbeDone()
+		now = now.Add(100 * time.Millisecond)
+	}
+	tp := m.ProbeThroughput()
+	if tp == nil || *tp <= 0 {
+		t.Fatalf("吞吐应为正: %v", tp)
+	}
+	m.recordBacklog(2500 * time.Millisecond)
+	if b := m.ProbeBacklog(); b == nil || *b != 2500 {
+		t.Fatalf("积压应为 2500ms: %v", b)
+	}
+	// 积压样本超过 1 分钟自动作废
+	now = now.Add(2 * time.Minute)
+	if m.ProbeBacklog() != nil {
+		t.Fatal("过期积压应返回 nil")
+	}
+}
+
+// noopKernel 是测试用的空内核。
+type noopKernel struct{}
+
+func (noopKernel) Selected(context.Context) (map[string]string, error) { return nil, nil }
+func (noopKernel) Delay(context.Context, string, string, time.Duration) (time.Duration, error) {
+	return 0, nil
+}
+func (noopKernel) Select(context.Context, string, string) error { return nil }

@@ -77,6 +77,9 @@ type Record struct {
 	// nil(没设置)= 开,所以老记录行为不变;只在明确设成 false 时才写出。
 	DirectSubscription *bool `json:"directSubscription,omitempty"`
 	DirectNodes        *bool `json:"directNodes,omitempty"`
+	// KernelStale 是「本订阅有多少节点还没进已部署的内核配置」(上游 v0.1.499 的
+	// 「订阅节点尚未同步到内核」提示用)。不落盘,只在列表接口的响应里现算现给。
+	KernelStale int `json:"kernelStale,omitempty"`
 }
 
 type subsFile struct {
@@ -263,6 +266,24 @@ func (s *Service) List(ctx context.Context) ([]Record, error) {
 		recs = []Record{}
 	}
 	return recs, nil
+}
+
+// NodeNamesBySubscription 返回每条订阅的节点名列表(用于算「有多少节点还没进内核」)。
+// 与 PoolNodes 不同:这里不筛启用状态,调用方自己决定要不要用到某条订阅。
+func (s *Service) NodeNamesBySubscription(ctx context.Context) (map[string][]string, error) {
+	recs, nodes, err := s.loadAll()
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string][]string, len(recs))
+	for _, r := range recs {
+		names := make([]string, 0, len(nodes[r.ID]))
+		for _, n := range nodes[r.ID] {
+			names = append(names, n.Tag)
+		}
+		out[r.ID] = names
+	}
+	return out, nil
 }
 
 // PoolNodes 按订阅顺序返回已启用订阅的节点池(给配置生成用)。

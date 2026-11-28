@@ -59,6 +59,30 @@
   缺 92 = 例外 C 38 + 系统提示铃铛 `systemAlert*` 54(下一批)。
 - **构建**:`npm run build` 通过。
 
+### 批次 2:系统提示铃铛 + 探测压力判据 + 订阅节点同步状态(已对齐)
+
+- **上游 v0.1.499 新增**:「后端设置」顶部工具栏右侧的「系统提示」铃铛(空态禁用淡显;有告警时按最高等级
+  着色,右上角数字徽标,>99 显示 99+),点开是高对比度汇总弹窗(标题 `systemAlertsTitle`、
+  刷新 / 关闭、空态 `systemAlertsEmpty`、每条含等级徽标 / 对象 / 明细 / 逐项列表 / 建议)。
+- **实现方式**:纯前端聚合(`panel/src/composables/systemAlerts.ts`),不新增告警接口——与上游一致。
+  输入取已有的服务状态、内核版本、故障转移状态、订阅列表、更新状态。组件
+  `panel/src/components/kernel/SystemAlertsDialog.vue`,铃铛挂在 `KernelServiceCard` 的标题行右侧工具组
+  (上游该位置在教程按钮之后,main 无教程按钮,故紧邻「恢复出厂设置」)。
+- **探测压力按 v0.1.500 口径**:`demandPerSec > throughputPerSec × 1.2` **且** `backlogMs >= 2 分钟` 才告警,
+  并跳过内核启动后 5 分钟内的冷启动期。**这需要后端给真实吞吐**——原 `ProbeStats` 注释写着「吞吐没有统计,
+  恒为 null」,本批补上:`failover.Manager` 在每次 `probeNode` 完成时记时间戳(3 分钟滑动窗口折算每秒),
+  并记「等并发名额」的时长(取最近 1 分钟最大值作 `backlogMs`)。不支持采样的 Runtime 仍给 null(不误报)。
+- **订阅节点同步状态**:`systemAlertSubscriptionStale*` 依赖订阅记录上的 `kernelStale`(本订阅有多少节点
+  还没进已部署配置)。后端在 `GET /api/openbox/subscriptions` 里现算(不落盘):按当前内核读配置文件、
+  解析 `outbounds[].tag` 作为「已在核心里」的集合,与本订阅节点 tag 比对。**不采用 Clash API**——
+  内核没在跑时读不到,而「节点没同步进内核」恰恰发生在内核没跟上配置的场景。算不出时省略该字段(不误报)。
+- **验证(DOM 之外的端到端)**:本地独立实例(端口 13999、独立 data/etc,不碰真机)实测两向——
+  节点未进配置 → `kernelStale: 1`;写回配置后 → 字段不再出现(即 0)。
+- **复核**:`cmp-upstream-i18n.py` → 三语各 2432 上游 / 2394 main,**多 0、值不同 0**;
+  缺 38 全部是例外 C(`business*` / `bandwidthHelpCurrentBusiness`)。
+- **构建**:`vue-tsc --noEmit` 与 `npm run build` 均通过;后端本批涉及的 4 个包(`failover` / `subs` /
+  `api/subscriptions` / `cmd`)测试通过,新增 2 个单测覆盖吞吐与积压采样。
+
 ## 键集对齐(2026-11-26,v0.1.488)
 
 - **基准**:上游 `liandu2024/Open-Box` 已发 **v0.1.488**(2026-11-26T06:17Z)。把 release 包 `open-box-v0.1.488-linux-x64.tar.gz` 解出来当基准

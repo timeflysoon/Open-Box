@@ -25,9 +25,49 @@
           <ArrowTopRightOnSquareIcon class="text-base-content/50 h-4 w-4" />
         </a>
         <div class="ml-auto flex items-center gap-2">
+          <!-- 「系统提示」铃铛(上游 v0.1.499):没有告警时禁用并淡显,有告警时按最高等级着色 + 数字徽标;
+               点开是高对比度汇总弹窗。位置与上游一致:后端设置顶部工具栏靠右。 -->
+          <div
+            class="inline-flex"
+            :class="alerts.length === 0 ? 'cursor-not-allowed' : ''"
+          >
+            <button
+              type="button"
+              class="btn btn-ghost btn-circle btn-sm relative"
+              :class="
+                alerts.length > 0
+                  ? hasErrorAlert
+                    ? 'system-alert-trigger system-alert-trigger-error'
+                    : 'system-alert-trigger system-alert-trigger-warning'
+                  : 'text-base-content/30 disabled:bg-transparent disabled:text-base-content/30 cursor-not-allowed'
+              "
+              :disabled="alerts.length === 0"
+              :aria-label="alertsAriaLabel"
+              aria-haspopup="dialog"
+              @click="alertsOpen = true"
+            >
+              <BellIcon
+                class="h-5 w-5"
+                stroke-width="1.75"
+                aria-hidden="true"
+              />
+              <span
+                v-if="alerts.length > 0"
+                class="pointer-events-none absolute -top-1 -right-1 flex h-4 min-w-4 items-center justify-center rounded-full px-1 text-[10px] leading-none font-semibold shadow-sm"
+                :class="hasErrorAlert ? 'system-alert-count-error' : 'system-alert-count-warning'"
+              >{{ alerts.length > 99 ? '99+' : alerts.length }}</span>
+            </button>
+          </div>
           <FactoryResetButton />
         </div>
       </div>
+
+      <SystemAlertsDialog
+        v-model="alertsOpen"
+        :alerts="alerts"
+        :refreshing="alertsRefreshing"
+        @refresh="refreshAlerts"
+      />
 
       <!-- 平台:OpenWrt / Linux / Docker 三张卡,本机所在的那张高亮,其余灰底灰图标(与 v0.1.337 一致) -->
       <div
@@ -264,12 +304,21 @@
 </template>
 
 <script setup lang="ts">
-import type { OpenboxKernelVersion, OpenboxProfile, OpenboxServiceStatus } from '@/api/openbox'
+import type {
+  OpenboxFailoverStatus,
+  OpenboxKernelVersion,
+  OpenboxProfile,
+  OpenboxServiceStatus,
+  OpenboxSubscription,
+} from '@/api/openbox'
+import { fetchFailoverStatus, fetchSubscriptions } from '@/api/openbox'
 import CountryFlag from '@/components/common/CountryFlag.vue'
 import GithubIcon from '@/components/common/GithubIcon.vue'
 import KernelIcon from '@/components/kernel/KernelIcon.vue'
 import StatusBadge from '@/components/common/StatusBadge.vue'
 import FactoryResetButton from '@/components/kernel/FactoryResetButton.vue'
+import SystemAlertsDialog from '@/components/kernel/SystemAlertsDialog.vue'
+import { useSystemAlerts } from '@/composables/systemAlerts'
 import KernelRestartButton from '@/components/kernel/KernelRestartButton.vue'
 import OpenboxUpdateCard from '@/components/kernel/OpenboxUpdateCard.vue'
 import {
@@ -298,6 +347,58 @@ import { computed, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 
 const { t } = useI18n()
+
+// 「系统提示」铃铛:数据全部来自已有接口(服务状态 / 故障转移状态 / 订阅列表 / 更新状态),
+// 不新增后端接口(与上游同一口径)。点「刷新」时把这几个源重新拉一遍。
+const alertsOpen = ref(false)
+const alertsRefreshing = ref(false)
+const failoverStatusForAlerts = ref<OpenboxFailoverStatus | null>(null)
+const subscriptionsForAlerts = ref<OpenboxSubscription[]>([])
+const subscriptionsError = ref<string | null>(null)
+
+const loadAlertSources = async () => {
+  const [fo, subs] = await Promise.allSettled([fetchFailoverStatus(), fetchSubscriptions()])
+  if (fo.status === 'fulfilled') {
+    failoverStatusForAlerts.value = fo.value
+  }
+  if (subs.status === 'fulfilled') {
+    subscriptionsForAlerts.value = subs.value ?? []
+    subscriptionsError.value = null
+  } else {
+    subscriptionsError.value = subs.reason instanceof Error ? subs.reason.message : String(subs.reason)
+  }
+}
+
+const refreshAlerts = async () => {
+  if (alertsRefreshing.value) return
+  alertsRefreshing.value = true
+  try {
+    await Promise.all([loadAlertSources(), refreshUpdateInfo()])
+  } finally {
+    alertsRefreshing.value = false
+  }
+}
+
+onMounted(() => {
+  void loadAlertSources()
+})
+
+const { alerts, hasErrorAlert } = useSystemAlerts(() => ({
+  serviceStatus: props.status,
+  kernelVersion: props.kernelVersion,
+  failoverStatus: failoverStatusForAlerts.value,
+  membersByGroup: {},
+  subscriptions: subscriptionsForAlerts.value,
+  subscriptionsError: subscriptionsError.value,
+  updateError: null,
+  now: Date.now(),
+}))
+
+const alertsAriaLabel = computed(() =>
+  alerts.value.length > 0
+    ? t('systemAlertsCount', { count: alerts.value.length })
+    : t('systemAlertsEmpty'),
+)
 
 // 本卡片自带冲突横幅:在屏幕上时不再弹右上角的冲突提示
 useConflictBannerPresence()

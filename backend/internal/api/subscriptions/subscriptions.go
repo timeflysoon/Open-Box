@@ -18,18 +18,24 @@ const maxBody = 16 << 20 // 粘贴的节点内容可能较大
 // 与服务状态的 pendingRestart 同一个口径(main.go 用同一个 *singbox.Applied 接进来)。
 type PendingFunc func(ctx context.Context) (pending bool, reasons []string)
 
+// DeployedNodesFunc 给出「已部署进内核的节点名集合」,用来算 kernelStale。
+type DeployedNodesFunc func(ctx context.Context) (map[string]struct{}, error)
+
 // Deps 是本分组的依赖。
 type Deps struct {
 	Subs    *subs.Service
 	Pending PendingFunc // 为空 = 保存 / 刷新的返回里不带 applied
+	// DeployedNodes 返回已部署配置里的节点名集合;为空时列表接口不算 kernelStale。
+	DeployedNodes DeployedNodesFunc
 	// UpdatesWait 是 updates 长轮询最长挂多久,0 = 20 秒(面板那边 25 秒没回就掐掉重来)。
 	UpdatesWait time.Duration
 }
 
 type handlers struct {
-	s       *subs.Service
-	pending PendingFunc
-	wait    time.Duration
+	s        *subs.Service
+	pending  PendingFunc
+	deployed DeployedNodesFunc
+	wait     time.Duration
 }
 
 // applied 是保存 / 刷新之后「内核用上没有」:订阅的动作从不自动重启内核(重启会断开连接,什么时候重启由
@@ -64,7 +70,7 @@ func (h *handlers) withApplied(ctx context.Context, res *subs.SaveResult) any {
 
 // Register 把本分组的接口挂到 mux 上。字面路径(preview / login / node-share / order)比 {id} 优先。
 func Register(mux *http.ServeMux, d Deps) {
-	h := &handlers{s: d.Subs, pending: d.Pending, wait: d.UpdatesWait}
+	h := &handlers{s: d.Subs, pending: d.Pending, deployed: d.DeployedNodes, wait: d.UpdatesWait}
 	if h.wait <= 0 {
 		h.wait = 20 * time.Second
 	}
@@ -263,7 +269,34 @@ func (h *handlers) list(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusInternalServerError, "读取订阅失败: "+err.Error())
 		return
 	}
+	h.fillKernelStale(r.Context(), recs)
 	httpx.JSON(w, http.StatusOK, map[string]any{"subscriptions": recs})
+}
+
+// fillKernelStale 给每条订阅补上 KernelStale:本订阅的节点里有多少个还没进已部署的内核配置。
+// 上游 v0.1.499 的「订阅节点尚未同步到内核」提示用它。算不出来(没接依赖 / 内核没在跑 / 读不到配置)时
+// 保持 0,前端按没有处理,不误报。
+func (h *handlers) fillKernelStale(ctx context.Context, recs []subs.Record) {
+	if h.deployed == nil || len(recs) == 0 {
+		return
+	}
+	deployed, err := h.deployed(ctx)
+	if err != nil || deployed == nil {
+		return
+	}
+	names, err := h.s.NodeNamesBySubscription(ctx)
+	if err != nil {
+		return
+	}
+	for i := range recs {
+		stale := 0
+		for _, n := range names[recs[i].ID] {
+			if _, ok := deployed[n]; !ok {
+				stale++
+			}
+		}
+		recs[i].KernelStale = stale
+	}
 }
 
 func (h *handlers) create(w http.ResponseWriter, r *http.Request) {

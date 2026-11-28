@@ -420,6 +420,8 @@ export interface OpenboxSubscription {
   createdAt: number
   updatedAt: number
   usage?: OpenboxSubscriptionUsage | null
+  // v0.1.499: 本订阅有多少节点还没进已部署的内核配置(“订阅节点尚未同步到内核”提示用);没有这个字段 = 0
+  kernelStale?: number
   // 拉取订阅时用的 User-Agent;没配 = 默认
   userAgent?: string
   // 「登录」来源的订阅带账号信息
@@ -912,6 +914,8 @@ export interface OpenboxProbeStats {
   limit: number
   throughputPerSec: number | null
   demandPerSec: number | null
+  // v0.1.500: 此刻探测排队积压(毫秒);没有积压或样本过期时后端省略
+  backlogMs?: number | null
 }
 export interface OpenboxFailoverStatus {
   version: string | null

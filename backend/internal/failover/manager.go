@@ -178,6 +178,74 @@ type Manager struct {
 	order  []string
 	groups map[string]*groupRT
 	wg     sync.WaitGroup
+
+	// 探测吞吐采样(对应前端 OpenboxProbeStats.throughputPerSec / backlogMs,上游 v0.1.500 的
+	// 「探测压力过高」判据用真实完成速率而不是名额占用):只统计 probeNode 真正测完的次数,
+	// 按最近 probeWindow 内的完成数折算每秒;积压 = 此刻想测却排不上队的等待时长(取最近一次的最大值)。
+	probeMu       sync.Mutex
+	probeDone     []time.Time // 最近 probeWindow 内每个节点的完成时刻
+	probeBacklog  time.Duration
+	probeBacklogA time.Time
+}
+
+// probeWindow 是吞吐统计的滑动窗口。上游按「最近 3 分钟真实探测处理能力」统计,这里取同一个口径。
+const probeWindow = 3 * time.Minute
+
+// recordProbeDone 记一次探测完成(带时间戳,自动裁掉窗口外的旧样本)。
+func (m *Manager) recordProbeDone() {
+	t := m.now()
+	m.probeMu.Lock()
+	defer m.probeMu.Unlock()
+	m.probeDone = append(m.probeDone, t)
+	cut := t.Add(-probeWindow)
+	i := 0
+	for i < len(m.probeDone) && !m.probeDone[i].After(cut) {
+		i++
+	}
+	if i > 0 {
+		m.probeDone = append(m.probeDone[:0], m.probeDone[i:]...)
+	}
+}
+
+// recordBacklog 记一次「等名额」的时长;保留最近 1 分钟内的最大值,过期自动归零。
+func (m *Manager) recordBacklog(d time.Duration) {
+	t := m.now()
+	m.probeMu.Lock()
+	defer m.probeMu.Unlock()
+	if t.Sub(m.probeBacklogA) > time.Minute {
+		m.probeBacklog = 0
+	}
+	if d > m.probeBacklog {
+		m.probeBacklog = d
+		m.probeBacklogA = t
+	}
+}
+
+// ProbeThroughput 返回最近窗口内每秒实际完成的探测数(样本不足时返回 nil,让前端按「未知」处理)。
+func (m *Manager) ProbeThroughput() *float64 {
+	m.probeMu.Lock()
+	defer m.probeMu.Unlock()
+	if len(m.probeDone) == 0 {
+		return nil
+	}
+	first := m.probeDone[0]
+	span := m.now().Sub(first).Seconds()
+	if span < 1 {
+		span = 1
+	}
+	v := float64(len(m.probeDone)) / span
+	return &v
+}
+
+// ProbeBacklog 返回此刻的探测积压毫秒(最近 1 分钟内的最大等待)。
+func (m *Manager) ProbeBacklog() *float64 {
+	m.probeMu.Lock()
+	defer m.probeMu.Unlock()
+	if m.now().Sub(m.probeBacklogA) > time.Minute {
+		return nil
+	}
+	v := float64(m.probeBacklog / time.Millisecond)
+	return &v
 }
 
 // NewManager 创建管理器(还没有计划,SetPlan 之后才有组)。
@@ -557,13 +625,16 @@ func (m *Manager) probeLane(ctx context.Context, lp *laneProbe, nodes []string, 
 
 // probeNode 占一个并发名额测一个节点。
 func (m *Manager) probeNode(ctx context.Context, node, testURL string, timeout time.Duration) NodeResult {
+	waitStart := m.now()
 	select {
 	case m.sem <- struct{}{}:
+		m.recordBacklog(m.now().Sub(waitStart))
 		defer func() { <-m.sem }()
 	case <-ctx.Done():
 		return NodeResult{At: m.now().UnixMilli()}
 	}
 	d, err := m.k.Delay(ctx, node, testURL, timeout)
+	m.recordProbeDone()
 	r := NodeResult{At: m.now().UnixMilli()}
 	if err == nil {
 		ok, v := true, int(d/time.Millisecond)

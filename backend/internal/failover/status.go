@@ -55,13 +55,16 @@ type GroupStatus struct {
 }
 
 // ProbeStats 对应前端 OpenboxProbeStats:面板全局测速名额此刻的情况。
-// 后端没有「用户点出来的测速」和「后台测速」的分别排队,Interactive 恒为 0;吞吐没有统计,为 null。
+// Interactive 是用户点出来的测速(与后台排队分开);Background 是后台在测的节点数;
+// ThroughputPerS / BacklogMs 是最近窗口内真实完成的吞吐与此刻的排队积压,上游 v0.1.500 的
+// 「探测压力过高」判据就用这两个值(而不是名额占用率)。
 type ProbeStats struct {
 	Interactive    int      `json:"interactive"`
 	Background     int      `json:"background"` // 此刻在测的节点数
 	Limit          int      `json:"limit"`
 	ThroughputPerS *float64 `json:"throughputPerSec"`
 	DemandPerSec   *float64 `json:"demandPerSec"` // 按各组间隔,每秒要测几个(上限:每个页签的有效节点都测)
+	BacklogMs      *float64 `json:"backlogMs"`    // 此刻探测排队积压(毫秒);没有积压或样本过期时省略
 }
 
 // Runtime 是检测管理器给状态接口的数据(*Manager 满足)。
@@ -69,6 +72,12 @@ type Runtime interface {
 	Running() bool
 	Snapshot() []GroupRuntime
 	Probes() (inUse, limit int)
+}
+
+// ProbeSampler 是可选能力:管理器能给出真实吞吐与积压时由 BuildStatusWith 填进 ProbeStats。
+type ProbeSampler interface {
+	ProbeThroughput() *float64
+	ProbeBacklog() *float64
 }
 
 // Status 是 GET /api/openbox/failover/status 的响应。
@@ -121,6 +130,10 @@ func BuildStatusWith(ctx context.Context, plan Plan, kernel KernelFunc, rt Runti
 			demand += float64(nodes) / intervalOf(g.Settings).Seconds()
 		}
 		ps.DemandPerSec = &demand
+		if s, ok := rt.(ProbeSampler); ok {
+			ps.ThroughputPerS = s.ProbeThroughput()
+			ps.BacklogMs = s.ProbeBacklog()
+		}
 		out.Probes = ps
 	}
 	for _, g := range plan {
