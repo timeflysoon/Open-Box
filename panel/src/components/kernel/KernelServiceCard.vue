@@ -311,7 +311,7 @@ import type {
   OpenboxServiceStatus,
   OpenboxSubscription,
 } from '@/api/openbox'
-import { fetchFailoverStatus, fetchSubscriptions } from '@/api/openbox'
+import { fetchBandwidthStatus, fetchFailoverStatus, fetchSubscriptions } from '@/api/openbox'
 import CountryFlag from '@/components/common/CountryFlag.vue'
 import GithubIcon from '@/components/common/GithubIcon.vue'
 import KernelIcon from '@/components/kernel/KernelIcon.vue'
@@ -355,9 +355,14 @@ const alertsRefreshing = ref(false)
 const failoverStatusForAlerts = ref<OpenboxFailoverStatus | null>(null)
 const subscriptionsForAlerts = ref<OpenboxSubscription[]>([])
 const subscriptionsError = ref<string | null>(null)
+const bandwidthLastError = ref<string | null>(null)
 
 const loadAlertSources = async () => {
-  const [fo, subs] = await Promise.allSettled([fetchFailoverStatus(), fetchSubscriptions()])
+  const [fo, subs, bw] = await Promise.allSettled([
+    fetchFailoverStatus(),
+    fetchSubscriptions(),
+    fetchBandwidthStatus(),
+  ])
   if (fo.status === 'fulfilled') {
     failoverStatusForAlerts.value = fo.value
   }
@@ -366,6 +371,10 @@ const loadAlertSources = async () => {
     subscriptionsError.value = null
   } else {
     subscriptionsError.value = subs.reason instanceof Error ? subs.reason.message : String(subs.reason)
+  }
+  // 带宽测速的最近错误:数字很大说明是刚失败的,否则不清空(用户点「刷新」才会重拉)
+  if (bw.status === 'fulfilled') {
+    bandwidthLastError.value = bw.value?.lastError ?? ''
   }
 }
 
@@ -410,6 +419,7 @@ const { alerts, hasErrorAlert } = useSystemAlerts(() => ({
   groupInfo: alertGroupStats.value.info,
   subscriptions: subscriptionsForAlerts.value,
   subscriptionsError: subscriptionsError.value,
+  bandwidthLastError: bandwidthLastError.value,
   updateError: null,
   now: Date.now(),
 }))

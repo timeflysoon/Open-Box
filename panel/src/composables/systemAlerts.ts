@@ -51,6 +51,10 @@ export interface AlertInputs {
   subscriptions: OpenboxSubscription[]
   subscriptionsError?: string | null
   updateError?: string | null
+  // 带宽测速的最近错误(后端 Status.LastError);有值时在铃铛里提示
+  bandwidthLastError?: string | null
+  // 测速目标限流解除的时刻(毫秒时间戳);后端目前没有这个字段,给了才显示
+  bandwidthCooldownUntil?: number | null
   now: number
 }
 
@@ -278,7 +282,31 @@ export const buildSystemAlerts = (
     ),
   )
 
-  // 11. 检查更新失败(不影响使用,所以是警告)
+  // 11. 带宽测速失败 / 目标限流暂缓(上游 v0.1.498/499)
+  const bwErr = input.bandwidthLastError?.trim() ?? ''
+  if (bwErr) {
+    warnings.push({
+      id: 'bandwidth-error',
+      severity: 'warning',
+      title: t('systemAlertBandwidthErrorTitle'),
+      detail: bwErr,
+      suggestion: t('systemAlertBandwidthErrorSuggestion'),
+    })
+  }
+  if (typeof input.bandwidthCooldownUntil === 'number' && Number.isFinite(input.bandwidthCooldownUntil) &&
+    input.bandwidthCooldownUntil > input.now) {
+    warnings.push({
+      id: 'bandwidth-cooldown',
+      severity: 'warning',
+      title: t('systemAlertBandwidthCooldownTitle'),
+      detail: t('systemAlertBandwidthCooldownDetail', {
+        time: new Date(input.bandwidthCooldownUntil).toLocaleTimeString(),
+      }),
+      suggestion: t('systemAlertBandwidthCooldownSuggestion'),
+    })
+  }
+
+  // 12. 检查更新失败(不影响使用,所以是警告)
   const updErr = input.updateError?.trim() ?? ''
   if (updErr) {
     warnings.push({

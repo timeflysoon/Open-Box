@@ -150,6 +150,19 @@
   (带「N 节点 · 间隔」);`groupInfo` 缺省时类型回落 `urltest`、间隔留空,不报错。
 - **构建**:`vue-tsc --noEmit` 与 `npm run build` 通过。
 
+### 批次 7:系统提示的带宽告警(已完成)与容器告警(数据源缺失)
+
+- **带宽告警 5 键已接**:`systemAlertBandwidthError{Title,Suggestion}` 用后端
+  `GET /api/openbox/bandwidth` 的 `lastError`(该字段后端一直有,`bandwidth.Status.LastError`);
+  `systemAlertBandwidthCooldown{Title,Detail,Suggestion}` 用 `cooldownUntil`——**后端目前没有这个字段**,
+  前端按可选处理(`number` 才显示),接上但暂时不会触发。
+- **容器告警 5 键未接**:`systemAlertContainerRouting{Title,Suggestion}`、
+  `systemAlertContainerCaps{Title,Detail,Suggestion}`。上游读的是服务状态的 `container` 对象
+  (`routing.conflicts` / `tun` / `netAdmin` / `forwarding` / `nftables`),而 **main 后端
+  `internal/api/service` 从不返回 `container`**(全局 grep `"container"` 只在 mihomo 的 DNS 生成里出现),
+  前端 `openbox.ts` 的类型里那段是从上游抄来的、没有数据来源。**没有数据就不接线,避免造出永远空的告警。**
+- **构建**:`vue-tsc --noEmit` 与 `npm run build` 通过。
+
 ## 键集对齐(2026-11-26,v0.1.488)
 
 - **基准**:上游 `liandu2024/Open-Box` 已发 **v0.1.488**(2026-11-26T06:17Z)。把 release 包 `open-box-v0.1.488-linux-x64.tar.gz` 解出来当基准
