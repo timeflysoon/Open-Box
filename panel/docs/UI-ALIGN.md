@@ -486,3 +486,35 @@
   (带宽测速本身可能上百 MB,给足时间但不无限等)。
   验证:`vue-tsc` 与 `npm run build` 通过;**「上游引用、main 未引用」里非例外键已清零**,剩下全是例外 A
   (`comingSoon` / `activation*` / `tutorial*`)。
+
+---
+
+## 最终差异清单(2026-11-29,追平 v0.1.500 后)
+
+**说明**:上一节「第 12 批」记录的 `nodeScoreRefreshSubQueued` / `nodeScoreRefreshSubDone` + 3 分钟
+`watchScoreQueue` 是**在 v0.1.494 基准下对 dist 的误读**。本轮重查 v0.1.500 的 dist 确认:上游没有
+`nodeScoreRefreshSub*` 这两个键,也没有排队后轮询补第二条提示的逻辑(只发一次 Queued/Done,
+另有 Failed/Unavailable 两条异常分支)。这两个键与轮询已在批次 1 删除,`nodeScoreRefreshUnavailable`
+在批次 3 按上游的「延迟测完但一个节点都没进评分表」情形接回。
+
+**三语键集**:上游各 2432 / main 各 2394,**缺失 38、多出 0、值不同 0**。
+
+- **缺失(38,全部为有意例外 C,不做)**:`businessPreference`、`businessOverview*`(23 个)、
+  `businessReliabilityHalfLife`、`businessPerformanceTtl`、`businessPreferenceMinutes`、
+  `bandwidthHelpCurrentBusiness`、`businessSettingsHelp*`(7 个)。
+- **多出**:无。
+- **三语不一致**:无(三语的键集与取值经 `cmp-upstream-i18n.py` 两两核对一致)。
+
+**引用**:上游引用而 main 未引用的非例外项如下,均已在 UI-ALIGN 各批次条目中说明原因。
+
+- `routeTermKdnsRuleMatched` / `routeTermKdnsMihomoConfiguredRule` /
+  `routeTermKdnsMihomoLegacyConfigured` / `routeTermKdnsMihomoLegacyFakeIp` /
+  `routeTermKdnsMihomoUnsupportedLog`(5 个):依赖 mihomo 规则翻译层,main 后端对 mihomo 直接返回
+  `ErrKernelConfigUnsupported`,无数据来源。**这是本轮唯一的功能性缺口,见批次 5。**
+- 其余全部属于例外 A(`comingSoon`、`activation*` 14 个、`tutorial*` 4 个)。
+
+**本轮已完成的批次**:批次 1(订阅刷新提示 + 评分刷新四态)、批次 2(系统提示铃铛 + 真实吞吐统计 +
+`kernelStale`)、批次 3(出站名校验 + `nodeScoreRefreshUnavailable`)、批次 4(指定域名 DNS 四态徽标)、
+批次 6(探测压力逐组明细)。批次 5 阻塞。
+
+本次是基于 dist 反推与文档口径的**功能等价对齐**,不保证与闭源上游逐行一致。
