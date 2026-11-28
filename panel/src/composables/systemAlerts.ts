@@ -225,7 +225,10 @@ export const buildSystemAlerts = (
         const info = input.groupInfo?.[name]
         const type = info?.type || 'urltest'
         const interval = info?.interval || ''
-        return t('systemAlertProbeGroupItem', { name, type, count: n, interval })
+        // 上游按「有没有节点数」分两种措辞:知道个数就用带 {count} 的,否则用不带的那条
+        return n > 0
+          ? t('systemAlertProbeGroupItem', { name, type, count: n, interval })
+          : t('systemAlertProbeGroupItemNoCount', { name, type, interval })
       })
       if (entries.length > PROBE_ITEM_LIMIT) {
         items.push(t('systemAlertMoreGroups', { count: entries.length - PROBE_ITEM_LIMIT }))
