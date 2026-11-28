@@ -596,7 +596,8 @@ start_service() {
 	fi
 	procd_set_param stdout 1
 	procd_set_param stderr 1
-	procd_set_param respawn 3600 5 5
+	# 连续稳定运行 120s 重置崩溃计数,保留启动即崩的熔断保护,避免 1 小时窗口下偶发崩溃累计 6 次即永久停死(#1007)
+	procd_set_param respawn 120 5 5
 	procd_set_param term_timeout "$OPENBOX_TERM_TIMEOUT"
 	procd_set_param limits core="unlimited" nofile="65535 65535"
 	procd_close_instance
@@ -690,7 +691,9 @@ openbox_cleanup() {
 		/etc/init.d/firewall reload >/dev/null 2>&1
 	fi
 
-	# 内核停了,dnsmasq 已回到自己的上游,撤接管/标记,只保留旧 TUN DNS 不能外发的保护
+	# 内核停了,dnsmasq 已回到自己的上游:先清已退出内核崩溃/强杀残留的 auto_redirect 表(由 ! pgrep 保护,不误伤其他代理实例),
+	# 再撤接管/标记,只保留旧 TUN DNS 不能外发的保护
+	openbox_clean_stale_nft
 	openbox_clear_nft
 	return 0
 }

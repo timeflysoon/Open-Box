@@ -263,10 +263,11 @@ pre_start() {
 	return 0
 }
 
-# 停止后撤标记路由和接管,只保留旧 TUN DNS 出站保护,关回转发。内核自己的 inet sing-box 表
-# 由它正常退出时删,被强杀留下的下次 pre-start 清
+# 停止后撤标记路由,清掉已退出内核崩溃/强杀残留的 inet sing-box / inet mihomo 表(由 ! pgrep -x 保护,不误伤其他实例),
+# 再撤接管/标记(只保留旧 TUN DNS 出站保护),关回转发
 post_stop() {
 	openbox_clear_mark_rule
+	openbox_clean_stale_nft
 	openbox_clear_nft
 	openbox_restore_forward
 	return 0

@@ -171,6 +171,18 @@ M0 完成;M1–M5 代码和单元测试基本完成,标 [~] 的待真机或云�
 - **真机项本轮无法执行(环境受限,不是没做)**:本机没有可达的路由器 / VPS,也没有 Docker,`wsl.exe` 被本机安全策略禁用,起不了 Linux 环境;因此 STATUS 里所有「需真机」条目(前端联调、双内核两个方向的切换与失败回滚、预检顺序与 NDJSON、DNS 接管与 dnsmasq 日志、时区、诊断包、`update` 真升级等)都还是 [~]。需要的最小条件:一台能 SSH / 浏览器访问 3036 端口的 OpenWrt 或 Debian 路由器(带 `/dev/net/tun`),或一台能跑 Debian 容器的 Linux 机器。
 - 端到端冒烟(本机 Windows,真实 core 子进程 + 真实后端二进制,`-core` 指向自己编的 `openbox-core`):`/api/auth/setup` → `profile` / `defaults` / `groups` / `policies/entries` / `clients` / `client-app/info` / `deploy/state` / `update/status` / `diagnostics` / `latency-history/version` 全部按契约回 200;`GET /config/preview` 走真实 core 出整份配置;改 `dns.fakeIpRange=198.20.0.0/16` 后预览里 `dns-fakeip` 的 `inet4_range` 跟着变;`dns.domainUpstreams` 加一条后预览出现 `dns-du-1` 与对应 `domain_suffix` 规则;`bandwidth.startHour` 收 23、拒 24;`mihomoTlsSniffPorts` 非法值 400;`kernel/switch/preflight?kernel=mihomo` 回固定 8 项且失败后逐项 `blocked`,NDJSON 逐行到达;`profile/target-routing` 的 GET/POST/DELETE 闭环可用;`POST /deploy` 在 Windows 上按预期拒绝(「没有识别到受支持的服务管理器」)而不是猜。Windows 上 `/api/openbox/system/resources` 回 503(读不到 `/proc/stat`)属预期。
 
+### v0.1.500 增量对齐(2026-11-29)
+
+- [x] **内核服务脚本同步上游 v0.1.495**(`#1007` 崩溃熔断):`openwrt/initd/openbox` 的
+  `procd_set_param respawn 3600 5 5` → `120 5 5`(连续稳定 120 秒即重置崩溃计数,避免 1 小时窗口内
+  偶发崩溃累计 6 次就永久停死),`openbox_cleanup` 里补调 `openbox_clean_stale_nft`;
+  `debian/systemd/openbox.service` 的 `StartLimitIntervalSec` 同步 3600 → 120;
+  `debian/bin/openbox-ctl` 的 `post_stop` 补调 `openbox_clean_stale_nft`。
+  三个文件改完与 `v0.1.500` 逐字节一致(`diff` 无输出),`sh -n` 语法检查通过。
+- [x] **Docker 部署脚本同步上游 v0.1.499/500**:`docker/install.sh` 支持 `OPENBOX_ADOPTED_SOURCE`
+  (引导阶段命中的镜像继续沿用,`#1021`);`docker/README.md` 安装命令改为单行
+  `curl … | sudo sh -s --`,并给出镜像拉取写法。与 `v0.1.500` 逐字节一致。
+
 ## 全局记录(跨区事项:开工 tag、上游版本、陌生提交对账、工作流恢复、停止条件)
 
 - 2026-11-29 全局(**增量对齐上游 v0.1.495~v0.1.500 开工**):

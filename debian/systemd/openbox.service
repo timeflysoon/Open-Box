@@ -1,11 +1,11 @@
-# Open-Box sing-box 内核(Debian / Ubuntu)。对应 OpenWrt 的 /etc/init.d/openbox:procd 的 respawn 3600 5 5 换成
-# Restart=on-failure + 启动限流(一小时内最多拉 5 次);起内核前后的系统层动作在 debian/bin/openbox-ctl 里
+# Open-Box sing-box 内核(Debian / Ubuntu)。对应 OpenWrt 的 /etc/init.d/openbox:procd 的 respawn 120 5 5 换成
+# Restart=on-failure + 启动限流(120 秒内最多拉 5 次);起内核前后的系统层动作在 debian/bin/openbox-ctl 里
 [Unit]
 Description=Open-Box router core
 Documentation=https://github.com/timeflysoon/Open-Box
 After=network-online.target openbox-panel.service
 Wants=network-online.target
-StartLimitIntervalSec=3600
+StartLimitIntervalSec=120
 StartLimitBurst=5
 
 [Service]
