@@ -1,6 +1,18 @@
 // 文案对齐上游 v0.1.413(中 / 繁 / 英),并入原先拆在 dns-filter / dns-page / client-app-page 等文件里的补充文案。
 // 键名与键值和上游 panel/dist 逐键一致,不另设 main 自有键。
 const en = {
+  outboundNameInvalid: 'Name cannot be ".", "..", or contain "/".',
+  refreshSubscription: 'Refresh subscription',
+  dnsDomainUpstreamSavedRestart: 'Domain-specific DNS saved. Restart the kernel to apply.',
+  dnsDomainUpstreamBadgePendingRestart: 'Restart required',
+  dnsDomainUpstreamBadgeStopped: 'Stopped',
+  dnsDomainUpstreamBadgeNoRules: 'Enabled (no rules)',
+  dnsDomainUpstreamBadgeEnabled: 'Enabled',
+  routeTermKdnsRuleMatched: 'Kernel DNS rule matched: {cond}',
+  routeTermKdnsMihomoUnsupportedLog: 'mihomo did not emit a DNS trace entry for this query (the running mihomo binary may not support DNS tracing yet, or an upstream cache answered first)',
+  routeTermKdnsMihomoLegacyConfigured: 'Deployed mihomo config routes this to: {target}',
+  routeTermKdnsMihomoLegacyFakeIp: 'Probe received FakeIP placeholder {ip} (answered by the kernel FakeIP pool)',
+  routeTermKdnsMihomoConfiguredRule: 'Deployed mihomo DNS rule matched: {cond}',
   // ===== 上游 v0.1.413 文案(取自上游 panel/dist,逐键与上游一致)=====
   cfTitle: 'Content filtering',
   cfDescription:
@@ -158,8 +170,6 @@ const en = {
   nodeScoreRefreshQueued: 'Updated latency for {name}; queued bandwidth test to refresh score',
   nodeScoreRefreshDone: 'Updated score for {name}',
   nodeScoreRefreshUnavailable: 'Latency test failed for {name}; score refreshed',
-  nodeScoreRefreshSubQueued: 'Updated latency for {name}; queued {queued} nodes for bandwidth test',
-  nodeScoreRefreshSubDone: 'Refreshed scores for {name}',
   nodeScoreRefreshFailed: 'Failed to refresh score: {message}',
   latencyLowShort: 'Low',
   latencyModerateShort: 'Moderate',
@@ -579,7 +589,6 @@ const en = {
   qualityGrade_fair: 'Fair',
   qualityGrade_poor: 'Low',
   qualityState_healthy: 'Available',
-  bandwidthManualTest: 'Test download bandwidth',
   bandwidthManualQueued: 'New bandwidth checks queued: {queued}; already queued or testing: {joined}.',
   bandwidthManualFailed: 'Bandwidth check failed: {message}',
   bandwidthManualComplete: '{name}: {value} Mbps',
@@ -1029,8 +1038,8 @@ const en = {
   groupEdit: 'Edit group',
   groupNameLabel: 'Group name',
   groupTypeLabel: 'Group rule',
-  groupType_urltest: 'Auto by latency (url-test)',
-  groupType_selector: 'Manual (select)',
+  groupType_urltest: 'URL-Test',
+  groupType_selector: 'Selector',
   groupInterval: 'Test interval',
   groupTolerance: 'Latency tolerance',
   groupUrltestHint:
@@ -1085,9 +1094,9 @@ const en = {
   groupInvert: 'Invert',
   groupSelectNone: 'Clear',
   groupUnitMinute: 'min',
-  groupType_failover: 'Failover',
+  groupType_failover: 'Fallback',
   groupType_failover_short: 'Fallback',
-  groupType_loadbalance: 'Load balance',
+  groupType_loadbalance: 'LoadBalance',
   groupType_selector_short: 'Selector',
   groupType_urltest_short: 'URL-Test',
   groupType_loadbalance_short: 'LoadBalance',
@@ -2632,7 +2641,7 @@ const en = {
   bandwidthSettingsHelpCap:
     'The maximum amount of data one test may download. A test can end before reaching the limit.',
   bandwidthEndpoint: 'Test endpoint',
-  bandwidthEndpointCloudflare: 'Cloudflare (default, auto-downgrades size)',
+  bandwidthEndpointCloudflare: 'Cloudflare',
   bandwidthEndpointApple: 'Apple CDN',
   bandwidthEndpointCachefly: 'CacheFly CDN',
   bandwidthEndpointCustom: 'Custom',

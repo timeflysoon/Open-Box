@@ -32,6 +32,33 @@
 
 **状态**:`待做` = 还没比过;`有差异待做` = 比过、发现差异还没改;`已对齐` = 比过、一致或差异已修;`有意例外` = 按 A/B/C 故意不同。
 
+## 键集对齐(2026-11-29,v0.1.500 追平中)
+
+本轮从 v0.1.494 基线追到 v0.1.500。480 与 492 的对照记录见正文末尾「早期基线」。
+
+### 批次 1:订阅卡片刷新提示 + 评分刷新四态(已对齐)
+
+- **上游 v0.1.498 变更**:订阅卡片刷新按钮提示由 `refresh` 改为 `refreshSubscription`(「刷新订阅」),
+  并移除卡片上的带宽测试按钮。
+- **上游 v0.1.500 口径**:评分刷新只发一次提示——排了带宽用 `nodeScoreRefreshQueued`(info),未排用
+  `nodeScoreRefreshDone`(success);失败 `nodeScoreRefreshFailed`、拿不到 `nodeScoreRefreshUnavailable`。
+  **没有** Sub 前缀的键,也**没有**「排队后轮询队列再补一条完成提示」的二次提示。
+- **main 侧改动**:
+  - `ProxiesCtrl.tsx`:删掉自造的 `nodeScoreRefreshSubQueued` / `nodeScoreRefreshSubDone` 两个键与
+    `watchScoreQueue`(3 分钟轮询补提示),改为按上游单次提示;移除随之不再使用的 `fetchBandwidthStatus` 导入。
+  - `SubscriptionCard.vue`:刷新按钮改用 `refreshSubscription`;删除带宽测试按钮及 `useBandwidth` /
+    `testSubscriptionBandwidth` / `ChartBarIcon` 三处引用。
+  - 三语删除 `nodeScoreRefreshSubQueued` / `nodeScoreRefreshSubDone` / `bandwidthManualTest`。
+- **三语文案按上游逐字修正**(双语括号统一单语,对应 v0.1.495 release note):
+  `groupType_urltest` / `groupType_selector` / `groupType_loadbalance` / `groupType_failover`、
+  `nodeRiskProxy`(zh/zh-tw 去掉「(Proxy)」)、`bandwidthEndpointCloudflare`。
+- **新增 12 键三语**:`refreshSubscription`、`outboundNameInvalid`,以及 v0.1.496「指定域名 DNS」的
+  `dnsDomainUpstreamSavedRestart` / `dnsDomainUpstreamBadgePendingRestart` / `...BadgeStopped` /
+  `...BadgeNoRules` / `...BadgeEnabled` 与 mihomo 路由诊断的 `routeTermKdns*` 5 键。
+- **复核**:`cmp-upstream-i18n.py` → 三语各 2432 上游 / 2340 main,**多 0、值不同 0**;
+  缺 92 = 例外 C 38 + 系统提示铃铛 `systemAlert*` 54(下一批)。
+- **构建**:`npm run build` 通过。
+
 ## 键集对齐(2026-11-26,v0.1.488)
 
 - **基准**:上游 `liandu2024/Open-Box` 已发 **v0.1.488**(2026-11-26T06:17Z)。把 release 包 `open-box-v0.1.488-linux-x64.tar.gz` 解出来当基准

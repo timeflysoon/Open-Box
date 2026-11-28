@@ -4,7 +4,7 @@ import { PROXY_SORT_TYPE, PROXY_TAB_TYPE } from '@/constant'
 import { getMinCardWidth, isMiddleScreen } from '@/helper/utils'
 import { showNotification } from '@/helper/notification'
 import { loadNodeScores } from '@/store/nodeScore'
-import { fetchBandwidthStatus, queueNodeBandwidth } from '@/api/openbox'
+import { queueNodeBandwidth } from '@/api/openbox'
 import {
   openboxSubscriptions,
   refreshAllOpenboxSubscriptions,
@@ -103,13 +103,11 @@ export default defineComponent({
           .filter((n, i, arr) => n && arr.indexOf(n) === i)
 
         let queued = 0
-        let singleQueuedName = ''
         for (const n of names) {
           try {
             const r = await queueNodeBandwidth(n)
             if ((r.queued ?? 0) > 0) {
               queued += 1
-              singleQueuedName = n
             }
           } catch {
             // 单个节点排队失败不影响整体,继续排下一个
@@ -117,18 +115,10 @@ export default defineComponent({
         }
 
         await loadNodeScores(true)
+        // 上游 v0.1.500 的口径:排了带宽就提示「已排队、分数稍后更新」(info),没排就是「已刷新」(success)。
+        // 只一次提示,不再额外轮询队列补第二条——上游没有这种二次提示。
         if (queued > 0) {
-          // 有排队:先告诉用户「延迟已刷新、带宽在排队」,分数稍后自己会更新;
-          // 然后把队列跟到底,排完了再补一条「已完成」(上游的 SubDone),
-          // 一直没动静就在超时后说「暂时拿不到评分」(上游的 Unavailable)。
-          // 只排了一个节点时用单节点口径的说法(上游 nodeScoreRefreshQueued),
-          // 多个节点才用带 {queued} 的批量口径
-          showNotification(
-            queued === 1
-              ? { content: 'nodeScoreRefreshQueued', params: { name: singleQueuedName }, type: 'alert-success' }
-              : { content: 'nodeScoreRefreshSubQueued', params: { name: all, queued: String(queued) }, type: 'alert-success' },
-          )
-          void watchScoreQueue(all)
+          showNotification({ content: 'nodeScoreRefreshQueued', params: { name: all }, type: 'alert-info' })
         } else {
           showNotification({ content: 'nodeScoreRefreshDone', params: { name: all }, type: 'alert-success' })
         }
@@ -141,33 +131,6 @@ export default defineComponent({
       } finally {
         isScoreRefreshing.value = false
       }
-    }
-
-    // 排队之后盯着队列:带宽测完就补一条「已刷新评分」,超时没进展就说「暂时拿不到」。
-    // 与上游 nodeScoreRefreshSubDone / nodeScoreRefreshUnavailable 两条提示对应。
-    const watchScoreQueue = async (label: string) => {
-      const deadline = Date.now() + 3 * 60_000 // 最多等 3 分钟(带宽测速本身可能上百 MB)
-      let sawPending = false
-      while (Date.now() < deadline) {
-        await new Promise((r) => window.setTimeout(r, 5000))
-        try {
-          const st = await fetchBandwidthStatus()
-          const pendingCount = Object.values(st.pendingBySubscription ?? {}).filter(Boolean).length
-          const anyPending = pendingCount > 0 || st.running === true
-          if (anyPending) {
-            sawPending = true
-            continue
-          }
-          // 队列空了:重拉一次评分表让标签跟着更新,再提示
-          await loadNodeScores(true)
-          showNotification({ content: 'nodeScoreRefreshSubDone', params: { name: label }, type: 'alert-success' })
-          return
-        } catch {
-          // 单次查询失败不算超时,继续等
-        }
-      }
-      // 超时:sawPending 为真说明还在测(给「稍后再看」的说法),否则就是没拿到结果
-      showNotification({ content: 'nodeScoreRefreshUnavailable', params: { name: label }, type: 'alert-warning', timeout: 8000 })
     }
 
     const handlerClickLatencyTestAll = async () => {
