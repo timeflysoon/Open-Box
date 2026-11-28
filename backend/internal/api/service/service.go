@@ -53,6 +53,9 @@ type Deps struct {
 	Mihomo      string // Mihomo 可执行文件;空 = 不提供 Mihomo(mihomoAvailable 恒为 false)
 	KernelFile  string // 路由器内核选择文件(<ConfigDir>/router-kernel);空 = 一直是 sing-box
 	Arch        string // 空 = runtime.GOARCH
+	// Container 返回容器自检结果;为空 = 不探测(服务状态里不出现 container)。
+	// 只在 Docker 里跑时由 main.go 接上 system.ProbeContainer。
+	Container func(ctx context.Context) *system.ContainerCheck
 }
 
 // Register 把接口挂到 mux 上。
@@ -114,6 +117,9 @@ type statusResponse struct {
 	// 配置改了、内核还没用上的部分:内核在运行、且和上次成功部署时的输入不一样才有。
 	// 要部署一次(POST /api/openbox/deploy)才会清掉;单纯的重启只是让内核重读磁盘上的旧配置,不会。
 	PendingRestart pending `json:"pendingRestart"`
+	// 在 Docker 容器里跑时才有:容器自检结果(Docker 卡片与「系统提示」的容器告警都用它)。
+	// 不在容器里就是不出现这个键,前端按没有处理。
+	Container *system.ContainerCheck `json:"container,omitempty"`
 }
 
 type pending struct {
@@ -162,6 +168,10 @@ func (d Deps) status(w http.ResponseWriter, r *http.Request) {
 	// 后端自己的开机自启:查不到就不带这个字段
 	if p, err := d.Services.Status(r.Context(), d.PanelName); err == nil {
 		resp.Panel.Autostart = p.Autostart
+	}
+	// 容器自检:只在容器里跑时才有(不在容器里 ProbeContainer 返回 nil,这个键就不出现)
+	if d.Container != nil {
+		resp.Container = d.Container(r.Context())
 	}
 	httpx.JSON(w, http.StatusOK, resp)
 }

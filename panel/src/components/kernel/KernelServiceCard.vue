@@ -420,6 +420,7 @@ const { alerts, hasErrorAlert } = useSystemAlerts(() => ({
   subscriptions: subscriptionsForAlerts.value,
   subscriptionsError: subscriptionsError.value,
   bandwidthLastError: bandwidthLastError.value,
+  container: props.status?.container ?? null,
   updateError: null,
   now: Date.now(),
 }))

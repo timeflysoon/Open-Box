@@ -55,6 +55,14 @@ export interface AlertInputs {
   bandwidthLastError?: string | null
   // 测速目标限流解除的时刻(毫秒时间戳);后端目前没有这个字段,给了才显示
   bandwidthCooldownUntil?: number | null
+  // 容器自检结果(服务状态的 container)。只在 Docker 里跑时有;为空则不判容器告警。
+  container?: {
+    tun?: boolean
+    netAdmin?: boolean
+    forwarding?: boolean
+    nftables?: boolean
+    routing?: { checked: boolean; conflicts: { priority: number | string; table: number | string }[] } | null
+  } | null
   now: number
 }
 
@@ -309,7 +317,39 @@ export const buildSystemAlerts = (
     })
   }
 
-  // 12. 检查更新失败(不影响使用,所以是警告)
+  // 12. 容器自检(上游 v0.1.499):只在容器里跑、且服务端带回了 container 对象时才判。
+  //     ① 策略路由里有人提前查主表,容器的 tun 截不到流量;
+  //     ② 运行条件缺失(tun / NET_ADMIN / 转发 / nft),内核在这个容器里跑不完整。
+  const ctr = input.container
+  if (ctr) {
+    const conflicts = ctr.routing?.conflicts ?? []
+    if (conflicts.length > 0) {
+      const rules = conflicts.map((r) => `${r.priority}: lookup ${r.table}`).join(', ')
+      warnings.push({
+        id: 'container-routing-conflict',
+        severity: 'warning',
+        title: t('systemAlertContainerRoutingTitle'),
+        detail: t('dockerRoutingConflict', { rules }),
+        suggestion: t('systemAlertContainerRoutingSuggestion'),
+      })
+    }
+    const missing: string[] = []
+    if (!ctr.tun) missing.push(t('dockerTun'))
+    if (!ctr.netAdmin) missing.push(t('dockerNetAdmin'))
+    if (!ctr.forwarding) missing.push(t('dockerForwarding'))
+    if (!ctr.nftables) missing.push(t('dockerNftables'))
+    if (missing.length > 0) {
+      warnings.push({
+        id: 'container-capabilities',
+        severity: 'warning',
+        title: t('systemAlertContainerCapsTitle'),
+        detail: t('systemAlertContainerCapsDetail', { items: missing.join(t('listSeparator')) }),
+        suggestion: t('systemAlertContainerCapsSuggestion'),
+      })
+    }
+  }
+
+  // 13. 检查更新失败(不影响使用,所以是警告)
   const updErr = input.updateError?.trim() ?? ''
   if (updErr) {
     warnings.push({

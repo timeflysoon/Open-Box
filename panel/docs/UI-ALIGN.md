@@ -156,11 +156,21 @@
   `GET /api/openbox/bandwidth` 的 `lastError`(该字段后端一直有,`bandwidth.Status.LastError`);
   `systemAlertBandwidthCooldown{Title,Detail,Suggestion}` 用 `cooldownUntil`——**后端目前没有这个字段**,
   前端按可选处理(`number` 才显示),接上但暂时不会触发。
-- **容器告警 5 键未接**:`systemAlertContainerRouting{Title,Suggestion}`、
-  `systemAlertContainerCaps{Title,Detail,Suggestion}`。上游读的是服务状态的 `container` 对象
-  (`routing.conflicts` / `tun` / `netAdmin` / `forwarding` / `nftables`),而 **main 后端
-  `internal/api/service` 从不返回 `container`**(全局 grep `"container"` 只在 mihomo 的 DNS 生成里出现),
-  前端 `openbox.ts` 的类型里那段是从上游抄来的、没有数据来源。**没有数据就不接线,避免造出永远空的告警。**
+- **容器告警 5 键已接(补齐了后端数据源)**:`systemAlertContainerRouting{Title,Suggestion}` 与
+  `systemAlertContainerCaps{Title,Detail,Suggestion}`。原先判「数据源缺失」是错的——正确做法与
+  `kernelStale`、`throughputPerSec` 一致:**先补后端,再接前端**。
+  - 后端新增 `backend/internal/system/container.go`:
+    - `InContainer()`:`/.dockerenv` 或 `/proc/1/cgroup` 里的 docker / kubepods / containerd / lxc
+    - `ContainerCaps()`:`/dev/net/tun` 是否存在、CapEff 第 12 位(CAP_NET_ADMIN)、
+      `ip_forward` 是否为 1、各网卡 `send_redirects` 是否全关
+    - `ProbeContainer()`:`nft --version` 判断 nftables;`ip rule show` 找出优先级小于 32765 的
+      `lookup main` 规则作为策略路由冲突(判断不了时 `checked=false`,不误报)
+    - 读不到的项一律 false,宁可提示「可能缺」也不假装具备
+  - `internal/api/service` 的 `statusResponse` 加 `Container *system.ContainerCheck`
+    (`omitempty`),`Deps.Container` 为空或不在容器里时不出现该键
+  - 顺带修好了一处**既有的断裂**:`ContainerCard.vue` 早就在读 `container.tun` / `netAdmin` /
+    `forwarding` / `nftables` / `routing.conflicts`,但后端从不返回——Docker 卡片那几项一直是空的
+  - 新增 3 组单测(策略路由冲突识别、命令失败不误报、优先级解析)
 - **构建**:`vue-tsc --noEmit` 与 `npm run build` 通过。
 
 ## 键集对齐(2026-11-26,v0.1.488)

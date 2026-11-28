@@ -382,6 +382,10 @@ func newApp(cfg system.Config, log *slog.Logger) (*server.Server, func(ctx conte
 		Kind:        initKind,
 		CoreService: cfg.CoreService, PanelName: cfg.PanelService, SingBox: cfg.SingBox,
 		Mihomo: cfg.Mihomo, KernelFile: cfg.RouterKernelFile(),
+		// 容器自检:只在 Docker 里跑时返回,不在容器里返回 nil(状态里就不出现 container)
+		Container: func(ctx context.Context) *system.ContainerCheck {
+			return system.ProbeContainer(ctx, system.ExecRunnerCap(64), firstLANIP(), "")
+		},
 	})
 	// 订阅保存 / 刷新后的 applied:与服务状态的 pendingRestart 同一个判断(内核在跑才算,判断不了当作没有)
 	pendingRestart := func(ctx context.Context) (bool, []string) {
