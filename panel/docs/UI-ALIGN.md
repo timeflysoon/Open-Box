@@ -113,6 +113,33 @@
   `persist` 的提示分叉 + 引入 `serviceStatus`)。
 - **构建**:`vue-tsc --noEmit` 与 `npm run build` 通过;5 个键引用数均从 0 变 1。
 
+### 批次 5:mihomo 路由诊断的 5 个键(阻塞,未做)
+
+- **涉及键**:`routeTermKdnsRuleMatched`、`routeTermKdnsMihomoConfiguredRule`、
+  `routeTermKdnsMihomoLegacyConfigured`、`routeTermKdnsMihomoLegacyFakeIp`、
+  `routeTermKdnsMihomoUnsupportedLog`(上游 v0.1.496 新增)。
+- **为什么没做**:这 5 个键全部依赖上游在模拟终端的 DNS 决策里新增的 `stage: "unsupported-log"` 分支,
+  该分支要读 `configured`(已部署 mihomo 的 DNS 规则命中项)、`ruleKey`、`probeFakeIp` 三个字段。
+  而 main 后端 `routetest.ReadDeployedConfig` 在内核是 mihomo 时**直接返回 `ErrKernelConfigUnsupported`**
+  (设计如此,见 `backend/internal/routetest/deployed.go` 第 20 行),**没有任何 mihomo 规则翻译层**,
+  因此这三个字段无从产生。`probeFakeIp` / `unsupported-log` 在 main 前后端均无出现。
+- **结论**:不是前端少接几个键,而是**整条「mihomo 规则 → 推算用形状」的翻译层没做**。仅在模板里
+  引用这些键会造出没有数据来源的界面,属于假的「已对齐」,故本轮不做。
+- **要做需要**:先补 `internal/routetest` 的 mihomo 规则翻译(把 mihomo 的
+  `DOMAIN-SUFFIX,xxx,直连` 字符串规则与 `rule-providers` 映射到 sing-box `route.rule_set` 登记),
+  再由后端在 DNS 决策里输出 `configured` / `ruleKey` / `probeFakeIp`,最后前端接这 5 个键。
+  这是一整条功能线,不是一批能完成的事。
+
+### 批次 6:探测压力告警的逐组明细(补齐数据源)
+
+- **问题**:批次 2 里 `SystemAlertsDialog` 已能显示逐项明细,但传入的 `membersByGroup` 是空对象,
+  所以「探测压力过高」这条告警只有主体(需求/完成吞吐),列不出是哪几个组在压。
+- **修法**:`KernelServiceCard` 新增 `alertGroupStats`,从故障转移状态的各组分页签汇总:
+  有效成员数按组名累加(`lanes[].valid.length` 之和),类型取第一个页签的 `mode`,间隔取组 `settings.interval`。
+  `systemAlerts.ts` 的 `AlertInputs` 增加可选 `groupInfo`,明细行改用 `systemAlertProbeGroupItem`
+  (带「N 节点 · 间隔」);`groupInfo` 缺省时类型回落 `urltest`、间隔留空,不报错。
+- **构建**:`vue-tsc --noEmit` 与 `npm run build` 通过。
+
 ## 键集对齐(2026-11-26,v0.1.488)
 
 - **基准**:上游 `liandu2024/Open-Box` 已发 **v0.1.488**(2026-11-26T06:17Z)。把 release 包 `open-box-v0.1.488-linux-x64.tar.gz` 解出来当基准

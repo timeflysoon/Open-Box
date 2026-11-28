@@ -46,6 +46,8 @@ export interface AlertInputs {
   failoverStatus: OpenboxFailoverStatus | null
   // 每个分组/页签的有效成员数(用于探测压力明细里的「N 节点」)
   membersByGroup: Record<string, number>
+  // 每个分组的检测间隔与页签类型(探测压力明细里显示「urltest · 间隔 300s」),缺省时按空串显示
+  groupInfo?: Record<string, { type?: string; interval?: string }>
   subscriptions: OpenboxSubscription[]
   subscriptionsError?: string | null
   updateError?: string | null
@@ -215,9 +217,12 @@ export const buildSystemAlerts = (
     const over = probeOverload(fo?.probes)
     if (over) {
       const entries = Object.entries(input.membersByGroup).filter(([, n]) => n > 0)
-      const items = entries.slice(0, PROBE_ITEM_LIMIT).map(([name, n]) =>
-        t('systemAlertProbeGroupItemNoCount', { name, type: 'urltest', interval: '' }),
-      )
+      const items = entries.slice(0, PROBE_ITEM_LIMIT).map(([name, n]) => {
+        const info = input.groupInfo?.[name]
+        const type = info?.type || 'urltest'
+        const interval = info?.interval || ''
+        return t('systemAlertProbeGroupItem', { name, type, count: n, interval })
+      })
       if (entries.length > PROBE_ITEM_LIMIT) {
         items.push(t('systemAlertMoreGroups', { count: entries.length - PROBE_ITEM_LIMIT }))
       }

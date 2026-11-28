@@ -383,11 +383,31 @@ onMounted(() => {
   void loadAlertSources()
 })
 
+// 探测压力明细要按组列出「组名(类型 · N 节点 · 间隔)」:从故障转移状态的各组页签里
+// 汇总出每个组的有效成员数与检测参数(与上游同口径:按组名去重,取该组所有页签的有效节点数之和)。
+const alertGroupStats = computed(() => {
+  const members: Record<string, number> = {}
+  const info: Record<string, { type?: string; interval?: string }> = {}
+  const fo = failoverStatusForAlerts.value
+  for (const g of fo?.groups ?? []) {
+    const name = g.tag || g.id
+    if (!name) continue
+    const total = (g.lanes ?? []).reduce((n, l) => n + (l.valid?.length ?? 0), 0)
+    members[name] = (members[name] ?? 0) + total
+    if (!info[name]) {
+      // 页签类型取第一个页签的模式(urltest / selector),间隔取组的检测间隔
+      info[name] = { type: g.lanes?.[0]?.mode || 'urltest', interval: g.settings?.interval || '' }
+    }
+  }
+  return { members, info }
+})
+
 const { alerts, hasErrorAlert } = useSystemAlerts(() => ({
   serviceStatus: props.status,
   kernelVersion: props.kernelVersion,
   failoverStatus: failoverStatusForAlerts.value,
-  membersByGroup: {},
+  membersByGroup: alertGroupStats.value.members,
+  groupInfo: alertGroupStats.value.info,
   subscriptions: subscriptionsForAlerts.value,
   subscriptionsError: subscriptionsError.value,
   updateError: null,
